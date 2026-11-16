@@ -818,22 +818,6 @@ def _run_doctor() -> None:
             "Install from https://docs.astral.sh/uv/",
         )
 
-    # libmagic is a system library python-magic only binds to; a fresh install
-    # on macOS/Linux can be missing it and every extraction dies on the first
-    # file sniff (issue #64). Name it here, where users come to find it.
-    from bibr.input.validate import libmagic_unavailable_reason
-
-    libmagic_problem = libmagic_unavailable_reason()
-    if libmagic_problem is None:
-        ok("libmagic available")
-    else:
-        # bibr falls back to its own signature check for the formats it reads
-        # (PDF, DOCX, EPUB, XML, HTML), so this no longer stops a run.
-        warn(
-            "libmagic not found; bibr checks file types itself (PDF, DOCX, EPUB, XML, HTML)",
-            hint=libmagic_problem,
-        )
-
     # --- Configuration -------------------------------------------------------
     ui.section(console, "Configuration")
 

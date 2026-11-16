@@ -320,7 +320,6 @@ dependencies = [
     { name = "httpx", extra = ["http2"] },
     { name = "huggingface-hub" },
     { name = "instructor" },
-    { name = "litserve" },
     { name = "onnxruntime" },
     { name = "pandas" },
     { name = "pillow" },
@@ -330,15 +329,11 @@ dependencies = [
     { name = "pypdfium2" },
     { name = "python-docx" },
     { name = "python-dotenv" },
-    { name = "python-magic", marker = "sys_platform != 'win32'" },
-    { name = "python-magic-bin", marker = "sys_platform == 'win32'" },
-    { name = "python-multipart" },
     { name = "questionary" },
     { name = "rapidfuzz" },
     { name = "rich" },
     { name = "tenacity" },
     { name = "tokenizers" },
-    { name = "uvicorn", extra = ["standard"] },
     { name = "wordfreq" },
     { name = "wtpsplit-lite" },
 ]
@@ -346,17 +341,21 @@ dependencies = [
 [package.optional-dependencies]
 all = [
     { name = "anthropic" },
+    { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' and sys_platform == 'linux'" },
+    { name = "fastapi", version = "0.143.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or sys_platform != 'linux'" },
     { name = "google-genai" },
     { name = "gradio" },
     { name = "jsonref" },
     { name = "mcp" },
     { name = "opencv-python-headless" },
+    { name = "python-multipart" },
     { name = "pytorch-crf" },
     { name = "redis" },
     { name = "sentencepiece" },
     { name = "torch" },
     { name = "torchvision" },
     { name = "transformers" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 anthropic = [
     { name = "anthropic" },
@@ -396,6 +395,12 @@ ml = [
 ]
 nuextract = [
     { name = "numind" },
+]
+serve = [
+    { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' and sys_platform == 'linux'" },
+    { name = "fastapi", version = "0.143.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or sys_platform != 'linux'" },
+    { name = "python-multipart" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 torch = [
     { name = "opencv-python-headless" },
@@ -440,8 +445,9 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40.0,<1" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "bibr", extras = ["anthropic"], marker = "extra == 'batch'" },
-    { name = "bibr", extras = ["anthropic", "batch", "cache", "demo", "google", "mcp", "torch"], marker = "extra == 'all'" },
+    { name = "bibr", extras = ["anthropic", "batch", "cache", "demo", "google", "mcp", "serve", "torch"], marker = "extra == 'all'" },
     { name = "bibr", extras = ["torch"], marker = "extra == 'ml'" },
+    { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.136.0" },
     { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.0.0" },
     { name = "gradio", marker = "extra == 'demo'", specifier = ">=6.15.0" },
     { name = "html5lib", specifier = ">=1.1" },
@@ -449,7 +455,6 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "instructor", specifier = ">=1.7.0" },
     { name = "jsonref", marker = "extra == 'google'", specifier = ">=1.1.0" },
-    { name = "litserve", specifier = ">=0.2.16,<0.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2.0,<3" },
     { name = "numind", marker = "extra == 'nuextract'", specifier = ">=0.3,<0.3.1" },
     { name = "onnxruntime", specifier = ">=1.19.0" },
@@ -464,9 +469,7 @@ requires-dist = [
     { name = "pypdfium2", specifier = ">=4.30.0" },
     { name = "python-docx", specifier = ">=1.1.0" },
     { name = "python-dotenv", specifier = ">=0.21.0" },
-    { name = "python-magic", marker = "sys_platform != 'win32'", specifier = ">=0.4.27" },
-    { name = "python-magic-bin", marker = "sys_platform == 'win32'", specifier = ">=0.4.14" },
-    { name = "python-multipart", specifier = ">=0.0.31" },
+    { name = "python-multipart", marker = "extra == 'serve'", specifier = ">=0.0.31" },
     { name = "pytorch-crf", marker = "extra == 'torch'", specifier = ">=0.7.2" },
     { name = "questionary", specifier = ">=2.1.0" },
     { name = "rapidfuzz", specifier = ">=3.6.0" },
@@ -478,14 +481,14 @@ requires-dist = [
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.13.0" },
     { name = "torchvision", marker = "extra == 'torch'", specifier = ">=0.21.0" },
     { name = "transformers", marker = "extra == 'torch'", specifier = ">=5.0.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'serve'", specifier = ">=0.30.0" },
     { name = "vllm", marker = "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.32.0" },
     { name = "vllm-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'local'", specifier = ">=0.4,<0.5" },
     { name = "vllm-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'local-mlx'", specifier = ">=0.4,<0.5" },
     { name = "wordfreq", specifier = ">=3.0.0" },
     { name = "wtpsplit-lite", specifier = ">=0.2.0" },
 ]
-provides-extras = ["cache", "nuextract", "vllm", "torch", "ml", "demo", "google", "anthropic", "batch", "gpu", "local-mlx", "local", "mcp", "all"]
+provides-extras = ["cache", "nuextract", "vllm", "torch", "ml", "demo", "serve", "google", "anthropic", "batch", "gpu", "local-mlx", "local", "mcp", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1956,21 +1959,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/40/71/d89bb0e71b1415453980fd32315f2a037aad9f7f70f695c7cec7035feb13/license_expression-30.4.4.tar.gz", hash = "sha256:73448f0aacd8d0808895bdc4b2c8e01a8d67646e4188f887375398c761f340fd", size = 186402, upload-time = "2025-07-22T11:13:32.17Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/af/40/791891d4c0c4dab4c5e187c17261cedc26285fd41541577f900470a45a4d/license_expression-30.4.4-py3-none-any.whl", hash = "sha256:421788fdcadb41f049d2dc934ce666626265aeccefddd25e162a26f23bcbf8a4", size = 120615, upload-time = "2025-07-22T11:13:31.217Z" },
-]
-
-[[package]]
-name = "litserve"
-version = "0.2.19"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' and sys_platform == 'linux'" },
-    { name = "fastapi", version = "0.143.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or sys_platform != 'linux'" },
-    { name = "pyzmq" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4c/ed/e3a4de40677c5ec4f9aa7875260982e365ac998a49159ea75b48bcc6a0f8/litserve-0.2.19.tar.gz", hash = "sha256:951ee621b9f95888f9fc8d06707247ddf675227aa28d9407b6eb97c69551d3c5", size = 141063, upload-time = "2026-09-09T17:10:43.871Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8d/e8/5a7a3e61a29cbc3337dc257615ea4aedbfc5fa8a5d2510ab33e0c6a67f32/litserve-0.2.19-py3-none-any.whl", hash = "sha256:61015d72da421181e46aa73c517e2bb87119848784314cb8abda008006586a10", size = 95766, upload-time = "2026-09-09T17:10:42.266Z" },
 ]
 
 [[package]]
@@ -4377,23 +4365,6 @@ wheels = [
 ]
 
 [[package]]
-name = "python-magic"
-version = "0.4.27"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/da/db/0b3e28ac047452d079d375ec6798bf76a036a08182dbb39ed38116a49130/python-magic-0.4.27.tar.gz", hash = "sha256:c1ba14b08e4a5f5c31a302b7721239695b2f0f058d125bd5ce1ee36b9d9d3c3b", size = 14677, upload-time = "2022-06-07T20:16:59.508Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/73/9f872cb81fc5c3bb48f7227872c28975f998f3e7c2b1c16e95e6432bbb90/python_magic-0.4.27-py2.py3-none-any.whl", hash = "sha256:c212960ad306f700aa0d01e5d7a325d20548ff97eb9920dcd29513174f0294d3", size = 13840, upload-time = "2022-06-07T20:16:57.763Z" },
-]
-
-[[package]]
-name = "python-magic-bin"
-version = "0.4.14"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/c2/094e3d62b906d952537196603a23aec4bcd7c6126bf80eb14e6f9f4be3a2/python_magic_bin-0.4.14-py2.py3-none-win_amd64.whl", hash = "sha256:90be6206ad31071a36065a2fc169c5afb5e0355cbe6030e87641c6c62edc2b69", size = 409299, upload-time = "2017-10-02T16:30:18.545Z" },
-]
-
-[[package]]
 name = "python-multipart"
 version = "0.0.32"
 source = { registry = "https://pypi.org/simple" }
@@ -4480,21 +4451,13 @@ dependencies = [
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e7/8d/5b3d5631c2f4b4b8862f64cd0c9eb777b5710eeb5125b4be8dd0a200a4c0/pyzmq-27.2.0.tar.gz", hash = "sha256:54d4259d1bfae24ecdb5ca79f7acc2eac6c286a02d6a0ae617797cb45f0726d3", size = 292316, upload-time = "2026-08-20T19:08:21.19Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/2e/8897afa4538707d86645f51cc50e66b2b84900edb1be9dc9af2c2fc04e5d/pyzmq-27.2.0-cp311-cp311-macosx_10_15_universal2.whl", hash = "sha256:9216132843d139a123f243c07fe70f7487dce5041093dd77040f9adb5dc91872", size = 1457109, upload-time = "2026-08-20T19:06:26.022Z" },
     { url = "https://files.pythonhosted.org/packages/50/b5/13657961a845e29c28a4e7ac4202999ec90b3bba1890a5469ce2ae90359d/pyzmq-27.2.0-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:39755dc4a923021bd0677990ffdbc21cff0e1ee1cf07fe3817acea153ef4cb67", size = 888465, upload-time = "2026-08-20T19:06:30.4Z" },
     { url = "https://files.pythonhosted.org/packages/57/f5/249362b664ae725d534c8843214fa9fd7fccd74532a19e24603954a88a7d/pyzmq-27.2.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:b26f2d0493b79ce3c3112c8a12649418915582ba4707b8ed9f44febf2be71f42", size = 1926859, upload-time = "2026-08-20T19:06:34.796Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/bc/bbbcf89003c93f18e33665c26e3c48d75e3915c3dd22887f3a7aea2c5e26/pyzmq-27.2.0-cp311-cp311-win_amd64.whl", hash = "sha256:8b86e04f55af0f4d8cd8ecf14c0b8b81ebc8fd66fa20126b753514628ecadc7e", size = 644845, upload-time = "2026-08-20T19:06:37.711Z" },
-    { url = "https://files.pythonhosted.org/packages/57/8a/153532fa53db30e116118164f3af269a1f3966b3e2ba32c89b12fe864bd8/pyzmq-27.2.0-cp312-abi3-macosx_10_15_universal2.whl", hash = "sha256:591c8de5851c5ea372194469fe97587b97c3b641e9a70f31bb3474acbfde0241", size = 1431074, upload-time = "2026-08-20T19:06:40.601Z" },
     { url = "https://files.pythonhosted.org/packages/62/2c/d5828306f795e8d34676d266823b74e2101e0ad3760d12083de3e02abbb2/pyzmq-27.2.0-cp312-abi3-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dea74fd65f1fc5f7fe167916a473ebe6ed6174e5e5d9de11ea6583661be6cf43", size = 872258, upload-time = "2026-08-20T19:06:44.627Z" },
     { url = "https://files.pythonhosted.org/packages/aa/0e/ec77f691a4aebe29ab6329f996fb0e0270c876a3016086e3ca6ef733bcae/pyzmq-27.2.0-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:f707bcf2c1d007d14d70531d4dd7b41060881c73efa845580bf6faaf9ea24d42", size = 1910457, upload-time = "2026-08-20T19:06:50.783Z" },
-    { url = "https://files.pythonhosted.org/packages/02/8b/b83f7780dad22e0878e4c7bd9158ebd24ed12bc3d5e3a471cd0576f77ded/pyzmq-27.2.0-cp312-abi3-win_amd64.whl", hash = "sha256:2c218c6ab8bc447ba62054b581fd30209689d199c6ecb253f79615ca74a38e12", size = 628633, upload-time = "2026-08-20T19:06:53.809Z" },
-    { url = "https://files.pythonhosted.org/packages/b6/07/42111e9dc1041d78b4443d6eb1b82b027f1a58178dc8a38385effbc72ad5/pyzmq-27.2.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:3ab6eb88590e510ab16715c32dbba12000da9bee989fdadd9ee19a234c492eb7", size = 1466289, upload-time = "2026-08-20T19:07:02.738Z" },
     { url = "https://files.pythonhosted.org/packages/1c/ef/3b7d9449b223183222bf517245e1e53d5f1ab8c10be8b45f6a301b2f994a/pyzmq-27.2.0-cp314-cp314t-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9846e881620dd62566ca76a53e384c3f37490faf4b9240aebc7498810dfca853", size = 878984, upload-time = "2026-08-20T19:07:07.153Z" },
     { url = "https://files.pythonhosted.org/packages/de/38/f433af66922554adb2b5f79e897018c8e19a90b9eaeb49c4814f8355ebe4/pyzmq-27.2.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:bf0b6e4ce1bb089751c504c5493d6b0557eabd02dd21b76e9086cf964234b103", size = 1917424, upload-time = "2026-08-20T19:07:11.909Z" },
-    { url = "https://files.pythonhosted.org/packages/8a/04/149a627707e780fa9f2c1ede3590c14fa6b18b5576d15744342622299a50/pyzmq-27.2.0-cp314-cp314t-win_amd64.whl", hash = "sha256:d1bc1d380a91d954ed5fc9f12915dba014eed0978d2de05ee7ca688bdaac144a", size = 670215, upload-time = "2026-08-20T19:07:15.069Z" },
-    { url = "https://files.pythonhosted.org/packages/92/71/09b71620ad52bad4eb68b1516978ecaf52ef623c3fa16e0732a03cf3274c/pyzmq-27.2.0-pp311-pypy311_pp73-macosx_11_0_arm64.whl", hash = "sha256:c218b816220d05acf6ab1bafca58926d95cbcc5fec5024724666030466308f0c", size = 774395, upload-time = "2026-08-20T19:08:03.108Z" },
     { url = "https://files.pythonhosted.org/packages/d2/28/5b1042899caed18278c56d54a502f5254d463afe8aea1acbecc98e053391/pyzmq-27.2.0-pp311-pypy311_pp73-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f5c6d8744d10b5e1eadd90a7c58f8546acf6bf680ee463f7e6ada09ad6c9f802", size = 780574, upload-time = "2026-08-20T19:08:07.987Z" },
-    { url = "https://files.pythonhosted.org/packages/77/a3/f134603a671c114c6b56eb912bba890f09e2d43b8a28d243be5a5507cf2f/pyzmq-27.2.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:3ee8dd7031d5e23f632e0e7eee67183ca7d2536e0de35dc1e5d69f3471a791e8", size = 553961, upload-time = "2026-08-20T19:08:09.651Z" },
 ]
 
 [[package]]

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 
 from fastapi import HTTPException  # noqa: E402
 

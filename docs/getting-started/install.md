@@ -7,23 +7,6 @@ a current release: it fails, or picks the empty early placeholder 0.0.2, after
 which `bibr` is not a command. The uv commands below avoid this, because
 `uv init --python 3.12` fetches its own Python 3.12.
 
-## System prerequisites
-
-bibr identifies input files by content, through the `python-magic` binding to the system
-**libmagic** library. `python-magic` is only the binding — on macOS and most Linux distros
-libmagic itself has to be installed separately, or the first file bibr reads fails with
-`failed to find libmagic`:
-
-| Platform | Command |
-|---|---|
-| macOS | `brew install libmagic` |
-| Debian / Ubuntu | `sudo apt install libmagic1` |
-| Fedora / RHEL | `sudo dnf install file-libs` |
-| Windows | nothing to do — the `python-magic-bin` wheel bundles it |
-
-`bibr doctor` reports this as its own check, so run it if an extraction fails on a fresh
-machine.
-
 ## Install from PyPI
 
 ```bash
@@ -83,6 +66,7 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `local-mlx` | `vllm-mlx` (macOS, Apple Silicon only) | Pinning the vLLM-MLX local-LLM backend directly on Apple Silicon (`local` covers this automatically on macOS). |
 | `vllm` | `vllm==0.32.0`, `openai>=2.54.0,<3` (requires Python <3.14) | The *managed* local vLLM server bibr starts for `--llm local` on Linux/CUDA (the path `bibr setup`'s "fully local" flow configures). |
 | `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. It needs one more command after syncing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
+| `serve` | `fastapi`, `uvicorn[standard]`, `python-multipart` | The `bibr serve` HTTP API. Without it, `bibr serve` exits with an install hint. |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
 | `google` | `google-genai>=1.0.0`, `jsonref>=1.1.0` | Google Gemini: `LLM_PROVIDER=google` (the provider a run without a `.env` uses) and `OCR_BACKEND=gemini`. `jsonref` is what Instructor's Gemini path imports to map response models to tool schemas. |
@@ -90,7 +74,7 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `batch` | `bibr[anthropic]` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. The same SDK as `anthropic`, under the name existing installs ask for. |
 | `nuextract` | `numind>=0.3,<0.3.1` | The experimental `LLM_STRUCTURED_BACKEND=nuextract-native` backend for NuExtract servers. bibr no longer installs numind otherwise, and that backend stops with an error naming this extra. |
 | `mcp` | `mcp>=2.2.0,<3` | The `bibr mcp` server — extraction as [Model Context Protocol tools](../guides/mcp.md) for agents (Claude Code, Claude Desktop, any MCP client). |
-| `all` | `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
+| `all` | `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `serve` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
 
 ## Choosing serving extras
 
@@ -100,7 +84,7 @@ optional.
 
 The serving extras are still hardware-specific, so most people want a subset:
 
-- **`--extra all` is the superset to reach for.** It bundles `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `torch` — everything that is useful regardless of hardware.
+- **`--extra all` is the superset to reach for.** It bundles `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `serve` + `torch` — everything that is useful regardless of hardware.
 - Add **`vllm`** on Linux/CUDA (managed vLLM for `--llm local`, and the
   `paddle-vllm` GPU OCR backend), **`local`** or **`local-mlx`** on Apple
   Silicon, and **`gpu`** for ONNX Runtime's GPU build, which layout, sentence

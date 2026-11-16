@@ -8,7 +8,7 @@ agents get the same chew-then-query tool surface as ``bibr mcp`` (see
   upload into the shared :class:`~bibr.serve.ingress.UploadStore` and submits
   a descriptor through the :class:`~bibr.serve.ingress.InferenceDispatchTracker`
   — the exact route ``POST /papers/extract`` takes — so size caps,
-  per-request options, and the LitServe workers' resident models all apply.
+  per-request options, and the inference worker's resident models all apply.
   No second pipeline, no extra VRAM. Admission control applies too, in two
   halves: the serve app holds a ``PIPELINE_MAX_ACTIVE_UPLOADS`` slot while a
   large ``/mcp`` body is received (the transport buffers JSON-RPC bodies

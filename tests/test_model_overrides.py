@@ -1010,6 +1010,8 @@ def test_find_model_override_error_follows_the_cause_chain():
 def test_serve_answers_an_override_failure_as_model_override_failed_without_paths():
     from bibr.batch.ledger import MODEL_OVERRIDE_FAILED
     from bibr.exceptions import ProcessingError
+
+    pytest.importorskip("fastapi")  # the serve extra
     from bibr.serve.deployments.pipeline import _ERROR_KIND_TO_HTTP, BibrPipelineAPI
 
     error = _override_error()

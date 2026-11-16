@@ -34,6 +34,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     install "bibr[google]"`). `bibr setup` installs the extra for the provider or
     cloud OCR backend you pick. The serve image installs both. A fast run, `--no-llm`
     and the local model servers need neither.
+- **`bibr serve` no longer runs on LitServe.** The HTTP API is a FastAPI app
+  under uvicorn, and bibr starts and watches its one inference worker itself
+  (`bibr/serve/worker.py`). Requests, responses and status codes are unchanged:
+  a worker error keeps its status and detail, any other worker failure is a
+  generic `500`, a request that waited past `PIPELINE_TIMEOUT` for the worker is
+  a `504`, bodies over the cap are a `413`, and responses from 1000 bytes are
+  gzipped. LitServe's undocumented `GET /` and `GET /info` routes are gone (they
+  answer `404`, or `401` without the bearer when auth is on), as is its
+  `LIT_SERVER_API_KEY` and `LIGHTNING_CERT_PEM` handling, which bibr never
+  configured.
+- **The serve stack is an extra.** FastAPI, uvicorn and python-multipart move from
+  the core dependencies to the new `serve` extra, which `all` includes; litserve
+  is no longer installed. `bibr serve` without the extra exits with an install
+  hint (`uv tool install 'bibr[serve]'`). The serve image installs it.
+- Input validation no longer needs the system libmagic library, so a plain
+  `pip install bibr` on macOS or Linux works without installing it first.
+  Built-in content checks in `bibr/input/sniff.py` identify PDF, DOCX, JATS
+  XML, HTML (including UTF-16) and ePub inputs, and executables, the same way
+  on every host; libmagic is no longer consulted even when it is installed.
+  `python-magic` and `python-magic-bin` are no longer dependencies, the serve
+  image no longer installs `libmagic1`, `bibr doctor` drops its libmagic
+  check, and the install docs drop the system prerequisite.
+- An HTML or JATS XML file that mentions the PDF header (`%PDF-1.7`) near its
+  start is accepted; it was rejected as a mislabelled PDF.
+- A file that starts with a DOS or Windows (`MZ`) or Linux (ELF) executable
+  header is refused under every extension (`unsupported_format`). With
+  libmagic such files reached the format checks, and a PDF placed behind an
+  `MZ` header was accepted.
+- Error codes only: an ePub whose `mimetype` member is not first, renamed to
+  another supported extension, is `unsupported_format` (was
+  `corrupted_file`); a truncated DOCX, or a text file that mentions `%PDF-`
+  without a version, renamed to another supported extension, is
+  `corrupted_file` (was `unsupported_format`).
 - `REF_GEOM_SEG_REVISION` and `ML_FRONT_ROLE_REVISION` default to new revisions
   of the two model repos (`88a292ff`, `a1fd6637`) that hold the `bibr-gbm/1`
   files. Their scores are bit-identical to the joblib bundles'.
@@ -51,6 +84,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A request no longer hangs when the inference worker dies under it.** Every
+  request in flight on the worker is answered at once with a `503` whose detail
+  has the code `inference_worker_stopped` (which `bibr batch --serve-url`
+  resubmits, as it does a job whose replica died), `/health` answers `503` instead of
+  `ok`, and new requests get a `503` until a worker is ready. With
+  `PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
+  status 1 for its supervisor to restart; `PIPELINE_RESTART_WORKERS=true`, an
+  unsupported opt-in under LitServe, now starts a new worker in place.
+- Ctrl+C on `bibr serve` lets the requests in flight finish (within uvicorn's
+  30-second graceful shutdown) before the worker stops: the worker no longer
+  takes the terminal's SIGINT itself, and is asked to exit rather than
+  terminated.
 - A fast run's abstract no longer takes in a companion summary printed under
   its own heading (such as Highlights or a Simple Summary), a version in
   another language or script printed right after it, or its own "Abstract"

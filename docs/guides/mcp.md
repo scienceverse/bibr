@@ -197,7 +197,7 @@ pipeline; concurrent `chew_paper` calls queue.
 ## Remote MCP on `bibr serve`
 
 A [self-hosted deployment](deployment.md) can expose the same tool surface
-over the network: set `MCP_ENABLED=true` (with the `mcp` extra installed)
+over the network: set `MCP_ENABLED=true` (with the `serve` and `mcp` extras installed)
 and `bibr serve` mounts a streamable-HTTP MCP endpoint at `/mcp`, e.g. for
 Claude Code:
 
@@ -209,7 +209,7 @@ claude mcp add --transport http bibr https://bibr.example.org/mcp \
 It is gated by the same bearer auth as every REST route (`AUTH_API_KEY`;
 a keyless loopback server answers only loopback `Host` and `Origin` headers,
 see [Authentication](deployment.md#authentication)),
-and extraction rides the regular serve dispatch — the LitServe workers'
+and extraction rides the regular serve dispatch — the inference worker's
 resident models, admission control, and upload size caps all apply; no
 second pipeline is loaded. Concretely: `chew_paper` and `chew_url` accept
 files up to `PIPELINE_MAX_FILE_SIZE` (50 MiB), and because `chew_paper`

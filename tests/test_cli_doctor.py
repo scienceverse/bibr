@@ -1518,23 +1518,6 @@ def test_doctor_passes_a_full_runs_llm_backend_to_the_ocr_check(monkeypatch):
     ]
 
 
-def test_doctor_warns_but_does_not_fail_when_libmagic_is_missing(monkeypatch):
-    """bibr falls back to its own signature sniff, so a missing libmagic is advice, not an error."""
-    from bibr.input import validate
-
-    _mode_settings(monkeypatch)
-    monkeypatch.setattr(validate, "magic", None)
-    monkeypatch.setattr(validate, "_MAGIC_IMPORT_ERROR", ImportError("failed to find libmagic"))
-
-    lines, code, _fake = _run_doctor_lines(monkeypatch)
-
-    assert any(
-        line.startswith("! libmagic not found; bibr checks file types itself") for line in lines
-    ), lines
-    assert not [line for line in lines if line.startswith("✗ libmagic")]
-    assert code == 0
-
-
 def test_check_ref_strategies_crf_place_taken_by_the_text_segmenter_needs_no_torch(monkeypatch):
     """With REF_TEXT_SEG_MODEL_ID set, the crf strategy runs the ONNX text segmenter."""
     import importlib.util

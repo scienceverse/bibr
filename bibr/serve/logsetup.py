@@ -1,22 +1,20 @@
 """Logging for ``bibr serve``: one configured, scrubbed sink per process.
 
 ``bibr serve`` returns from the CLI before the CLI's own ``basicConfig`` runs, and
-LitServe spawns the inference worker as a fresh interpreter, so without this module
+the inference worker is spawned as a fresh interpreter, so without this module
 neither process has a root handler: ``bibr.*`` INFO records (metering included) are
 dropped, and warnings fall through ``logging.lastResort`` — unformatted and
 unscrubbed, SDK URLs carrying ``?key=`` included. :func:`configure_serve_logging`
 runs in the API process (``main``) and :func:`configure_worker_logging` in the
 inference worker (``BibrPipelineAPI.setup``); both are idempotent.
 
-Library loggers that keep their own handlers are covered too: LitServe's handler
-(rebuilt by ``LitServer.run``, hence :func:`install_litserve_logging_hook`) gets the
-scrubber, and uvicorn is started without its own ``log_config`` so its records
-propagate to the serve sink.
+Library loggers that keep their own handlers get the scrubber too, and uvicorn
+is started without its own ``log_config`` so its records propagate to the serve
+sink.
 """
 
 from __future__ import annotations
 
-import functools
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
@@ -29,7 +27,7 @@ _METERING_SINK_MARKER = "_bibr_metering_sink"
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 # HTTP client libraries log full request URLs at INFO; the CLI pins them too.
 _NOISY_LOGGERS = ("httpx", "httpcore", "urllib3", "google_genai")
-_LIBRARY_LOGGERS = ("litserve", "uvicorn", "uvicorn.error", "uvicorn.access")
+_LIBRARY_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 # Dedicated logger for per-request / per-extraction usage metering (D2). One
 # JSON line per record; formatting is done at the call site with json.dumps.
@@ -137,35 +135,10 @@ def scrub_library_handlers() -> None:
         install_secret_scrubbing(*targets)
 
 
-def install_litserve_logging_hook() -> None:
-    """Re-scrub after ``LitServer.run`` rebuilds the ``litserve`` handler.
-
-    ``run()`` calls ``configure_logging``, which discards every handler on the
-    ``litserve`` logger — and with it the filter :func:`scrub_library_handlers`
-    attached at build time. Wrap it so the replacement is scrubbed as well.
-    """
-    try:
-        import litserve.server as ls_server
-    except ImportError:  # pragma: no cover - serve requires litserve
-        return
-    original = ls_server.configure_logging
-    if getattr(original, "_bibr_scrubbing_hook", False):
-        return
-
-    @functools.wraps(original)
-    def configure_logging(*args, **kwargs):
-        result = original(*args, **kwargs)
-        scrub_library_handlers()
-        return result
-
-    configure_logging._bibr_scrubbing_hook = True  # type: ignore[attr-defined]
-    ls_server.configure_logging = configure_logging
-
-
 def configure_worker_logging(settings) -> None:
     """Logging for the spawned inference worker: serve sink plus metering sink.
 
-    The worker is a fresh interpreter (LitServe uses the ``spawn`` context), so
+    The worker is a fresh interpreter (``bibr.serve.worker`` spawns it), so
     nothing configured in the API process reaches it; without this every
     per-extraction metering record — the ones carrying LLM token usage — was
     dropped at source, and worker warnings went out unformatted and unscrubbed.

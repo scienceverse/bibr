@@ -100,7 +100,7 @@ class TestMeteringMiddleware:
     def test_build_server_record_has_integer_inference_outstanding(self, monkeypatch, caplog):
         import asyncio
 
-        pytest.importorskip("litserve")
+        pytest.importorskip("fastapi")
         from bibr.config import Settings
         from bibr.serve.app import build_server
 
@@ -135,7 +135,7 @@ class TestMeteringMiddleware:
         """An exploding route must not vanish from usage/error dashboards."""
         import asyncio
 
-        pytest.importorskip("litserve")
+        pytest.importorskip("fastapi")
         from bibr.config import Settings
         from bibr.serve.app import build_server
 
