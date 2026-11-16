@@ -21,6 +21,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- In a local `bibr batch` on the streaming path (a cloud LLM or a fast run,
+  memory mode not `aggressive`), a chunk starts once the chunk before it has
+  read its last page, instead of after that chunk's last paper is exported.
+  The page reading no longer idles at each chunk boundary while the chunk
+  before finishes its last papers (about 10 s per boundary for a fast run of
+  8-paper chunks on 8 CPU cores). At most two chunks are in flight, they
+  share the limit of two files in the later stages, and verdicts are still
+  written chunk by chunk in order. `PIPELINE_OVERLAP_CHUNKS=false` turns it
+  off. Ctrl-C now records every chunk in flight as `interrupted`, and a model
+  override that stops the run also stops the chunk running beside it, whose
+  papers are recorded `model_override_failed` and run again on resume.
 - **The Google and Anthropic SDKs are extras, not core dependencies.** `google`
   installs `google-genai` and `jsonref` (`LLM_PROVIDER=google`, the provider a run
   without a `.env` uses, and `OCR_BACKEND=gemini`); `anthropic` installs the

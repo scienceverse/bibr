@@ -114,8 +114,8 @@ run on the same `--out` — an overlapping cron job, say — stops at once with
 "another bibr batch run is using `<out>`" and exit code 2. `--dry-run` and
 `bibr batch report` do not take the lock.
 
-Ctrl-C is graceful in both executors: the local executor records the chunk
-that was running as `interrupted`; the remote executor stops submitting,
+Ctrl-C is graceful in both executors: the local executor records the chunks
+that were running as `interrupted`; the remote executor stops submitting,
 waits up to 30 s for in-flight jobs, cancels the ones still queued on the
 serve and records the rest as `interrupted`.
 A second Ctrl-C exits immediately. SIGTERM and SIGHUP (`kill`, `docker stop`,
@@ -135,6 +135,18 @@ verdict line as the chunk finishes. All of `bibr chew`'s
 pipeline flags apply: `--ocr`, `--ocr-url`, `--llm`, `--refs`, `--ref-seg`,
 `--consolidate`, `--no-crossref`, `--no-llm`, `--pages`, `--memory`,
 `--device`, `--figure-images`, `--include-regions`, `--preset`, …
+
+On the streaming path (a cloud LLM or a fast run, memory mode not
+`aggressive`), a chunk starts as soon as the chunk before it has read its last
+page, so its pages are read while the last papers of the chunk before are
+parsed and exported. Without that, the reading of pages, the slowest part of a
+fast run, waited for each chunk's last paper. At most two chunks are in flight;
+they share the limit of two files in the later stages at once, and
+each chunk's verdict lines are still written in order as it finishes. A paper
+run in a chunk of its own after a crash never overlaps another chunk.
+`PIPELINE_OVERLAP_CHUNKS=false` runs each chunk after the one before has
+ended, as before. The other plans, a managed local LLM or `aggressive` memory,
+always run their chunks one after another.
 
 After each chunk the local executor returns the memory the chunk freed to the
 system (`malloc_trim`, Linux with glibc only). Without that, freed page images
