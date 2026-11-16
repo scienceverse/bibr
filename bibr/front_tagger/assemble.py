@@ -45,7 +45,15 @@ _CORRESPONDING_RE = re.compile(
     r"autor(?:a)? (?:de )?correspond|auteur correspondant|korrespondenz|通讯作者|責任著者",
     re.IGNORECASE,
 )
-_ABSTRACT_HEADING_RE = re.compile(
+_ABSTRACT_WORDS = (
+    r"abstract|summary|resumen|resumo|r[ée]sum[ée]|zusammenfassung|riassunto|sommario|"
+    r"аннотация|анотація|резюме|abstrakt|abstrak|samenvatting|streszczenie|özet|"
+    r"sammanfattning|要旨|摘要|초록"
+)
+_ABSTRACT_HEADING_RE = re.compile(rf"^(?:{_ABSTRACT_WORDS})$", re.IGNORECASE)
+# The heading words that split title and abstract runs without ``rules``: the
+# words above less the ones the rules added, so that route reads as before.
+_BASE_ABSTRACT_HEADING_RE = re.compile(
     r"^(?:abstract|summary|resumen|resumo|r[ée]sum[ée]|zusammenfassung|riassunto|"
     r"аннотация|резюме|abstrakt|samenvatting|要旨|摘要|초록)$",
     re.IGNORECASE,
@@ -217,6 +225,11 @@ class TaggedFrontMatter:
     #: where no author carries an affiliation (the rules in
     #: :func:`_untagged_institutions`). In print order. Empty unless ``rules``.
     untagged_affiliations: list[str] = field(default_factory=list)
+    #: The page the abstract runs off the end of the tagger input on: its last
+    #: word closes no sentence and only page furniture follows it on the input's
+    #: last page, so it goes on past the pages read. ``None`` otherwise, and
+    #: unless ``rules``.
+    abstract_runs_on: int | None = None
 
     def affiliation_rows(self, *, untagged: bool = True) -> list[Affiliation]:
         """The affiliations no author carries, as rows that name no author.
@@ -308,7 +321,7 @@ def _clusters(
     tags: Sequence[str],
     inp: TaggerInput,
     wanted: str,
-    heading: re.Pattern[str] = _ABSTRACT_HEADING_RE,
+    heading: re.Pattern[str] = _BASE_ABSTRACT_HEADING_RE,
     ends: frozenset[str] | None = None,
 ) -> list[list[Span]]:
     """Groups of ``wanted`` spans interrupted only by untagged words or furniture.
@@ -483,27 +496,105 @@ def _second_version_start(inp: TaggerInput, group: list[Span]) -> int | None:
     return None
 
 
-def _cut_spans(group: list[Span], inp: TaggerInput, stop: int) -> list[Span]:
-    """The spans of ``group`` with their words from word ``stop`` on dropped."""
+def _cut_spans(group: list[Span], inp: TaggerInput, stop: int, *, start: int = 0) -> list[Span]:
+    """The spans of ``group`` with their words before word ``start`` and from
+    word ``stop`` on dropped."""
     kept: list[Span] = []
     for span in group:
-        words = tuple(i for i in span.words if i < stop)
+        words = tuple(i for i in span.words if start <= i < stop)
         if words:
             text = inp.text[inp.words[words[0]].start : inp.words[words[-1]].end]
             kept.append(replace(span, words=words, text=re.sub(r"\s+", " ", text).strip()))
     return kept
 
 
+# Labels printed above a title, in a region of their own that the tagger ran
+# into the title: a manuscript's running head ("Running head: ...") and a
+# book chapter's number ("Chapter 3", "Part II").
+_RUNNING_HEAD_RE = re.compile(
+    r"^\W*(?:running\s+(?:head|title)|short\s+(?:title|running\s+head)|kolumnentitel|"
+    r"titre\s+courant)\b",
+    re.IGNORECASE,
+)
+_CHAPTER_LABEL_RE = re.compile(
+    r"(?:chapter|chapitre|kapitel|cap[ií]tulo|capitolo|rozdział|hoofdstuk|глава|розділ|"
+    r"part|teil|partie)\s+(?:\d{1,3}|[IVXLC]{1,6})[.:]?",
+    re.IGNORECASE,
+)
+# A rubric region ("Original research article") the tagger tagged in part:
+# it stopped the title inside the region and opened it again, on a B- tag, in
+# the next one. Two untagged words with letters after it show the region goes
+# on as something else. The region must read as a rubric too, a few words set
+# in capitals or mostly naming the kind of article ("ORIGINAL RESEARCH",
+# "Review article | Open access"): a title's first line whose last words the
+# tagger missed ("Growth of reeds in the quiet rivers of the plain", "A review
+# of reed counts") is no label.
+_MIN_RUBRIC_TAIL_WORDS = 2
+_MAX_RUBRIC_WORDS = 5
+_RUBRIC_WORD_RE = re.compile(
+    r"\b(?:article|research|review|original|report|letter|editorial|communication|"
+    r"perspective|commentary|opinion|studies|artigo|art[ií]culo|revisi[oó]n|revis[aã]o|"
+    r"originale?|rapport|lettre|übersicht|originalarbeit|статья|обзор|исследовани[ея]|"
+    r"стаття|огляд|дослідження)\b",
+    re.IGNORECASE,
+)
+
+
+def _reads_as_rubric(inp: TaggerInput, i: int) -> bool:
+    """Whether word ``i``'s region is a few words in capitals or naming a kind of article."""
+    text = _printed(inp, range(_region_start(inp, i), _region_end(inp, i)))
+    letters = [w for w in text.split() if any(c.isalpha() for c in w)]
+    if not letters or len(letters) > _MAX_RUBRIC_WORDS:
+        return False
+    capitals = any(c.isupper() for c in text) and not any(c.islower() for c in text)
+    return capitals or 2 * sum(bool(_RUBRIC_WORD_RE.search(w)) for w in letters) >= len(letters)
+
+
+def _is_title_head_label(inp: TaggerInput, tags, first: list[int], rest: list[int]) -> bool:
+    """Whether the title words ``first`` (one region) are a label above the title ``rest``."""
+    text = " ".join(_printed(inp, first).split())
+    if (
+        _RUNNING_HEAD_RE.match(text)
+        or _CHAPTER_LABEL_RE.fullmatch(text.strip(" .:"))
+        or not any(c.isalnum() for c in text)
+    ):
+        return True
+    tail = range(first[-1] + 1, _region_end(inp, first[-1]))
+    return (
+        all(tags[j] == "O" for j in tail)
+        and sum(any(c.isalpha() for c in inp.words[j].text) for j in tail) >= _MIN_RUBRIC_TAIL_WORDS
+        and tags[rest[0]].startswith("B-")
+        and _reads_as_rubric(inp, first[0])
+    )
+
+
+def _trim_title_head(group: list[Span], tags, inp: TaggerInput) -> list[Span]:
+    """``group`` without the labels above the title it runs on from.
+
+    While the title spans regions, the words in its first region go when
+    they are a label (:func:`_is_title_head_label`) rather than the title's
+    first line.
+    """
+    while True:
+        runs = _region_runs(inp, [i for span in group for i in span.words])
+        if len(runs) < 2 or not _is_title_head_label(inp, tags, runs[0], runs[1]):
+            return group
+        group = _cut_spans(group, inp, len(inp.words), start=runs[1][0])
+
+
 def _title(
     spans: list[Span], tags, inp: TaggerInput, conf, *, rules: bool = False
 ) -> tuple[str | None, float, list[str]]:
-    groups = _clusters(spans, tags, inp, "TITLE")
+    heading = _ABSTRACT_HEADING_RE if rules else _BASE_ABSTRACT_HEADING_RE
+    groups = _clusters(spans, tags, inp, "TITLE", heading=heading)
     if not groups:
         return None, 0.0, ["no_title"]
     group = groups[0]  # the version printed first
     second = _second_version_start(inp, group) if rules else None
     if second is not None:
         group = _cut_spans(group, inp, second)
+    if rules:
+        group = _trim_title_head(group, tags, inp)
     title = _joined(group)
     first_word, last_word = group[0].words[0], group[-1].words[-1]
     problems = _title_text_problems(inp, tags, first_word, last_word)
@@ -528,18 +619,396 @@ def _title(
 
 def _abstract(
     spans: list[Span], tags, inp: TaggerInput, conf, *, rules: bool = False
-) -> tuple[str | None, float | None]:
+) -> tuple[str | None, float | None, int | None]:
     """The abstract printed first; parallel-language versions are not joined.
 
+    Returns its text, its confidence (the mean posterior of its tagged words)
+    and, with ``rules``, the page it runs off the end of the input on
+    (:func:`_runs_off_input`), else ``None``.
+
     With ``rules`` an email, date, volume, affiliation or licence line between
-    two runs does not end the abstract: such lines float into its column.
+    two runs does not end the abstract: such lines float into its column. The
+    words are then read back from the print: the head of its region the tagger
+    left out (:func:`_with_region_head`), cut where a version in another
+    language starts (:func:`_before_language_switch`), without a companion
+    summary (:func:`_without_companions`), with the closing marks the tagger
+    left out (:func:`_with_closing_marks`) and without a leading "Abstract"
+    label (:func:`_strip_abstract_label`). With no abstract tagged at all, a
+    region the layout calls one is read (:func:`_layout_abstract`).
     """
-    groups = _clusters(spans, tags, inp, "ABSTRACT", ends=_ABSTRACT_ENDS if rules else None)
+    if rules:
+        groups = _clusters(
+            spans, tags, inp, "ABSTRACT", heading=_ABSTRACT_HEADING_RE, ends=_ABSTRACT_ENDS
+        )
+    else:
+        groups = _clusters(spans, tags, inp, "ABSTRACT")
     if not groups:
-        return None, None
+        body = _layout_abstract(inp, tags) if rules else None
+        if body is None:
+            return None, None, None
+        # No tag vouches for it: the posteriors are the untagged reading's.
+        return _printed(inp, body), 0.0, None
     group = groups[0]
     words = [i for span in group for i in span.words]
-    return _joined(group), sum(conf[i] for i in words) / len(words)
+    if not rules:
+        return _joined(group), sum(conf[i] for i in words) / len(words), None
+    picked = _with_region_head(inp, tags, conf, words)
+    picked = _before_language_switch(inp, picked)
+    picked = _without_companions(inp, picked)
+    picked = _with_closing_marks(inp, tags, picked)
+    text = _strip_abstract_label(_printed(inp, picked), bare=_may_open_with_label(inp, picked))
+    if not text:
+        return None, None, None
+    tagged = set(words)
+    kept = [i for i in picked if i in tagged] or words
+    return text, sum(conf[i] for i in kept) / len(kept), _runs_off_input(inp, picked)
+
+
+def _printed(inp: TaggerInput, words: Sequence[int]) -> str:
+    """The text of ``words`` (in order): runs of neighbours as printed, runs joined by a space."""
+    runs: list[str] = []
+    start = 0
+    for n in range(1, len(words) + 1):
+        if n == len(words) or words[n] != words[n - 1] + 1:
+            first, last = inp.words[words[start]], inp.words[words[n - 1]]
+            runs.append(re.sub(r"\s+", " ", inp.text[first.start : last.end]).strip())
+            start = n
+    return " ".join(runs).strip()
+
+
+def _region_start(inp: TaggerInput, i: int) -> int:
+    """The first word of word ``i``'s region."""
+    region = inp.words[i].region
+    while i > 0 and inp.words[i - 1].region == region:
+        i -= 1
+    return i
+
+
+def _region_end(inp: TaggerInput, i: int) -> int:
+    """One past the last word of word ``i``'s region."""
+    region = inp.words[i].region
+    while i < len(inp.words) and inp.words[i].region == region:
+        i += 1
+    return i
+
+
+def _region_runs(inp: TaggerInput, words: Sequence[int]) -> list[list[int]]:
+    """``words`` split where the region changes, in order."""
+    runs: list[list[int]] = []
+    for i in words:
+        if runs and inp.words[runs[-1][-1]].region == inp.words[i].region:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return runs
+
+
+def _opening(inp: TaggerInput, i: int, n: int = 6) -> str:
+    """The first ``n`` words of word ``i``'s region, as printed."""
+    start = _region_start(inp, i)
+    return _printed(inp, range(start, min(start + n, _region_end(inp, i))))
+
+
+# A tagged run that opens mid-region on an unsure B- tag, after only untagged
+# words, in a region the layout calls an abstract, began at the region's start:
+# the tagger read the region's first words ("Purpose", "This study") as a
+# heading or a rubric and cut them off. A head that repeats the abstract's
+# own words is a second print of them (a doubled text layer, its glyphs often
+# broken), which the tagger was right to leave out. So is a head that prints
+# an abstract label after its first word ("Resumen: Contamos ... Abstract:"):
+# the region holds two versions, and the tagger read the second.
+_MAX_HEAD_START_CONFIDENCE = 0.5
+
+
+def _labels_a_version(inp: TaggerInput, head: Sequence[int]) -> bool:
+    """Whether a word of ``head`` after its first is a capitalised abstract label."""
+    return any(
+        not inp.words[j].text[:1].islower() and _is_heading_word(inp, j, _ABSTRACT_HEADING_RE)
+        for j in head[1:]
+    )
+
+
+def _trigrams(inp: TaggerInput, words: Sequence[int]) -> set[tuple[str, ...]]:
+    texts = [inp.words[i].text.casefold() for i in words]
+    letters = [t for t in texts if any(c.isalnum() for c in t)]
+    return {tuple(letters[n : n + 3]) for n in range(len(letters) - 2)}
+
+
+def _repeats_words(inp: TaggerInput, head: Sequence[int], before: Sequence[int]) -> bool:
+    """Whether most of the word triples of ``head`` were printed in ``before`` already."""
+    own = _trigrams(inp, head)
+    return bool(own) and 2 * len(own & _trigrams(inp, before)) >= len(own)
+
+
+def _with_region_head(inp: TaggerInput, tags, conf, words: list[int]) -> list[int]:
+    """``words`` with the untagged head of each of their regions the tagger cut off."""
+    head: list[int] = []
+    for run in _region_runs(inp, words):
+        i = run[0]
+        start = _region_start(inp, i)
+        if (
+            start < i
+            and (inp.regions[inp.words[i].region].label or "") == "abstract"
+            and tags[i].startswith("B-")
+            and conf[i] < _MAX_HEAD_START_CONFIDENCE
+            and all(tags[j] == "O" for j in range(start, i))
+            and not _repeats_words(inp, range(start, i), [j for j in words if j < i])
+            and not _labels_a_version(inp, range(start, i))
+        ):
+            head.extend(range(start, i))
+    return sorted({*words, *head})
+
+
+# A version in another language is a region of its own, of an abstract's length.
+_MIN_VERSION_WORDS = 15
+# A translation is about as long as the version before it, or opens with its
+# own label; a short passage in another language after a long abstract (a
+# survey item it quotes) is the abstract's own. A second version cut by the end
+# of the input still comes to a third of the first.
+_MAX_VERSION_RATIO = 3
+
+
+def _word_count(inp: TaggerInput, words: Sequence[int]) -> int:
+    return sum(any(c.isalnum() for c in inp.words[i].text) for i in words)
+
+
+def _before_language_switch(inp: TaggerInput, words: list[int]) -> list[int]:
+    """``words`` up to a region that starts a version in another language or script.
+
+    Parallel abstracts are often tagged as one run when no heading separates
+    them (an English abstract under the Portuguese one). As for titles
+    (:func:`_second_version_start`), a region whose text reads as another
+    language or script than the text before it, both long enough to tell,
+    starts the second version, and the version printed first is kept. The
+    text from that region on must read as a version: it opens with an
+    abstract label, or is not much shorter than the text before it
+    (:data:`_MAX_VERSION_RATIO`).
+    """
+    from bibr.extract.front_matter import _dominant_script, language_from_title
+
+    for n in range(1, len(words)):
+        if inp.words[words[n]].region == inp.words[words[n - 1]].region:
+            continue
+        before, after = words[:n], words[n:]
+        lengths = _word_count(inp, before), _word_count(inp, after)
+        if min(lengths) < _MIN_VERSION_WORDS:
+            continue
+        before_text, after_text = _printed(inp, before), _printed(inp, after)
+        labelled = bool(_ABSTRACT_LABEL_RE.match(after_text))
+        if not labelled and lengths[0] > _MAX_VERSION_RATIO * lengths[1]:
+            continue
+        for read in (_dominant_script, language_from_title):
+            first, other = read(before_text), read(after_text)
+            if (
+                first
+                and other
+                and first != other
+                and (read is _dominant_script or _opens_in(inp, after, first))
+            ):
+                return before
+    return words
+
+
+# The words of a region that tell the language it opens in.
+_VERSION_OPENING_WORDS = 8
+
+
+def _opens_in(inp: TaggerInput, after: Sequence[int], first: str) -> bool:
+    """Whether the text ``after`` opens in another language than ``first``.
+
+    A translation is in its language from its first words; a region of the
+    abstract that quotes a passage in another language ("Most answered the
+    item «¿Con qué ...?»") opens in the abstract's own.
+    """
+    from bibr.extract.front_matter import language_from_title
+
+    opening = [i for i in after if any(c.isalnum() for c in inp.words[i].text)]
+    last = opening[min(_VERSION_OPENING_WORDS, len(opening)) - 1]
+    language = language_from_title(_printed(inp, [i for i in after if i <= last]))
+    return bool(language) and language != first
+
+
+# Summaries printed beside the abstract, under their own heading: a journal's
+# lay summary or highlights come before or after the abstract proper, and the
+# tagger often runs the two together.
+_COMPANION_HEADING_RE = re.compile(
+    r"^\W*(?:simple\s+summary|plain\s+(?:language|english)\s+summary|lay\s+summary|"
+    r"author\s+summary|graphical\s+abstract|research\s+highlights|highlights|"
+    r"significance\s+statement)\b",
+    re.IGNORECASE,
+)
+# Boxed summaries; some journals print the same words as a part of the
+# abstract, so only a heading region of its own opens a box.
+_BOX_HEADING_RE = re.compile(
+    r"^\W*(?:key\s+messages|key\s+points|what\s+is\s+already\s+known|what\s+this\s+study\s+adds)\b",
+    re.IGNORECASE,
+)
+
+
+def _opens_companion(opening: str, heading: bool) -> bool:
+    """Whether a region opening with ``opening`` opens a companion summary.
+
+    The heading is printed as one: capitalised, and in a heading region or
+    followed by a mark, the region's end or a capitalised word. An abstract
+    run on into the next region in mid-sentence ("This study" "highlights the
+    need ...") opens with the same word in prose.
+    """
+    m = _COMPANION_HEADING_RE.match(opening)
+    if not m or not next((c for c in m.group() if c.isalpha()), "").isupper():
+        return False
+    after = opening[m.end() :].lstrip()
+    return heading or not after or not after[0].isalnum() or after[0].isupper()
+
+
+def _without_companions(inp: TaggerInput, words: list[int]) -> list[int]:
+    """``words`` without the regions of a companion summary.
+
+    A region that opens with a companion heading (or a box heading, in a region
+    the layout calls a heading) starts a summary that is not the abstract; it
+    runs until a region that opens with an abstract label. When every region is
+    a summary's, the words are kept: there is nothing better to read.
+    """
+    kept: list[int] = []
+    dropping = False
+    for run in _region_runs(inp, words):
+        opening = _opening(inp, run[0])
+        heading = (inp.regions[inp.words[run[0]].region].label or "") == "paragraph_title"
+        if _opens_companion(opening, heading) or (heading and _BOX_HEADING_RE.match(opening)):
+            dropping = True
+            continue
+        if dropping and _ABSTRACT_LABEL_RE.match(opening):
+            dropping = False
+        if not dropping:
+            kept.extend(run)
+    return kept or words
+
+
+# The marks that close a sentence. The tagger leaves the full stop after an
+# abstract's last word untagged nearly always, and the one between two of its
+# runs as often ("... along the river. The reeds ...").
+_SENTENCE_MARKS = frozenset({".", "?", "!", "。", "．"})
+
+
+def _with_closing_marks(inp: TaggerInput, tags, words: list[int]) -> list[int]:
+    """``words`` with the untagged sentence mark printed right after each of their runs."""
+    picked = set(words)
+    marks = [
+        i + 1
+        for i in words
+        if i + 1 < len(inp.words)
+        and i + 1 not in picked
+        and inp.words[i + 1].region == inp.words[i].region
+        and tags[i + 1] == "O"
+        and inp.words[i + 1].text in _SENTENCE_MARKS
+    ]
+    return sorted([*words, *marks])
+
+
+# The page furniture and notes that may follow an abstract cut by the end of
+# the input: a later region of any other kind holds the paper's next text.
+_FURNITURE_LABELS = frozenset(
+    {"header", "footer", "footnote", "number", "vision_footnote", "aside_text"}
+)
+
+
+def _runs_off_input(inp: TaggerInput, words: list[int]) -> int | None:
+    """The page the abstract runs off the input on, else ``None``.
+
+    An abstract whose last word closes no sentence, ends its region, and is
+    followed only by page furniture on the input's last page goes on past the
+    pages the tagger read.
+    """
+    last = words[-1]
+    if inp.words[last].text in _SENTENCE_MARKS or _region_end(inp, last) != last + 1:
+        return None
+    region = inp.words[last].region
+    if any((r.label or "") not in _FURNITURE_LABELS for r in inp.regions[region + 1 :]):
+        return None
+    page = inp.regions[region].page
+    return page if page == max(r.page for r in inp.regions) else None
+
+
+_ABSTRACT_LABEL_RE = re.compile(
+    rf"^\W*(?:{_ABSTRACT_WORDS})\b(?P<mark>\s*(?:[:.：–—]|-(?!\w)))?\s*", re.IGNORECASE
+)
+
+
+def _strip_abstract_label(text: str, *, bare: bool = True) -> str:
+    """``text`` without the "Abstract" label it opens with.
+
+    A label is punctuated ("Abstract:", "Resumo."), set in capitals
+    ("SUMMARY") or, where it may stand ``bare`` (:func:`_may_open_with_label`),
+    followed by a capitalised word ("Abstract Background"); an opening word
+    in prose ("Summary statistics of ...") stays.
+    """
+    m = _ABSTRACT_LABEL_RE.match(text)
+    if not m:
+        return text
+    label, rest = text[: m.end()].strip(), text[m.end() :]
+    if m.group("mark") or label.isupper() or (bare and rest[:1].isupper()):
+        return rest.strip()
+    return text
+
+
+def _may_open_with_label(inp: TaggerInput, words: Sequence[int]) -> bool:
+    """Whether the abstract ``words`` may open with a label that is not punctuated.
+
+    Only where its first word opens a region that no heading region printing
+    the label comes right before: under its "Abstract" heading, an abstract
+    opening "Abstract Meaning Representation (AMR) is ..." starts with a term.
+    """
+    first = words[0]
+    if _region_start(inp, first) != first:
+        return False
+    if first == 0:
+        return True
+    above = range(_region_start(inp, first - 1), first)
+    return not _ABSTRACT_HEADING_RE.match(_printed(inp, above).strip(_TRIM) or "-")
+
+
+# What a region the layout calls an abstract may carry and still be untagged
+# text: the furniture and the citation line set into its column.
+_LAYOUT_ABSTRACT_FIELDS = frozenset(
+    {None, "FURNITURE", "VOLUME", "ISSUE", "PAGES", "DATE", "JOURNAL", "DOI"}
+)
+
+
+def _is_heading_word(inp: TaggerInput, i: int, heading: re.Pattern[str]) -> bool:
+    return bool(heading.match(inp.words[i].text.strip(_TRIM) or "-"))
+
+
+def _layout_abstract(inp: TaggerInput, tags) -> list[int] | None:
+    """The words of a region the layout calls an abstract, when none was tagged.
+
+    The tagger misses an abstract printed in a layout it rarely saw. The
+    layout's label alone also falls on a cover note or an opening paragraph,
+    so the region must read as an abstract too: it opens with an abstract
+    heading, follows a region that is only that heading, or is followed by a
+    keywords line. The heading is not part of the text.
+    """
+    runs = _region_runs(inp, range(len(inp.words)))
+    for k, run in enumerate(runs):
+        if (inp.regions[inp.words[run[0]].region].label or "") != "abstract":
+            continue
+        if any(_field(tags[i]) not in _LAYOUT_ABSTRACT_FIELDS for i in run):
+            continue
+        headed = _is_heading_word(inp, run[0], _ABSTRACT_HEADING_RE)
+        after_heading = k > 0 and bool(
+            _ABSTRACT_HEADING_RE.match(_printed(inp, runs[k - 1]).strip(_TRIM) or "-")
+        )
+        following = runs[k + 1] if k + 1 < len(runs) else []
+        before_keywords = bool(following) and (
+            any(_field(tags[i]) == "KEYWORD" for i in following)
+            or _is_heading_word(inp, following[0], _KEYWORD_HEADING_RE)
+        )
+        if not (headed or after_heading or before_keywords):
+            continue
+        body = run[1:] if headed else run
+        while body and not inp.words[body[0]].text.strip(_TRIM):
+            body = body[1:]
+        if len(body) >= _MIN_ABSTRACT_WORDS:
+            return body
+    return None
 
 
 def _keywords(spans: list[Span], tags, inp: TaggerInput, *, rules: bool = False) -> list[str]:
@@ -1608,7 +2077,9 @@ def assemble(
     title, title_conf, title_problems = _title(spans, tags, inp, confidences, rules=rules)
     problems.extend(title_problems)
     confidence["title"] = title_conf
-    abstract, abstract_conf = _abstract(spans, tags, inp, confidences, rules=rules)
+    abstract, abstract_conf, abstract_runs_on = _abstract(
+        spans, tags, inp, confidences, rules=rules
+    )
     if abstract_conf is not None:
         confidence["abstract"] = abstract_conf
     if abstract is None:
@@ -1721,6 +2192,7 @@ def assemble(
         problems=problems,
         unattached_affiliations=unattached,
         untagged_affiliations=_untagged_institutions(inp, tags) if rules and not carried else [],
+        abstract_runs_on=abstract_runs_on,
     )
 
 

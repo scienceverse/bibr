@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A fast run's abstract no longer takes in a companion summary printed under
+  its own heading (such as Highlights or a Simple Summary), a version in
+  another language or script printed right after it, or its own "Abstract"
+  label. It keeps the full stop the tagger left after each paragraph, and an
+  opening sentence the tagger cut off a region the layout calls an abstract.
+  When the tagger finds no abstract, a layout abstract region that also reads
+  as one (an abstract heading, or a keywords line after it) is exported.
+- A fast run's title no longer opens with a running head, a chapter label or
+  a rubric printed above it.
+- A fast run reads the abstract from a later window when the first window
+  holds only a short abstract the tagger is unsure of, reads an abstract cut
+  by the end of its window on from the next page, and takes the longer title
+  a later page reprints when the title page's was read in part.
+
 ## [0.9.1] - 2026-11-16
 
 The first 0.9 release; this section lists every change since 0.8.0. 0.9.0 was
