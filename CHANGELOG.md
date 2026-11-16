@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- The geometry reference segmenter and the front-role classifier read a
+  pickle-free bundle format, `bibr-gbm/1`: a JSON manifest (`geom_segmenter.json`,
+  `front_role.json`) and the trees as arrays in an `.npz` file beside it, read
+  with numpy alone and checked against the SHA-256 the manifest records
+  (`bibr/utils/gbm_bundle.py`). The reader reproduces scikit-learn's arithmetic,
+  so the probabilities are the same floats the joblib bundles give.
+  `scripts/export_gbm_bundle.py` converts a joblib bundle and checks the result
+  against scikit-learn before it finishes.
+- A model repo read at a revision that holds the manifest uses it; a revision
+  without one reads the joblib bundle as before. `REF_GEOM_SEG_MODEL_ID` and
+  `ML_FRONT_ROLE_MODEL_ID` also take a local `.json` manifest, or a directory
+  holding the manifest or the `.joblib` bundle.
+
 ### Changed
 
 - **The Google and Anthropic SDKs are extras, not core dependencies.** `google`
@@ -21,6 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     install "bibr[google]"`). `bibr setup` installs the extra for the provider or
     cloud OCR backend you pick. The serve image installs both. A fast run, `--no-llm`
     and the local model servers need neither.
+- `REF_GEOM_SEG_REVISION` and `ML_FRONT_ROLE_REVISION` default to new revisions
+  of the two model repos (`88a292ff`, `a1fd6637`) that add the `bibr-gbm/1` files
+  beside the unchanged joblib bundles, so the default models load without
+  unpickling. Their scores are bit-identical to the joblib bundles'.
 - The text-layer route reads a scan's own OCR layer (invisible text over a
   page-sized image) in place of refusing the file as `scan_needs_ocr`, when the
   scans are the only reason for the refusal and most of the layer's words are
