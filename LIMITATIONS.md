@@ -217,10 +217,13 @@ Known caveats:
 - Many scans carry an OCR text layer of their own: invisible text over the page
   image, added by the scanner or the publisher. This route leaves it unread by
   default, because it is somebody else's OCR and is often less accurate than an
-  OCR model. `OCR_TEXT_LAYER_READ_OCR_LAYER=true` reads it, for pages where the
-  image covers the page, and names those pages in a `TEXT_LAYER_OCR_LAYER_READ`
-  warning. A scan cropped to its text block, or with no such layer, is still
-  refused. On 70 scanned papers of a development set the setting let a fast run
+  OCR model, unless the file would otherwise be refused as `scan_needs_ocr`:
+  then it reads the layer in place of refusing, when most of the layer's words
+  are known words. `OCR_TEXT_LAYER_READ_OCR_LAYER=true` reads it on every scanned
+  page, and `OCR_TEXT_LAYER_READ_OCR_LAYER=false` never reads it, so such a file
+  is refused. Either way it reads only pages where the image covers the page, and
+  names those pages in a `TEXT_LAYER_OCR_LAYER_READ` warning. A scan cropped to
+  its text block, or with no such layer, is still refused. On 70 scanned papers of a development set the setting let a fast run
   read 64 instead of 5. Of the 59 it added, 38 met the pass floors (title,
   authors, reference matching), against 41 when the same build read them with an
   OCR model and 47 for bibr 0.8.0 with an OCR model and the LLM.

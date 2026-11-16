@@ -245,6 +245,19 @@ def test_native_text_min_printable_ratio_env_override(monkeypatch):
     assert s.ocr.native_text_min_printable_ratio == pytest.approx(0.5)
 
 
+def test_text_layer_read_ocr_layer_is_unset_by_default_and_can_be_switched_off(monkeypatch):
+    # Unset reads a scan's OCR layer only in place of a refusal; an explicit
+    # false never reads it, so it must stay distinct from the default.
+    from bibr.config import GlobalSettings
+
+    monkeypatch.delenv("OCR_TEXT_LAYER_READ_OCR_LAYER", raising=False)
+    assert GlobalSettings().ocr.text_layer_read_ocr_layer is None
+    monkeypatch.setenv("OCR_TEXT_LAYER_READ_OCR_LAYER", "false")
+    assert GlobalSettings().ocr.text_layer_read_ocr_layer is False
+    monkeypatch.setenv("OCR_TEXT_LAYER_READ_OCR_LAYER", "true")
+    assert GlobalSettings().ocr.text_layer_read_ocr_layer is True
+
+
 def test_no_worker_count_setting_is_exposed():
     # Worker count is pinned in build_server(), not configurable: one worker
     # already serves concurrent requests via the LitServe async loop + the

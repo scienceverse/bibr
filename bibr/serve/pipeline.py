@@ -67,7 +67,7 @@ def serve_ocr_route(settings: GlobalSettings, mode: str | None = None) -> str:
     """The OCR backend a ``bibr serve`` deployment runs: ``"text-layer"`` or ``"serve-http"``.
 
     The text layer (no OCR server, born-digital PDFs only; a scan is refused
-    with ``scan_needs_ocr``) when ``OCR_BACKEND=text-layer`` asks for it, and
+    with ``scan_needs_ocr`` unless it is read from its own OCR layer) when ``OCR_BACKEND=text-layer`` asks for it, and
     for a fast deployment where nobody chose an OCR route: none of
     ``OCR_BACKEND``, ``OCR_MODEL``, ``OCR_PROFILE`` or ``OCR_BASE_URL`` is set.
     That is the rule ``bibr chew --fast`` follows, with ``OCR_BASE_URL`` in the

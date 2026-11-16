@@ -1202,6 +1202,11 @@ class OcrStage:
             f"{f'; {verdicts}' if verdicts else ''}). This looks like a scanned PDF, or "
             f"one whose fonts carry no usable text, and needs {SCAN_NEEDS_OCR_ROUTES}"
         )
+        refusal = getattr(fs, "text_layer_ocr_layer_refusal", None)
+        if refusal:
+            msg += f". The PDF's own OCR text layer was tried in its place and {refusal}"
+        # A layer turned down (or never read, the option off) is still read
+        # with the option on, which skips the check that turned it down.
         if has_unread_ocr_layer(fs):
             msg += (
                 ". The PDF carries its own OCR text layer: OCR_TEXT_LAYER_READ_OCR_LAYER=true "
