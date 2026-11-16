@@ -1,10 +1,12 @@
 import copy
+import importlib.util
 import ipaddress
 import logging
 import os
 import socket
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -282,19 +284,48 @@ def _front_tagger_bundle_present(monkeypatch, tmp_path_factory):
     )
 
 
+def _module_absent(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is None
+    except ImportError:  # a missing parent package
+        return True
+
+
+# Instructor provider prefixes whose SDK is an extra, and the SDK's module.
+_EXTRA_SDK_PROVIDERS = {"google/": "google.genai", "anthropic/": "anthropic"}
+_ABSENT_SDK_PROVIDERS = tuple(
+    prefix for prefix, module in _EXTRA_SDK_PROVIDERS.items() if _module_absent(module)
+)
+
+
 @pytest.fixture(autouse=True)
 def _cloud_sdks_count_as_installed(monkeypatch, request):
     """Let the cloud-SDK extra check pass in every test that does not test it.
 
     The Google and Anthropic SDKs are extras (``bibr.clients.sdk_extras``), and a
     provider, the dry run, doctor and the cloud OCR backends refuse to start
-    without them. Most tests that reach those paths replace the client
-    (``instructor.from_provider``) and never touch the SDK, so they run in the
-    core-only environment too. A test that needs the real SDK skips without it;
-    a test of the check itself takes ``@pytest.mark.real_cloud_sdks``."""
+    without them. Most tests that reach those paths replace the client or never
+    call it, so they run in the core-only environment too: there, where an SDK is
+    really absent, ``instructor.from_provider`` for its provider returns a
+    stand-in client (credential checks build one without calling it), and a test
+    that replaces ``from_provider`` itself still wins. A test that needs the real
+    SDK skips without it; a test of the check itself takes
+    ``@pytest.mark.real_cloud_sdks``."""
     if request.node.get_closest_marker("real_cloud_sdks") is not None:
         return
     monkeypatch.setattr("bibr.clients.sdk_extras.missing_packages", lambda extra: [])
+    if not _ABSENT_SDK_PROVIDERS:
+        return
+    import instructor
+
+    real_from_provider = instructor.from_provider
+
+    def from_provider(model, *args, **kwargs):
+        if isinstance(model, str) and model.startswith(_ABSENT_SDK_PROVIDERS):
+            return MagicMock(name=f"instructor client for {model} (SDK not installed)")
+        return real_from_provider(model, *args, **kwargs)
+
+    monkeypatch.setattr(instructor, "from_provider", from_provider)
 
 
 @pytest.fixture(autouse=True)
