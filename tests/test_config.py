@@ -437,7 +437,7 @@ def test_front_role_defaults_to_the_published_bundle(monkeypatch):
 
     s = GlobalSettings()
     assert s.ml.front_role_model_id == "scienceverse/bibr-front-role-v1"
-    assert s.ml.front_role_revision == "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b"
+    assert s.ml.front_role_revision == "a1fd66375f44a2db954fd8da66460cd527caca41"
     assert s.ml.front_role_enabled is True
     assert s.ml.front_role_min_confidence == 0.5
     assert s.ml.front_role_masthead_confidence == 0.8
