@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from numbers import Number
@@ -244,9 +245,12 @@ class TreeEnsemble:
         raw = self.raw_predict(x)
         if self.loss == "binomial":
             # HalfBinomialLoss.predict_proba: expit(raw), then 1 - p for class 0.
+            # scipy's expit is 1 / (1 + exp(-x)) with the C library's exp, which
+            # math.exp calls too; numpy's vectorised exp can differ from it by an
+            # ulp (on AVX-512 machines), so it is not used here.
             r = raw[:, 0]
             proba = np.empty((r.shape[0], 2), dtype=np.float64)
-            proba[:, 1] = 1.0 / (1.0 + np.exp(-r))
+            proba[:, 1] = [_expit(float(v)) for v in r]
             proba[:, 0] = 1 - proba[:, 1]
             return proba
         # HalfMultinomialLoss.predict_proba: sklearn.utils.extmath.softmax.
@@ -257,6 +261,14 @@ class TreeEnsemble:
         sum_prob = np.reshape(np.sum(out, axis=1), (-1, 1))
         out /= sum_prob
         return out
+
+
+def _expit(v: float) -> float:
+    """scipy.special.expit for one double, through the C library's exp (math.exp)."""
+    try:
+        return 1.0 / (1.0 + math.exp(-v))
+    except OverflowError:  # exp(-v) is inf in C: expit is 0
+        return 0.0
 
 
 def sha256_file(path: str | Path) -> str:
