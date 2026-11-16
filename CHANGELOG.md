@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- In a local `bibr batch` on the streaming path (a cloud LLM or a fast run,
+  memory mode not `aggressive`), a chunk starts once the chunk before it has
+  read its last page, instead of after that chunk's last paper is exported.
+  The page reading no longer idles at each chunk boundary while the chunk
+  before finishes its last papers (about 10 s per boundary for a fast run of
+  8-paper chunks on 8 CPU cores). At most two chunks are in flight, they
+  share the limit of two files in the later stages, and verdicts are still
+  written chunk by chunk in order. `PIPELINE_OVERLAP_CHUNKS=false` turns it
+  off. Ctrl-C now records every chunk in flight as `interrupted`, and a model
+  override that stops the run also stops the chunk running beside it, whose
+  papers are recorded `model_override_failed` and run again on resume.
+
 ## [0.9.1] - 2026-11-16
 
 The first 0.9 release; this section lists every change since 0.8.0. 0.9.0 was

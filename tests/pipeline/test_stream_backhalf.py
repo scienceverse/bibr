@@ -20,7 +20,7 @@ from bibr.config import Settings
 from bibr.local.pipeline import LocalPipeline
 from bibr.pipeline.context import PipelineContext, RunConfig
 from bibr.pipeline.progress import NullProgress
-from bibr.pipeline.stages.render_ocr import StreamingRenderOcrStage
+from bibr.pipeline.stages.render_ocr import FRONT_HALF_DONE, StreamingRenderOcrStage
 from bibr.pipeline.state import FileState
 
 # ---------------------------------------------------------------------------
@@ -585,3 +585,81 @@ async def test_other_modes_never_trim_inside_the_stage(monkeypatch, mode):
     await _stage(events).run(_ctx(files, _cfg(ocr_backend="gemini")))
 
     assert "trim" not in events
+
+
+# ---------------------------------------------------------------------------
+# Overlapped chunks (bibr batch): FRONT_HALF_DONE and the shared back-half cap
+# ---------------------------------------------------------------------------
+
+
+class TestFrontHalfDone:
+    async def test_set_once_the_last_window_is_read_before_the_back_halves_end(self):
+        events: list[str] = []
+        hold = asyncio.Event()
+        files = [_mk("a.pdf"), _mk("b.pdf")]
+        stage = _stage(events, parse=_FakeParse(events, hold=hold))
+        done = asyncio.Event()
+
+        token = FRONT_HALF_DONE.set(done)
+        try:
+            task = asyncio.create_task(stage.run(_ctx(files, _cfg())))
+        finally:
+            FRONT_HALF_DONE.reset(token)
+        await asyncio.wait_for(done.wait(), timeout=30)
+
+        assert "ocr_end:b.pdf" in events
+        assert not any(e.startswith("export:") for e in events)
+        assert not task.done()
+        hold.set()
+        await asyncio.wait_for(task, timeout=30)
+        assert all(fs.result_json is not None for fs in files)
+
+    async def test_not_set_when_the_chunk_unloads_ocr_at_its_end(self, monkeypatch):
+        monkeypatch.setattr(
+            "bibr.pipeline.stages.render_ocr._should_unload_ocr_after_chunk",
+            lambda *_: True,
+        )
+        done = asyncio.Event()
+        token = FRONT_HALF_DONE.set(done)
+        try:
+            await _stage().run(_ctx([_mk("a.pdf")], _cfg()))
+        finally:
+            FRONT_HALF_DONE.reset(token)
+        assert not done.is_set()
+
+    async def test_not_set_when_the_front_half_raises(self):
+        class _Boom:
+            name = "ocr"
+
+            async def run(self, ctx):
+                raise RuntimeError("OCR engine died")
+
+        done = asyncio.Event()
+        token = FRONT_HALF_DONE.set(done)
+        try:
+            with pytest.raises(RuntimeError, match="OCR engine died"):
+                await _stage(ocr=_Boom()).run(_ctx([_mk("a.pdf")], _cfg()))
+        finally:
+            FRONT_HALF_DONE.reset(token)
+        assert not done.is_set()
+
+    async def test_overlapping_chunks_share_the_back_half_cap(self):
+        # Two chunks of two windows on one stage, as overlapped bibr batch chunks
+        # run: four back halves are ready, but only two may be in one at a time.
+        events: list[str] = []
+        hold = asyncio.Event()
+        stage = _stage(events, parse=_FakeParse(events, hold=hold))
+        first = [_mk("a.pdf"), _mk("b.pdf")]
+        second = [_mk("c.pdf"), _mk("d.pdf")]
+
+        tasks = [
+            asyncio.create_task(stage.run(_ctx(first, _cfg()))),
+            asyncio.create_task(stage.run(_ctx(second, _cfg()))),
+        ]
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert len([e for e in events if e.startswith("parse:")]) == 2
+
+        hold.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=30)
+        assert all(fs.result_json is not None for fs in first + second)

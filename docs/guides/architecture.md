@@ -420,7 +420,11 @@ left out of the rule: no managed LLM server, an OCR route that starts no engine
 onnxruntime has no CUDA provider and that has no torch. On Linux, system RAM is the machine's RAM or a
 smaller cgroup memory limit (a container, or a batch job's allocation). With a cloud LLM and non-aggressive memory
 mode, `PIPELINE_STREAM_BACKHALF=true` allows completed files' parsing,
-extraction, enrichment, and export to overlap subsequent OCR work. Managed
+extraction, enrichment, and export to overlap subsequent OCR work. In
+`bibr batch`, `PIPELINE_OVERLAP_CHUNKS=true` (the default) also starts the
+next chunk once a chunk has read its last page, so that chunk's last back
+halves overlap the next chunk's reading too; at most two chunks are in flight
+and they share the back-half limit. Managed
 local LLMs retain the stage barrier for the OCR-to-LLM memory handoff.
 
 ### `bibr serve` (LitServe)

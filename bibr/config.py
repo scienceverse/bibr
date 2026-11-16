@@ -2432,6 +2432,17 @@ class PipelineOptions(_BibrSettings):
         "mode not aggressive); managed local LLM backends keep the stage barrier. Escape hatch "
         "for debugging.",
     )
+    # bibr batch only, and only with stream_backhalf: the next chunk starts once
+    # this chunk's pages are read, so it renders while this chunk's last files
+    # parse and export instead of after (bibr.batch.runner.LocalExecutor).
+    overlap_chunks: bool = Field(
+        True,
+        description="In a local bibr batch on the streaming path (PIPELINE_STREAM_BACKHALF), "
+        "start each chunk once the one before has read its last page, so the next chunk's "
+        "pages are read while the last files of the one before are parsed and exported. At "
+        "most two chunks are in flight and they share the back-half limit; each chunk still "
+        "gets its own verdicts. false runs each chunk after the one before has ended.",
+    )
     # glibc keeps freed page images and model buffers in its per-thread malloc
     # arenas, so a long batch keeps every chunk's high-water mark unless the
     # free pages are handed back (bibr.utils.heap). Batch drivers only:
