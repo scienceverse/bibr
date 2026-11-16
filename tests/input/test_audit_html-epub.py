@@ -440,3 +440,26 @@ class TestEpubChapterEncodings:
         parser.parse()
 
         assert "37°C bei München" in _body_text(parser)
+
+
+class TestSelfClosingTagExpansion:
+    """An ePub chapter's `<x/>` rewrite may not backtrack over unclosed tags."""
+
+    def test_well_formed_tags_expand_as_before(self):
+        from bibr.input.epub_native import _expand_self_closing_tags
+
+        assert _expand_self_closing_tags(
+            '<p><a id="n1" href="x/y"/><br/><span class=\'a b\' /></p>'
+        ) == ('<p><a id="n1" href="x/y"></a><br/><span class=\'a b\'></span></p>')
+
+    @pytest.mark.parametrize("unit", ["<a", '<a "', "<a '", "<a/", "<a b=c "])
+    def test_unclosed_tags_cost_linear_time(self, unit):
+        import time
+
+        from bibr.input.epub_native import _expand_self_closing_tags
+
+        text = unit * 20_000
+        started = time.monotonic()
+
+        assert _expand_self_closing_tags(text) == text
+        assert time.monotonic() - started < 2.0  # 1,200 repeats took half a minute

@@ -339,3 +339,14 @@ def test_filename_stays_one_component_inside_a_windows_directory(disposition, ur
 
     assert name == expected
     assert (tmp / name).parent == tmp
+
+
+async def test_non_public_refusal_does_not_leak_the_address(monkeypatch, caplog):
+    """A caller probing internal DNS names must not learn their addresses."""
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("10.20.30.40"))
+    with caplog.at_level("INFO", logger="bibr.utils.safe_fetch"):
+        with pytest.raises(UnsafeUrlError) as excinfo:
+            await _resolve_public_ip("intranet.example", url="https://intranet.example/")
+    assert "10.20.30.40" not in str(excinfo.value)
+    assert "intranet.example resolves to a non-public address" in str(excinfo.value)
+    assert "10.20.30.40" in caplog.text

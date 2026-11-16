@@ -19,7 +19,11 @@ import webencodings  # html5lib's encoding table (a dependency of html5lib)
 
 from bibr.input.html_native import HtmlParser
 from bibr.input.xml_entities import parse_xml
-from bibr.input.zip_limits import ZipExpansionLimitError, read_zip_member_capped
+from bibr.input.zip_limits import (
+    ZipExpansionLimitError,
+    only_standard_methods,
+    read_zip_member_capped,
+)
 from bibr.paper_contents import PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import normalize_doi
@@ -72,8 +76,12 @@ _HTML_VOID_ELEMENTS = frozenset(
         "wbr",
     ]
 )
+# No part of the pattern crosses a "<": XHTML cannot hold a raw one inside a
+# tag, and a name or quoted value allowed to swallow the next tag's opener made
+# a run of unclosed "<a" cost cubic time (3 KB held validation for half a
+# minute). Every repeat is possessive, so a failed tag is given up in one pass.
 _SELF_CLOSING_TAG_RE = re.compile(
-    r"<([A-Za-z][^\s/>]*)((?:[^>\"'/]|\"[^\"]*\"|'[^']*'|/(?!>))*+)/>"
+    r"<([A-Za-z][^\s/><]*+)((?:[^><\"'/]|\"[^\"<]*\"|'[^'<]*'|/(?!>))*+)/>"
 )
 
 
@@ -159,6 +167,8 @@ def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
 def _check_zip_limits(zf: zipfile.ZipFile) -> bool:
     entries = zf.infolist()
     if len(entries) > _EPUB_MAX_ENTRIES:
+        return False
+    if not only_standard_methods(zf):
         return False
     total_size = sum(info.file_size for info in entries)
     total_compressed = sum(info.compress_size for info in entries)

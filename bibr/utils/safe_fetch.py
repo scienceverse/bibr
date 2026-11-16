@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 import socket
 from dataclasses import dataclass
@@ -56,6 +57,8 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from bibr.input.supported_files import SUPPORTED_EXTENSIONS
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "FetchFailedError",
@@ -131,6 +134,17 @@ class FetchedFile:
     final_url: str
 
 
+def _refuse_address(url: str, host: str, ip_text: str) -> UnsafeUrlError:
+    """Refuse a non-public address without echoing it to the caller.
+
+    The message reaches whoever supplied the URL (possibly a prompt-injected
+    model), so naming the address would let it read private DNS answers for
+    internal names. The address goes to the log instead.
+    """
+    logger.info("%s resolved to non-public address %s", host, ip_text)
+    return _reject(url, f"{host} resolves to a non-public address")
+
+
 def _reject(url: str, reason: str) -> UnsafeUrlError:
     return UnsafeUrlError(f"refusing to fetch {url}: {reason}")
 
@@ -140,22 +154,23 @@ def _validate_ip(ip_text: str, *, url: str, host: str) -> None:
     try:
         ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(ip_text)
     except ValueError:
-        raise _reject(url, f"{host} resolved to an unparseable address {ip_text!r}") from None
+        logger.info("%s resolved to an unparseable address %r", host, ip_text)
+        raise _reject(url, f"{host} resolved to an unparseable address") from None
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.scope_id is not None:
             # A zone index only means something on a link-local address.
-            raise _reject(url, f"{host} resolves to non-public address {ip_text}")
+            raise _refuse_address(url, host, ip_text)
         if ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
         elif ip in _NAT64_WELL_KNOWN:
             ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
         elif ip not in _IPV6_GLOBAL_UNICAST or any(ip in net for net in _IPV6_TUNNELS):
-            raise _reject(url, f"{host} resolves to non-public address {ip_text}")
+            raise _refuse_address(url, host, ip_text)
     # is_global is the closed test (False for private/loopback/link-local/
     # shared CGNAT/reserved/unspecified); globally-scoped multicast still
     # reports is_global, hence the explicit check.
     if ip.is_multicast or not ip.is_global:
-        raise _reject(url, f"{host} resolves to non-public address {ip_text}")
+        raise _refuse_address(url, host, ip_text)
 
 
 def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:

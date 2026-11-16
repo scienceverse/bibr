@@ -6,15 +6,34 @@ Usage:
 
 import argparse
 import asyncio
+import atexit
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 logger = logging.getLogger(__name__)
 
 # With logging's own aliases, so every value that worked before still does.
 _LOG_LEVELS = ("debug", "info", "warning", "warn", "error", "critical", "fatal", "notset")
+
+
+def _private_gradio_temp_dir() -> None:
+    """Give Gradio a private temp folder unless the operator chose one.
+
+    Gradio's default is the shared, predictable ``<tmp>/gradio``, which another
+    local user can pre-create and own, then read uploads from or plant files
+    in. Gradio reads ``GRADIO_TEMP_DIR`` when it is imported, so this must run
+    first. An operator-provided value is left alone.
+    """
+    if os.environ.get("GRADIO_TEMP_DIR"):
+        return
+    # mkdtemp creates the folder with mode 0700.
+    path = tempfile.mkdtemp(prefix="bibr-demo-")
+    os.environ["GRADIO_TEMP_DIR"] = path
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +130,7 @@ def main():
     # Gradio sends usage analytics to its maintainers unless this is off. bibr
     # keeps it off for the demo; a value already in the environment wins.
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+    _private_gradio_temp_dir()
 
     try:
         import gradio

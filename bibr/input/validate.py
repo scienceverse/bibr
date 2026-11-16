@@ -21,6 +21,7 @@ from bibr.input.supported_files import (
     SupportedFileType,
     UnsupportedFileType,
 )
+from bibr.input.zip_limits import only_standard_methods, uncompressed_size_within
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,9 @@ def _check_docx_corruption(file_content: bytes) -> bool:
                 # False and let _check_docx_encryption own the classification
                 # (the pipeline reports is_corrupted before is_encrypted).
                 return False
+            if not only_standard_methods(zf):
+                logger.warning("DOCX uses a compression method OPC does not permit")
+                return True
             if len(entries) > _DOCX_MAX_ENTRIES:
                 logger.warning("DOCX contains too many archive entries: %d", len(entries))
                 return True
@@ -250,8 +254,6 @@ def _check_docx_corruption(file_content: bytes) -> bool:
             # header causes, so this pass is defense in depth: it keeps the
             # rejection at validation (rather than deep in the parse stage)
             # however the archive is read downstream.
-            from bibr.input.zip_limits import uncompressed_size_within
-
             if not uncompressed_size_within(
                 zf, "word/document.xml", max_bytes=_DOCX_DOCUMENT_XML_MAX_BYTES
             ):

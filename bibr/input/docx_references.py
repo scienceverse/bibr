@@ -197,6 +197,14 @@ def reference_entries(
     """
     entries: list[str] = []
     texts = [paragraph.text.strip() for paragraph in paragraphs]
+    # The next non-empty text after each paragraph, in one reverse pass: slicing
+    # the tail per heading is quadratic on a document of many paragraphs.
+    next_text = [""] * len(texts)
+    upcoming = ""
+    for index in range(len(texts) - 1, -1, -1):
+        next_text[index] = upcoming
+        if texts[index]:
+            upcoming = texts[index]
     ended: int | None = None  # the section whose list has ended
     for index, (paragraph, text) in enumerate(zip(paragraphs, texts, strict=True)):
         if not text:
@@ -209,7 +217,7 @@ def reference_entries(
         if paragraph.section == ended:
             continue
         if entries and _ends_the_list(text):
-            following = next((t for t in texts[index + 1 :] if t), "")
+            following = next_text[index]
             if (
                 _END_HEADING_RE.match(text)
                 and opens_an_entry(following)

@@ -1262,9 +1262,13 @@ class JatsParser:
 
             corresponding = (_attr(contrib, "corresp") or "").lower() == "yes"
             aff_texts: list[str] = []
+            # A repeated rid (or the same affiliation cited twice) adds nothing
+            # but a longer string; a hostile @rid can repeat one id 20,000 times.
+            seen_affs: set[str] = set()
             for aff in _iter_contrib_descs(contrib, {"aff"}):
                 text = self._aff_text(aff)
-                if text:
+                if text and text not in seen_affs:
+                    seen_affs.add(text)
                     aff_texts.append(text)
             for xref in _iter_contrib_descs(contrib, {"xref"}):
                 ref_type = (_attr(xref, "ref-type") or "").lower()
@@ -1272,9 +1276,11 @@ class JatsParser:
                     corresponding = True
                 elif ref_type == "aff":
                     # @rid is IDREFS: one author may cite several affs.
-                    for rid in (_attr(xref, "rid") or "").split():
-                        if rid in self._aff_map:
-                            aff_texts.append(self._aff_map[rid])
+                    for rid in dict.fromkeys((_attr(xref, "rid") or "").split()):
+                        text = self._aff_map.get(rid)
+                        if text and text not in seen_affs:
+                            seen_affs.add(text)
+                            aff_texts.append(text)
             if not aff_texts and not is_group:
                 # No xref or nested aff: the JATS convention for a shared
                 # affiliation is an <aff> beside the contribs, else a single

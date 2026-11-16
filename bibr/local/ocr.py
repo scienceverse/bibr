@@ -180,7 +180,7 @@ class VllmMlxServer:
         timeout = self._settings.vllm_mlx.startup_timeout
         deadline = time.monotonic() + timeout
         poll_interval = 2.0
-        health_url = f"http://localhost:{self._port}/health"
+        health_url = f"http://127.0.0.1:{self._port}/health"
 
         try:
             while time.monotonic() < deadline:
@@ -263,7 +263,7 @@ class VllmMlxServer:
         else:
             content = "OK"
 
-        warmup_url = f"http://localhost:{self._port}/v1/chat/completions"
+        warmup_url = f"http://127.0.0.1:{self._port}/v1/chat/completions"
         payload = json.dumps(
             {
                 "model": self._model,
@@ -318,7 +318,7 @@ class VllmMlxServer:
 
     @property
     def base_url(self) -> str:
-        return f"http://localhost:{self._port}"
+        return f"http://127.0.0.1:{self._port}"
 
     @property
     def loaded(self) -> bool:

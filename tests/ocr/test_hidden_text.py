@@ -1166,3 +1166,18 @@ def test_clip_pass_without_the_page_edit_calls_keeps_the_text(monkeypatch):
     pdf_bytes = _resourced_pdf(_body() + _CLIP_ELSEWHERE + _payload() + b"Q\n")
 
     assert "Ignore prior" in _page_text(pdf_bytes)
+
+
+class _SizedPage:
+    def __init__(self, width: float, height: float) -> None:
+        self._size = (width, height)
+
+    def get_size(self) -> tuple[float, float]:
+        return self._size
+
+
+def test_render_scale_is_unchanged_for_ordinary_pages_and_capped_for_huge_ones():
+    ordinary = native_text._render_scale(_SizedPage(842.0, 1190.0))
+    assert ordinary == native_text._HIDDEN_TEXT_RENDER_SCALE
+    scale = native_text._render_scale(_SizedPage(14400.0, 14400.0))
+    assert 14400.0 * scale <= native_text._HIDDEN_TEXT_MAX_RENDER_PX

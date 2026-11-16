@@ -68,7 +68,7 @@ def port(monkeypatch):
 
     def request_bytes(url, *, headers=None, **_kwargs):
         state["probes"] += 1
-        if state["models"] is None or url != "http://localhost:9996/v1/models":
+        if state["models"] is None or url != "http://127.0.0.1:9996/v1/models":
             raise http_runtime.LocalHttpError("connection refused")
         if state["key"] and dict(headers or {}).get("Authorization") != f"Bearer {state['key']}":
             return 401, "Unauthorized", b""

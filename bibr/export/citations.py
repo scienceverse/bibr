@@ -726,9 +726,11 @@ def _bibtex_escape(value: str) -> str:
 
 def _bibtex_verbatim(value: str) -> str:
     """A URL or DOI: kept as it is, but a brace or backslash would end the
-    field, so those are percent-encoded."""
+    field, so those are percent-encoded. So is a caret: TeX reads ``^^5c`` as
+    a backslash before it expands anything, which would let a printed DOI
+    smuggle a command past the two replacements above it."""
     value = "".join(value.split())
-    return value.replace("\\", "%5C").replace("{", "%7B").replace("}", "%7D")
+    return value.replace("\\", "%5C").replace("{", "%7B").replace("}", "%7D").replace("^", "%5E")
 
 
 _BIBTEX_AND = re.compile(r"\band\b|,", re.IGNORECASE)

@@ -32,6 +32,8 @@ import re
 import zipfile
 import zlib
 
+from bibr.input.zip_limits import only_standard_methods
+
 logger = logging.getLogger(__name__)
 
 PDF_MIME = "application/pdf"
@@ -156,6 +158,10 @@ def _sniff_zip(content: bytes) -> str:
         return EPUB_MIME
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            if not only_standard_methods(zf):
+                # OPC and OCF permit only stored and deflated members; reading
+                # anything else (bzip2, LZMA) can inflate without bound.
+                return ZIP_MIME
             names = set(zf.namelist())
             if "mimetype" in names:
                 with zf.open("mimetype") as member:

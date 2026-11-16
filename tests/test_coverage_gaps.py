@@ -1230,3 +1230,24 @@ class TestIsCopyrightNotice:
         from bibr.structure.pdf_parser import PDFParser
 
         assert PDFParser._is_copyright_notice("COPYRIGHT 2024") is True
+
+
+class TestStripLatexUnclosedBraces:
+    """Unclosed ``_{`` openers used to cost a scan to the end of the text each."""
+
+    def test_unclosed_openers_are_left_alone_in_linear_time(self):
+        import time
+
+        from bibr.input.consolidate_text import strip_latex_commands
+
+        text = "}" + "x_{" * 40_000
+        started = time.monotonic()
+        result = strip_latex_commands(text)
+
+        assert result == text
+        assert time.monotonic() - started < 2.0  # was minutes
+
+    def test_closed_spans_before_an_unclosed_tail_still_flatten(self):
+        from bibr.input.consolidate_text import strip_latex_commands
+
+        assert strip_latex_commands(r"H_{2}O \text{warm} x^{2} y_{") == ("H2O warm x2 y_{")

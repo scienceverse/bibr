@@ -283,7 +283,7 @@ class RapidMlxServer:
 
     @property
     def base_url(self) -> str:
-        return f"http://localhost:{self._port}"
+        return f"http://127.0.0.1:{self._port}"
 
     @property
     def loaded(self) -> bool:
