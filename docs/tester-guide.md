@@ -221,9 +221,7 @@ you enabled it, pass `--no-crossref` for a run without Crossref requests.
 
 ## Other platforms
 
-Install [uv](https://docs.astral.sh/uv/) and the
-[system prerequisites](getting-started/install.md#system-prerequisites), then
-clone and install:
+Install [uv](https://docs.astral.sh/uv/), then clone and install:
 
 ```bash
 git clone https://github.com/scienceverse/bibr.git

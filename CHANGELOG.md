@@ -21,6 +21,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Input validation no longer needs the system libmagic library, so a plain
+  `pip install bibr` on macOS or Linux works without installing it first.
+  Built-in content checks in `bibr/input/sniff.py` identify PDF, DOCX, JATS
+  XML, HTML (including UTF-16) and ePub inputs, and executables, the same way
+  on every host; libmagic is no longer consulted even when it is installed.
+  `python-magic` and `python-magic-bin` are no longer dependencies, the serve
+  image no longer installs `libmagic1`, `bibr doctor` drops its libmagic
+  check, and the install docs drop the system prerequisite.
+- An HTML or JATS XML file that mentions the PDF header (`%PDF-1.7`) near its
+  start is accepted; it was rejected as a mislabelled PDF.
+- A file that starts with a DOS or Windows (`MZ`) or Linux (ELF) executable
+  header is refused under every extension (`unsupported_format`). With
+  libmagic such files reached the format checks, and a PDF placed behind an
+  `MZ` header was accepted.
+- Error codes only: an ePub whose `mimetype` member is not first, renamed to
+  another supported extension, is `unsupported_format` (was
+  `corrupted_file`); a truncated DOCX, or a text file that mentions `%PDF-`
+  without a version, renamed to another supported extension, is
+  `corrupted_file` (was `unsupported_format`).
 - `REF_GEOM_SEG_REVISION` and `ML_FRONT_ROLE_REVISION` default to new revisions
   of the two model repos (`88a292ff`, `a1fd6637`) that hold the `bibr-gbm/1`
   files. Their scores are bit-identical to the joblib bundles'.
