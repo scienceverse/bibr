@@ -110,7 +110,8 @@ def test_private_gradio_temp_dir_is_created_and_removed_at_exit(monkeypatch):
     path = os.environ["GRADIO_TEMP_DIR"]
     try:
         assert os.path.basename(path).startswith("bibr-demo-")
-        assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+        if os.name != "nt":  # Windows reports 0o777 for any folder
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
         ((fn, a, k),) = exit_hooks
         fn(*a, **k)
         assert not os.path.exists(path)
