@@ -122,6 +122,23 @@ def _detect_langs(text: str) -> tuple[str, ...] | None:
     return None
 
 
+def _named_langs(text: str) -> tuple[str, ...]:
+    """Every lexicon *text*'s characters name, in :func:`_detect_langs`'s order.
+
+    :func:`_detect_langs` takes the first rule that matches, which suits the
+    fragments of one wrapped word. A page names more: a Polish page with one
+    Greek "α" or a "μm", a Czech one with a Polish author's "Ł". Each named
+    lexicon is kept, so a stray letter does not hide the page's own language.
+    """
+    langs = [
+        lang for pattern, named in _SCRIPT_LANG_RULES if pattern.search(text) for lang in named
+    ]
+    lowered = text.lower()
+    for pattern, table in _LATIN_LANG_SCANS:
+        langs.extend(lang for ch in dict.fromkeys(pattern.findall(lowered)) for lang in table[ch])
+    return tuple(dict.fromkeys(langs))
+
+
 def _lang_candidates(fragment: str, context_langs: tuple[str, ...] = ()) -> tuple[str, ...]:
     """Pick the wordfreq lexicons to consult for *fragment*.
 

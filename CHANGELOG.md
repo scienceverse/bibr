@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The text-layer route reads a scan's own OCR layer (invisible text over a
+  page-sized image) in place of refusing the file as `scan_needs_ocr`, when the
+  scans are the only reason for the refusal and most of the layer's words are
+  known words. A `TEXT_LAYER_OCR_LAYER_READ` warning names the pages.
+  `OCR_TEXT_LAYER_READ_OCR_LAYER` is now unset by default; `true` still reads the
+  layer of every scanned page, and `false` never reads it and refuses the file as
+  before.
+
 ### Fixed
 
 - A fast run's abstract no longer takes in a companion summary printed under

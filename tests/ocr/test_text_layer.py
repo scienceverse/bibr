@@ -1055,3 +1055,154 @@ def test_page_verdict_summary_is_empty_without_a_failed_page():
     assert page_verdict_summary(_page_verdicts()) == ""
     assert page_verdict_summary(SimpleNamespace(pdf_inspection=None)) == ""
     assert page_verdict_summary(SimpleNamespace()) == ""
+
+
+# --- A scan's OCR layer read in place of a refusal ---------------------------------
+
+
+def _verdicts(*reasons, filled=0, regions=4):
+    from bibr.ocr.text_layer import TextLayerPage, TextLayerRead
+
+    layout = [[{"label": "text", "content": "words" if k < filled else ""} for k in range(regions)]]
+    pages = [TextLayerPage(k, reason is None, reason) for k, reason in enumerate(reasons)]
+    return TextLayerRead(layout_results=layout, pages=pages, warnings=[])
+
+
+@pytest.mark.parametrize(
+    ("reasons", "filled", "refused"),
+    [
+        (("invisible_ocr_layer",), 0, True),
+        (("invisible_ocr_layer", "no_text_layer", None), 1, True),
+        (("invisible_ocr_layer", "low_coverage"), 0, True),
+        # Read well enough: nothing is refused.
+        (("invisible_ocr_layer", None), 2, False),
+        # A scan with no OCR layer has none to read.
+        (("no_text_layer",), 0, False),
+        # A font with no usable text is never read from a layer instead.
+        (("invisible_ocr_layer", "corrupt_text"), 0, False),
+        (("invisible_ocr_layer", "implausible_text"), 0, False),
+    ],
+)
+def test_only_a_file_refused_for_its_scans_falls_back_to_their_ocr_layer(reasons, filled, refused):
+    from bibr.ocr.text_layer import _refused_for_its_ocr_layer
+
+    assert _refused_for_its_ocr_layer(_verdicts(*reasons, filled=filled), 0.5) is refused
+
+
+def _fallback_inputs(min_success_rate=0.5):
+    from types import SimpleNamespace
+
+    from tests.document._pdfs import image
+
+    pdf = build_pdf([PageSpec(image(PAGE_W, PAGE_H) + _invisible_lines(_PROSE))])
+    layout = [[_region("text", _paragraph_box(len(_PROSE)))]]
+    fs = SimpleNamespace(pdf_bytes=pdf, layout_results=layout, page_indices=None)
+    settings = SimpleNamespace(
+        ocr=SimpleNamespace(min_success_rate=min_success_rate, native_text_min_printable_ratio=0.85)
+    )
+    return fs, settings, read_text_layer(pdf, layout)
+
+
+def test_a_refused_scan_is_read_from_its_ocr_layer_with_a_warning_that_says_so():
+    from bibr.ocr.text_layer import _read_ocr_layer_instead
+
+    fs, settings, first = _fallback_inputs()
+    assert first.pages[0].reason == "invisible_ocr_layer"
+
+    read, refusal = _read_ocr_layer_instead(fs, settings, first)
+
+    assert refusal is None
+    region = read.layout_results[0][0]
+    assert region["content"].startswith("We measured the reading speed")
+    assert "_text_layer_unread" not in region
+    (warning,) = [w for w in read.warnings if w.code == WarningCode.TEXT_LAYER_OCR_LAYER_READ]
+    assert warning.message.endswith("would otherwise be refused as a scan (scan_needs_ocr)")
+    assert not [w for w in read.warnings if w.code == WarningCode.TEXT_LAYER_PAGE_UNUSABLE]
+
+
+def test_no_fallback_when_files_are_never_refused():
+    from bibr.ocr.text_layer import _read_ocr_layer_instead
+
+    fs, settings, first = _fallback_inputs(min_success_rate=0.0)
+
+    assert _read_ocr_layer_instead(fs, settings, first) == (first, None)
+
+
+def test_lexicon_word_share_needs_enough_words():
+    from bibr.ocr.text_layer_quality import lexicon_word_share
+
+    assert lexicon_word_share(["the cat sat on a mat"]) is None
+    assert lexicon_word_share(_PROSE) == 1.0
+    nonsense = ["the sontraine of eotrasin and the nirostae in the tesorian onstrel"] * 8
+    assert lexicon_word_share(nonsense) < 0.6
+    # Korean runs its words together: a lexicon lookup cannot judge it.
+    assert lexicon_word_share(["가나다라 마바사아 자차카타 파하가나"] * 30) is None
+
+
+# Sentences written for these tests in languages outside the broad lexicon set.
+_POLISH = (
+    "Badanie objęło grupę studentów, którzy przez cały rok uczyli się według nowego "
+    "programu. Wyniki pokazują, że uczniowie lepiej rozumieją tekst i chętniej czytają "
+    "książki w domu. Nauczyciele zauważyli także większą aktywność podczas zajęć. "
+) * 2
+_SWEDISH = (
+    "Studien omfattade elever som under ett helt år arbetade med det nya programmet i "
+    "skolan. Resultaten visar att eleverna förstår texten bättre och läser fler böcker "
+    "hemma än tidigare. Lärarna såg också att eleverna var mer aktiva under lektionerna. "
+) * 2
+_TURKISH = (
+    "Çalışmaya yeni programla bir yıl boyunca ders gören öğrenciler katıldı ve sonuçlar "
+    "incelendi. Sonuçlar öğrencilerin metni daha iyi anladığını ve evde daha çok kitap "
+    "okuduğunu gösteriyor. Öğretmenler ayrıca derslerde daha fazla katılım gördü. "
+) * 2
+_CZECH = (
+    "Studie zahrnula žáky, kteří celý rok pracovali podle nového programu ve škole. "
+    "Výsledky ukazují, že žáci lépe rozumějí textu a doma čtou více knih než dříve. "
+    "Učitelé také viděli, že žáci byli během hodin aktivnější a chodili častěji. "
+) * 2
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        # One Greek letter names Greek, and Greek alone must not judge the text.
+        _POLISH + " Współczynnik α wynosił 0,05.",
+        _SWEDISH + " Koefficienten β var 0,05.",
+        _TURKISH + " Örnekler 5 μm kalınlığındaydı.",
+        # An invented author, before the text, with a letter only Polish writes.
+        "Łubor Kwast. " + _CZECH,
+    ],
+    ids=["polish", "swedish", "turkish", "czech"],
+)
+def test_lexicon_word_share_judges_every_language_the_text_names(layer):
+    from bibr.ocr.text_layer_quality import MIN_LEXICON_WORD_SHARE, lexicon_word_share
+
+    assert lexicon_word_share([layer]) >= MIN_LEXICON_WORD_SHARE
+
+
+def test_lexicon_word_share_loads_no_lexicon_once_the_share_is_enough(monkeypatch):
+    # An English layer, with two invented names en does not know: en alone
+    # brings the share over the threshold, so no other lexicon is loaded.
+    import wordfreq
+
+    from bibr.ocr.text_layer_quality import MIN_LEXICON_WORD_SHARE, lexicon_word_share
+
+    consulted: set[str] = set()
+    zipf = wordfreq.zipf_frequency
+
+    def spy(word, lang, *args, **kwargs):
+        consulted.add(lang)
+        return zipf(word, lang, *args, **kwargs)
+
+    monkeypatch.setattr(wordfreq, "zipf_frequency", spy)
+    layer = [*_PROSE, "as Brisko Vandemeer and Tolgrin Quessaby wrote."]
+
+    share = lexicon_word_share(layer, enough=MIN_LEXICON_WORD_SHARE)
+
+    assert share >= MIN_LEXICON_WORD_SHARE
+    assert consulted == {"en"}
+    # Below the threshold every lexicon is consulted, so the share is exact.
+    nonsense = ["the sontraine of eotrasin and the nirostae in the tesorian onstrel"] * 8
+    assert lexicon_word_share(nonsense, enough=MIN_LEXICON_WORD_SHARE) == lexicon_word_share(
+        nonsense
+    )

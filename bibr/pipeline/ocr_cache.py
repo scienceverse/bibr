@@ -140,8 +140,12 @@ def _key(
     )
     table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if runs_table_recovery else 0
     from bibr import __version__
+    from bibr.config import OcrOptions
     from bibr.document.model import HIDDEN_TEXT_RULE
     from bibr.ocr.native_text import FURNITURE_ROUTE_RULE
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND
+
+    default_min_success_rate = OcrOptions.model_fields["min_success_rate"].default
 
     parts = [
         str(_CACHE_FORMAT_VERSION),
@@ -193,10 +197,28 @@ def _key(
         f"native_text_hidden={HIDDEN_TEXT_RULE}",
         "native_text_reject_invisible_layer="
         f"{int(effective.ocr.native_text_reject_invisible_layer)}",
-        # Off adds nothing, so every key written before the option stays valid.
+        # Unset adds nothing (off adds its own part below).
         *(
             ["text_layer_read_ocr_layer=1"]
             if effective.ocr.text_layer_read_ocr_layer is True
+            else []
+        ),
+        # With the option unset, the text-layer route reads a scan's OCR layer
+        # only when the refusal threshold would refuse the file, so the
+        # threshold decides what the regions hold. The default adds nothing.
+        *(
+            [f"text_layer_ocr_layer_fallback_rate={effective.ocr.min_success_rate}"]
+            if identity.backend == TEXT_LAYER_BACKEND
+            and effective.ocr.text_layer_read_ocr_layer is None
+            and effective.ocr.min_success_rate != default_min_success_rate
+            else []
+        ),
+        # Off, that scan is refused: it must not be served the layer read an
+        # unset run stored.
+        *(
+            ["text_layer_read_ocr_layer=0"]
+            if identity.backend == TEXT_LAYER_BACKEND
+            and effective.ocr.text_layer_read_ocr_layer is False
             else []
         ),
         f"outline_headings={int(effective.pipeline.outline_headings)}",
