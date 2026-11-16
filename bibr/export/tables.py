@@ -247,6 +247,21 @@ class ExportFile:
     data: Mapping[str, Any]
 
 
+class NoExportsError(ValueError):
+    """None of the sources was a bibr export, so nothing was written.
+
+    Raised by :func:`write_tables` and :func:`~bibr.export.citations.write_references`
+    when called with ``require_exports=True`` (as ``bibr tables`` and
+    ``bibr references`` do). ``skipped`` lists each source with the reason.
+    """
+
+    def __init__(self, skipped: tuple[tuple[str, str], ...]):
+        self.skipped = skipped
+        super().__init__(
+            f"none of the {len(skipped)} inputs is a bibr export" if skipped else "no inputs"
+        )
+
+
 def _not_an_export(payload: Any) -> str | None:
     """Why JSON read from a file is not an export these tables read, or None.
 
@@ -314,7 +329,9 @@ def _flush_tables(tables: list[_Table], labels: list[str]) -> None:
             raise ValueError(f"table {table.name} (papers {papers}): {exc}") from exc
 
 
-def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
+def write_tables(
+    sources: Iterable[Any], out_dir: str | Path, *, require_exports: bool = False
+) -> TablesReport:
     """Write the exports in *sources* as one Parquet file per table in *out_dir*.
 
     *sources* are export dicts, :class:`bibr.Result` objects, or paths to
@@ -328,7 +345,9 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
     A ``paper_id`` seen twice raises :class:`ValueError`: it is the key that
     joins the tables. The files are written to a temporary directory and
     moved into *out_dir* only when every source was read, replacing earlier
-    table files; a failure leaves *out_dir* as it was.
+    table files; a failure leaves *out_dir* as it was (one this call created
+    is removed again). With ``require_exports=True``, sources that hold no
+    export at all raise :class:`NoExportsError` instead of writing empty tables.
     """
     try:
         import pyarrow  # noqa: F401
@@ -337,6 +356,7 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
     from bibr.export.models import PaperExportReader
 
     out = Path(out_dir)
+    created = not out.exists()
     out.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".bibr-tables-", dir=out))
     paper = _paper_table(staging)
@@ -384,6 +404,8 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
             if papers % _PAPERS_PER_ROW_GROUP == 0:
                 _flush_tables(tables, pending)
                 pending = []
+        if require_exports and not papers:
+            raise NoExportsError(tuple(skipped))
         try:
             for table in tables:
                 table.close()
@@ -406,6 +428,11 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
                     except Exception:  # noqa: BLE001 - the original error is the one to raise
                         logger.debug("closing %s failed", table.path, exc_info=True)
         shutil.rmtree(staging, ignore_errors=True)
+        if not completed and created:
+            try:
+                out.rmdir()  # only when nothing else was put there meanwhile
+            except OSError:
+                pass
     return TablesReport(
         out_dir=out,
         files=files,

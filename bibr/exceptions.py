@@ -6,7 +6,9 @@ distinguish at HTTP / CLI boundaries:
 - ``InputValidationError`` (4xx) — user-supplied input rejected
 - ``UpstreamServiceError`` (5xx) — third-party (LLM, OCR, Crossref) failed
 - ``ProcessingError``       (422 for stable processing failures) — processing failed mid-pipeline
+- ``InputFileNotFoundError``      — the input path does not exist (also a ``FileNotFoundError``)
 - ``ConfigurationError``          — invalid ``.env`` / environment settings
+- ``InvalidOptionError``          — an option value is not one bibr accepts (also a ``ValueError``)
 - ``ModelOverrideError``          — a model setting names a model that cannot be loaded
 
 A failed LLM task call raises an ``LlmCallError``, an ``UpstreamServiceError``
@@ -341,9 +343,37 @@ class LlmInvalidOutputError(LlmCallError):
 
 
 class InputValidationError(BibrError):
-    """Raised when the input file is invalid or causes an error in downstream services (4xx)"""
+    """Raised when the input file is invalid or causes an error in downstream services (4xx)
 
-    pass
+    ``error_code`` is the code a batch records for such a file
+    (``ChewFailure.error_code``).
+    """
+
+    error_code = "invalid_input"
+
+
+class InputFileNotFoundError(InputValidationError, FileNotFoundError):
+    """The input path does not exist.
+
+    Both an :class:`InputValidationError` (the caller's input, a 4xx) and a
+    built-in :class:`FileNotFoundError`, so ``except FileNotFoundError`` and
+    ``except bibr.BibrError`` both catch it. ``error_code`` is the code a
+    batch records for the file (``ChewFailure.error_code``).
+    """
+
+    error_code = "file_not_found"
+
+    def __init__(self, path: object) -> None:
+        import errno
+
+        super().__init__(errno.ENOENT, "No such file or directory", str(path))
+        self.path = str(path)
+
+    def __str__(self) -> str:
+        return f"input file not found: {self.path}"
+
+    def __reduce__(self) -> tuple[type, tuple[str]]:
+        return (type(self), (self.path,))
 
 
 class ProcessingError(BibrError):
@@ -398,6 +428,14 @@ class ConfigurationError(BibrError):
     def __init__(self, message: str, *, problems: list[str] | None = None) -> None:
         super().__init__(message)
         self.problems = problems or []
+
+
+class InvalidOptionError(ConfigurationError, ValueError):
+    """An option value bibr does not accept (``bibr.chew(ocr="foo")``, ``refs="x"``).
+
+    Raised before any model loads. Also a :class:`ValueError`, which these
+    checks raised before this class existed.
+    """
 
 
 class ModelOverrideError(ConfigurationError):

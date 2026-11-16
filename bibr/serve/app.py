@@ -8,6 +8,7 @@ server exposes:
   - ``GET  /papers/jobs/{id}/result``  — fetch the paper_json once succeeded
   - ``GET  /papers/jobs/{id}/references`` — its reference list (CSL-JSON, BibTeX, RIS)
   - ``DELETE /papers/jobs/{id}``       — cancel a job that is still queued
+  - ``GET  /``                         — where the docs, probes and extract route are
   - ``GET  /health``                   — LitServe's built-in liveness check
   - ``GET  /ready``                    — custom readiness probe (OCR + Redis + job store)
 
@@ -18,12 +19,17 @@ the async-job API (``JOBS_ENABLED``) and metering (``METER_ENABLED``) are
 on by default and independently toggleable.
 """
 
+import contextlib
 import functools
 import json
 import logging
 import os
+import signal
+import sys
+import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -343,6 +349,7 @@ def _build_server(upload_stores):
     server.app.state.upload_store = upload_store
     server.app.state.inference_tracker = inference_tracker
     register_extract_route(server.app, upload_store, inference_tracker)
+    _register_index_route(server.app)
     # LitServe installs GZipMiddleware at Starlette's default level 9, and it
     # compresses on the event loop. The stack is built on the first request,
     # so the level can still be lowered here.
@@ -527,6 +534,118 @@ def _build_server(upload_stores):
 
     _compose_lifespan_cleanup(server.app, _close_ingress_resources)
     return server
+
+
+#: What ``GET /`` answers: where to go next, in place of LitServe's bare
+#: "litserve running". Paths only, so it says nothing about the deployment.
+INDEX_PAYLOAD = {
+    "service": "bibr",
+    "docs": "/docs",
+    "openapi": "/openapi.json",
+    "health": "/health",
+    "ready": "/ready",
+    "extract": "POST /papers/extract",
+}
+
+
+def _register_index_route(app) -> None:
+    """Answer ``GET /`` with :data:`INDEX_PAYLOAD`.
+
+    Replaces LitServe's own ``/`` route and keeps its dependencies (LitServe's
+    auth hook) and schema flag. The auth gate middleware treats ``/`` as before:
+    it is not one of the public probe paths.
+    """
+    from fastapi.responses import JSONResponse
+    from fastapi.routing import APIRoute
+
+    old = [
+        route
+        for route in app.router.routes
+        if isinstance(route, APIRoute) and route.path == "/" and "GET" in route.methods
+    ]
+    for route in old:
+        app.router.routes.remove(route)
+    dependencies = list(old[0].dependencies) if old else None
+    include_in_schema = old[0].include_in_schema if old else False
+
+    async def index() -> JSONResponse:
+        return JSONResponse(INDEX_PAYLOAD)
+
+    app.add_api_route(
+        "/",
+        index,
+        methods=["GET"],
+        dependencies=dependencies,
+        include_in_schema=include_in_schema,
+    )
+
+
+def _display_base_url(host: str, port: int) -> str:
+    """The URL to open for a server bound to *host*:*port*."""
+    if host == "0.0.0.0":  # noqa: S104 — a display name, not a bind address
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "[::1]"
+    return f"http://{host}:{port}"
+
+
+def _announce_when_listening(server, base_url: str) -> None:
+    """Print one line with the URLs once the API process is up.
+
+    LitServe starts the API server only after the inference worker has loaded
+    the pipeline, so this line, unlike uvicorn's own "running on", means
+    requests are answered. It wraps LitServe's private ``_start_server``; a
+    LitServe without it just goes without the line.
+    """
+    start = getattr(server, "_start_server", None)
+    if not callable(start):
+        return
+
+    @functools.wraps(start)
+    def _start_and_announce(*args, **kwargs):
+        workers = start(*args, **kwargs)
+        print(
+            f"bibr serve is ready: {base_url}  (API docs {base_url}/docs, "
+            f"health {base_url}/health; Ctrl-C stops it)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return workers
+
+    server._start_server = _start_and_announce
+
+
+@contextlib.contextmanager
+def _sigterm_stops_gracefully() -> Iterator[None]:
+    """Treat SIGTERM to ``bibr serve`` like Ctrl-C while the server runs.
+
+    LitServe shuts its API server and inference worker down on
+    ``KeyboardInterrupt``, but installs nothing for SIGTERM: ``kill <pid>``
+    (or ``docker stop``) ended the main process at once and left both
+    children serving. The handler raises ``KeyboardInterrupt`` in the main
+    process only; a forked child that inherited it (multiprocessing's manager)
+    dies on SIGTERM as before. Further SIGTERMs are ignored while the shutdown
+    runs. The previous handler is restored afterwards.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    main_pid = os.getpid()
+
+    def _on_sigterm(_signum, _frame):
+        if os.getpid() != main_pid:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        logger.info("SIGTERM received; shutting down")
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _register_readiness_route(server, Settings) -> None:
@@ -833,11 +952,13 @@ def main():
     # the inference-worker count, making API processes race over shared cleanup.
     # log_config=None keeps uvicorn from installing its own handlers, so its
     # records propagate to the serve sink (formatted, scrubbed) instead.
-    server.run(
-        host=args.host,
-        port=args.port,
-        generate_client_file=False,
-        num_api_servers=1,
-        log_level=Settings.SERVE_LOG_LEVEL,
-        log_config=None,
-    )
+    _announce_when_listening(server, _display_base_url(args.host, args.port))
+    with _sigterm_stops_gracefully():
+        server.run(
+            host=args.host,
+            port=args.port,
+            generate_client_file=False,
+            num_api_servers=1,
+            log_level=Settings.SERVE_LOG_LEVEL,
+            log_config=None,
+        )

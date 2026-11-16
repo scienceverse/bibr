@@ -55,6 +55,62 @@ SCAN_NEEDS_OCR_ROUTES = (
     "or the hosted demo at try.bibr.org"
 )
 
+#: The same routes in the Python library's words: :mod:`bibr.api` puts this in
+#: place of :data:`SCAN_NEEDS_OCR_ROUTES` in what ``bibr.chew()`` raises or
+#: records, since a Python caller passes options, not command-line flags.
+SCAN_NEEDS_OCR_ROUTES_LIBRARY = (
+    'an OCR route: ocr="anthropic" (a cloud model; the page images leave this machine), '
+    'a GPU OCR server (ocr="paddle" starts PaddleOCR-VL, ocr_url="..." points at one you run) '
+    "or the hosted demo at try.bibr.org"
+)
+
+#: The OCR backend names a caller can ask for (``bibr.chew(ocr=...)``,
+#: ``bibr chew --ocr``): the automatic ``paddle`` selector, the ``glm`` alias,
+#: the concrete runtimes, the cloud vision backends and the text layer. These
+#: are the names an error lists.
+OCR_BACKEND_NAMES = (
+    "paddle",
+    "paddle-vllm",
+    "paddle-rapid-mlx",
+    "paddle-mlx-vlm",
+    "paddle-http",
+    "glm",
+    "glm-llama",
+    "glm-rapid-mlx",
+    "glm-http",
+    "gemini",
+    "openai",
+    "anthropic",
+    TEXT_LAYER_BACKEND,
+)
+
+#: Accepted as well, but not offered: older spellings (``http``, ``glm-local``),
+#: a runtime the CLI does not list (``glm-mlx``) and serve's own client.
+_OTHER_ACCEPTED_OCR_BACKENDS = frozenset({"http", "glm-local", "glm-mlx", "serve-http"})
+
+
+def check_backend_request(name: str | None, *, option: str = "ocr") -> None:
+    """Refuse an OCR backend name no route answers to, before anything loads.
+
+    Raises :class:`~bibr.exceptions.InvalidOptionError` naming the closest
+    known name and every name in :data:`OCR_BACKEND_NAMES`. ``None`` (no
+    request) passes. The registry itself only fills as backend modules are
+    imported, so the names are checked against this static list; a test
+    keeps it in step with the registered backends.
+    """
+    if name is None or name in OCR_BACKEND_NAMES or name in _OTHER_ACCEPTED_OCR_BACKENDS:
+        return
+    import difflib
+
+    from bibr.exceptions import InvalidOptionError
+
+    close = difflib.get_close_matches(str(name), OCR_BACKEND_NAMES, n=1, cutoff=0.6)
+    hint = f" Did you mean {close[0]!r}?" if close else ""
+    raise InvalidOptionError(
+        f"unknown OCR backend {option}={name!r}.{hint} Known backends: "
+        + ", ".join(OCR_BACKEND_NAMES)
+    )
+
 
 # VRAM the managed PaddleOCR-VL vLLM server is given: its ~2.1 GiB of weights
 # and non-torch memory, the vision encoder's ~0.6 GiB profiling peak at 16,384

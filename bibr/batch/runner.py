@@ -395,6 +395,8 @@ class WarmChewMany:
         from bibr.api import Chewer
 
         self._chewer = Chewer(**local.chew_options)
+        # Failures are printed on the command line: keep the CLI's --ocr wording.
+        self._chewer._library_wording = False
         self._stages = local.stages
 
     def __call__(self, paths: list[Path], batch_size: int) -> list[Any]:
@@ -852,13 +854,15 @@ def _execute(
     n_failed = 0
     # Papers the run stopped on a model override before they finished: no verdict.
     n_not_finished = 0
+    # Papers an interrupt stopped (Ctrl-C, SIGTERM): no verdict, a resume runs them.
+    n_interrupted = 0
     done = 0
     total = len(plan.to_run)
     # Papers of this run whose export fell back from an overridden model.
     fell_back: list[str] = []
 
     def record(item: BatchItem, outcome: Outcome) -> None:
-        nonlocal n_ok, n_failed, n_not_finished, done
+        nonlocal n_ok, n_failed, n_not_finished, n_interrupted, done
         if outcome.ok and outcome.export is not None:
             # The batch's own id is the corpus key: unique by construction and
             # the name of the JSON file, where the export's default (the input
@@ -903,6 +907,12 @@ def _execute(
                 "not finished, the run stopped on a model override",
                 soft_wrap=True,
             )
+        elif outcome.error_code == INTERRUPTED:
+            n_interrupted += 1
+            console.print(
+                f"  [yellow]-[/yellow] [dim]\\[{done}/{total}][/dim] {item.paper_id}: interrupted",
+                soft_wrap=True,
+            )
         else:
             n_failed += 1
             console.print(
@@ -923,7 +933,7 @@ def _execute(
     interrupted = False
     fatal: str | None = None
     if total == 0:
-        console.print("  [dim]nothing to do[/dim]")
+        console.print(f"  {_nothing_to_do(plan)}", soft_wrap=True)
     elif options.remote is not None:
         executor = RemoteExecutor(options.remote, transport=transport)
 
@@ -1011,6 +1021,7 @@ def _execute(
             "reason": reason,
             "n_ok": n_ok,
             "n_failed": n_failed,
+            "n_interrupted": n_interrupted,
             "fatal": fatal,
         }
     )
@@ -1037,13 +1048,18 @@ def _execute(
     if options.report_json:
         print(json.dumps(report, indent=2))
     else:
-        print(render_report(report, title=f"bibr batch {ui.SEP} run {run_id} ({reason})"))
+        if total:
+            # A run with nothing to do said so above; its own table would be all zeros.
+            print(render_report(report, title=f"bibr batch {ui.SEP} run {run_id} ({reason})"))
         if reason == "deadline":
             console.print("  [dim]deadline reached — re-run the same command to continue[/dim]")
         elif reason in ("stopped", "interrupted"):
+            left = n_interrupted + (total - done)
             console.print(
-                "  [dim]interrupted — re-run the same command to continue "
-                "(interrupted papers are retried by default)[/dim]"
+                f"  [dim]{left} {_papers(left)} interrupted or not started — "
+                "re-run the same command to continue[/dim]"
+                if left
+                else "  [dim]stopped — re-run the same command to continue[/dim]"
             )
         elif reason == MODEL_OVERRIDE_FAILED:
             console.print(
@@ -1068,6 +1084,23 @@ def _execute(
         # Nothing ran, and the papers left are waiting on a model that failed them.
         return EXIT_FAILURES
     return EXIT_FAILURES if n_failed else EXIT_OK
+
+
+def _papers(n: int) -> str:
+    return "paper" if n == 1 else "papers"
+
+
+def _nothing_to_do(plan: BatchPlan) -> str:
+    """What a run with no paper to process prints in place of an empty table."""
+    ok = len(plan.resume.skipped_ok)
+    failed = len(plan.resume.skipped_failed)
+    capped = len(plan.resume.override_capped)
+    parts = [f"{ok} {_papers(ok)} already ok in the ledger"]
+    if failed:
+        parts.append(f"{failed} failed {_papers(failed)} skipped (--retry-failed runs them again)")
+    if capped:
+        parts.append(f"{capped} skipped after falling back on a model override")
+    return "nothing to do: " + "; ".join(parts)
 
 
 def _names(paper_ids: Sequence[str]) -> str:
