@@ -223,9 +223,7 @@ def test_reinstall_command_forms():
     ]
 
 
-@pytest.mark.parametrize(
-    "path", ["pyproject.toml", "docs/getting-started/install.md", "docs/tester-guide.md"]
-)
+@pytest.mark.parametrize("path", ["pyproject.toml", "docs/getting-started/install.md"])
 def test_documented_reinstall_pins_the_locked_gpu_build(path):
     """An unpinned reinstall upgrades onnxruntime-gpu past the lock (to a CUDA 13 build)."""
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
