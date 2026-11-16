@@ -27,9 +27,14 @@ def _zip_payload_suffix(data: bytes) -> str:
     import io
     import zipfile
 
+    from bibr.input.zip_limits import only_standard_methods
+
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             names = set(zf.namelist())
+            # A bzip2/LZMA member can inflate without bound when read.
+            if not only_standard_methods(zf):
+                return ".docx"
             if "mimetype" in names:
                 mimetype = zf.read("mimetype").decode("utf-8", errors="ignore").strip()
                 if mimetype == "application/epub+zip":

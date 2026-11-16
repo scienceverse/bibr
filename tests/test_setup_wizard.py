@@ -610,7 +610,7 @@ def _gpu_build_run(
     """A subprocess.run stub for the gpu step: the install, the reinstall, then the probe."""
 
     def run(cmd, **kwargs):
-        if cmd[:2] == [sys.executable, "-c"]:
+        if cmd[:3] == [sys.executable, "-P", "-c"]:
             return MagicMock(returncode=0, stdout=probe_stdout, stderr=probe_stderr)
         if "--reinstall-package" in cmd or "--force-reinstall" in cmd:
             return MagicMock(returncode=reinstall_returncode, stdout="", stderr=reinstall_stderr)
@@ -645,8 +645,9 @@ def test_gpu_extra_reinstalls_the_synced_onnxruntime_gpu_last(monkeypatch, tmp_p
         "onnxruntime-gpu",
         "onnxruntime-gpu[cuda,cudnn]==1.26.0",
     ]
-    assert commands[2][:2] == [sys.executable, "-c"]
-    assert "CUDAExecutionProvider" in commands[2][2]
+    # -P: the probe must import the installed onnxruntime, not one in the folder.
+    assert commands[2][:3] == [sys.executable, "-P", "-c"]
+    assert "CUDAExecutionProvider" in commands[2][3]
     assert "onnxruntime-gpu 1.26.0 is the onnxruntime build that loads" in (
         wizard.console.export_text()
     )
@@ -662,6 +663,7 @@ def test_gpu_build_reinstall_uses_pip_without_uv(monkeypatch):
 
     assert run.call_args_list[0].args[0] == [
         sys.executable,
+        "-P",  # no pip.py from the working directory
         "-m",
         "pip",
         "install",
@@ -3717,3 +3719,13 @@ def test_an_answer_written_over_any_earlier_file_carries_its_own_mode(
     # A fast answer written over a file with no earlier LLM settings configures none.
     if mode == "fast" and existing in (None, _OLD_FAST_ENV, _OLD_ENV_WITHOUT_LLM):
         assert not llm_configured(settings)
+
+
+def test_commands_on_this_interpreter_run_without_working_directory_imports():
+    """A pip.py or onnxruntime.py in the folder setup runs from is not imported."""
+    from bibr.setup_wizard import _without_cwd_imports
+
+    pip = [sys.executable, "-m", "pip", "install", "bibr[ml]"]
+    assert _without_cwd_imports(pip) == [sys.executable, "-P", *pip[1:]]
+    uv = ["/bin/uv", "pip", "install", "--python", sys.executable, "bibr[ml]"]
+    assert _without_cwd_imports(uv) == uv

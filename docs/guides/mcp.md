@@ -145,6 +145,11 @@ memory or blocking the server.
 format the extension names (a `format` that names another fails), under the
 same symlink and overwrite rules.
 
+Both save tools also refuse hidden targets: any path component below the
+allowed directory that starts with `.` (`.mcp.json`, `.claude/settings.json`,
+`.git/...`), so an injected agent cannot plant tool configuration. The
+allowed directory itself may live under a dot-directory.
+
 ## URL downloads (`chew_url`)
 
 `chew_url` lets an agent go straight from a link (arXiv, publisher, data

@@ -449,8 +449,10 @@ handling arrangements have been approved.
 Gradio deletes the files but not the folders they were in: an empty folder
 for each JSON download, and one named after a hash of each uploaded paper. Its
 cleanup also runs as one background task that stops for good after an error.
-For a hosted demo on Linux, give the demo a temp folder of its own with
-`GRADIO_TEMP_DIR` and sweep it from cron as well, with an age above
+Unless `GRADIO_TEMP_DIR` is set, `bibr demo` creates a private `bibr-demo-*`
+temp folder (mode 0700) and removes it on exit, rather than using Gradio's
+shared `<tmp>/gradio`. For a hosted demo on Linux, give the demo a temp folder
+of your own with `GRADIO_TEMP_DIR` and sweep it from cron as well, with an age above
 `DEMO_CACHE_TTL_SECONDS`. For the default hour, every 15 minutes:
 
 ```bash

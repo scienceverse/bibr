@@ -972,3 +972,13 @@ def test_failed_write_keeps_the_old_file(tmp_path, monkeypatch):
         write_references(_export([_bib()]), out)
     assert out.read_text() == "old"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["refs.bib"]
+
+
+def test_bibtex_verbatim_fields_carry_no_tex_caret_escape():
+    """TeX reads ^^5c as a backslash before expanding, so a DOI may not keep one."""
+    from bibr.export.citations import _bibtex_verbatim
+
+    written = _bibtex_verbatim("10.1234/^^5cinput^^7b/etc/passwd^^7d")
+
+    assert "^" not in written
+    assert written == "10.1234/%5E%5E5cinput%5E%5E7b/etc/passwd%5E%5E7d"

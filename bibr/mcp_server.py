@@ -146,6 +146,28 @@ def _in_scope(path: Path, roots: tuple[Path, ...]) -> Path:
     return resolved
 
 
+def _refuse_hidden(out: Path, target: Path, roots: tuple[Path, ...]) -> None:
+    """Refuse a write target with a dot-prefixed component below its root.
+
+    Agent and tool configuration (``.mcp.json``, ``.claude/settings.json``,
+    ``.vscode/tasks.json``, ``.git/hooks``) lives in hidden paths, and a
+    prompt-injected model could otherwise plant commands there. Only the part
+    below the root counts, so a root that itself sits in a dot-directory keeps
+    working. When roots nest, the write is allowed if any root containing the
+    target sees no hidden component: an operator who passed ``--allow-dir
+    ~/proj/.claude`` meant it.
+    """
+    for root in roots:
+        if target.is_relative_to(root) and not any(
+            part.startswith(".") for part in target.relative_to(root).parts
+        ):
+            return
+    raise ToolError(
+        f"refusing to write {out}: hidden files and directories (names starting with '.') "
+        "are not writable"
+    )
+
+
 def _drop_empty(row: dict[str, Any]) -> dict[str, Any]:
     """Trim a row for tool output: drop keys whose value carries no signal."""
     return {k: v for k, v in row.items() if v not in (None, "", [])}
@@ -578,12 +600,14 @@ def _write_file(
 ) -> int:
     """Write *text* to *out* inside an allowed root; returns the bytes written.
 
-    Refuses to overwrite an existing file unless *overwrite*, and never writes
-    through a symbolic link.
+    Refuses to overwrite an existing file unless *overwrite*, never writes
+    through a symbolic link, and refuses hidden files and directories.
     """
     # Only the parent is resolved: the file itself must not be a symlink,
     # wherever it points.
     target = _in_scope(out.parent, roots) / out.name
+    # Before mkdir, so a refused path leaves no hidden directory behind.
+    _refuse_hidden(out, target, roots)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         info = target.lstat()
@@ -865,7 +889,8 @@ def build_server(
         was allowed to access.
 
         Refuses to overwrite an existing file unless `overwrite=True` is
-        passed explicitly, and never writes through a symbolic link.
+        passed explicitly, never writes through a symbolic link, and refuses
+        hidden files and directories (any path component starting with `.`).
         """
         entry = store.get(paper_id)
         out = Path(path).expanduser()
@@ -898,7 +923,8 @@ def build_server(
         Values and notes are as for export_references.
 
         Refuses to overwrite an existing file unless `overwrite=True` is
-        passed explicitly, and never writes through a symbolic link.
+        passed explicitly, never writes through a symbolic link, and refuses
+        hidden files and directories (any path component starting with `.`).
         """
         from bibr.export.citations import format_for_path, normalize_format
 

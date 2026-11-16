@@ -63,7 +63,7 @@ def test_uv_fallback_when_vllm_absent(monkeypatch):
     assert "--model" not in cmd
     assert "9999" in cmd
     assert "0.5" in cmd
-    assert server.base_url == "http://localhost:9999"
+    assert server.base_url == "http://127.0.0.1:9999"
 
 
 def test_uv_bootstrap_warns_with_the_install_remedy(caplog):
@@ -103,7 +103,7 @@ def test_command_and_base_url():
     assert "numind/NuExtract3" in cmd
     assert "9999" in cmd
     assert "0.5" in cmd
-    assert server.base_url == "http://localhost:9999"
+    assert server.base_url == "http://127.0.0.1:9999"
 
 
 def test_extra_args_appended(monkeypatch):
@@ -156,7 +156,7 @@ def test_configure_llm_client(monkeypatch):
     monkeypatch.setattr(Settings.llm, "model", Settings.llm.model)
     server.configure_llm_client()
     assert server._settings.llm.provider == "openai"
-    assert server._settings.llm.base_url == "http://localhost:9999/v1"
+    assert server._settings.llm.base_url == "http://127.0.0.1:9999/v1"
     assert server._settings.llm.model == "org/m"
 
 
@@ -166,7 +166,7 @@ def test_defaults_from_settings(monkeypatch):
     server, popen = _mk_server()
     cmd = popen.call_args[0][0]
     assert "org/from-settings" in cmd
-    assert server.base_url == "http://localhost:8123"
+    assert server.base_url == "http://127.0.0.1:8123"
 
 
 def test_unset_local_model_launches_the_cuda_bf16_variant(monkeypatch):
@@ -208,7 +208,7 @@ def test_health_poll_returns_when_server_is_ready(monkeypatch):
     # One 200 is not readiness: the grace re-probe must agree.
     assert process.poll.call_count == 3
     assert request.call_count == 2
-    request.assert_called_with("http://localhost:9999/health", timeout=5)
+    request.assert_called_with("http://127.0.0.1:9999/health", timeout=5)
 
 
 def test_health_poll_reports_early_process_exit(tmp_path, monkeypatch):

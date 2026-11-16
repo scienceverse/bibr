@@ -48,6 +48,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A PDF whose generated word spaces pdfium boxes far from their gap no longer
   reads with its words run together.
 
+### Security
+
+- A few kilobytes of ePub can no longer hold validation, and with it the event loop,
+  for minutes. The rewrite of self-closing tags backtracked cubically over a run of
+  unclosed tags (3 KB took half a minute); it is now linear. A self-closing tag with
+  a raw `<` inside an attribute value, which XHTML does not allow, is left as it is.
+- A PDF page with a very large MediaBox and one white or transparent string no longer
+  allocates gigabytes in hidden-text detection: those renders are capped at 4,000
+  pixels on the long side. Pages up to 4,000 pt render as before.
+- A DOCX or ePub whose members are compressed with bzip2 or LZMA is refused before
+  any member is read. OPC and OCF allow only stored and deflated members, and on some
+  Python builds the others inflate past the byte caps when their declared size lies
+  (591 bytes took 815 MiB). `bibr chew -` applies the same check to piped input.
+- A JATS contributor whose `rid` repeats one affiliation thousands of times gets that
+  affiliation once, not a string of gigabytes. An affiliation a contributor cites
+  twice, by any route, is likewise listed once.
+- Flattening `_{…}`, `^{…}` and `\text{…}` in math text is linear in a run of unclosed
+  braces (120 KB took 12 seconds), with the same result, and so is finding where a
+  Word reference list ends in a document of many paragraphs.
+- Managed model servers are addressed as `127.0.0.1`, the address they bind, instead
+  of `localhost`. Where `localhost` resolves to `::1` first, another local user
+  listening there on the server's port received the per-launch key and the documents.
+- `bibr setup` runs `python -m pip` and its onnxruntime probe with `-P`, so a `pip.py`
+  or `onnxruntime.py` in the folder it is run from is not imported. The command it
+  prints is unchanged.
+- BibTeX export percent-encodes `^` in `doi`, `url` and `eprint`. TeX reads `^^5c` as
+  a backslash before it expands anything, so a printed DOI could carry a command into
+  the bibliography of whoever compiled the file.
+- The MCP `save_paper` and `save_references` tools refuse a hidden file or directory
+  below the allowed directory (`.mcp.json`, `.claude/settings.json`, `.git/…`), so an
+  agent following instructions injected by a paper cannot plant tool configuration.
+  An allowed directory that itself lies under a dot-directory still works.
+- A `chew_url` refusal no longer names the address a host resolved to, which let an
+  agent read private DNS answers for internal names; the address is logged instead.
+- `bibr demo` gives Gradio a private temp folder (`bibr-demo-*`, mode 0700, removed on
+  exit) unless `GRADIO_TEMP_DIR` is set. Gradio's default is the shared `<tmp>/gradio`,
+  which another local user can create first and own.
+
 ## [0.9.1] - 2026-11-16
 
 The first 0.9 release; this section lists every change since 0.8.0. 0.9.0 was

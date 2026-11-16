@@ -1149,6 +1149,22 @@ _LATEX_TEXT_CMD_RE = re.compile(
 # Flatten subscripts _{...} and superscripts ^{...} to just the content.
 _LATEX_SUB_RE = re.compile(r"_\{([^}]*)\}")
 _LATEX_SUP_RE = re.compile(r"\^\{([^}]*)\}")
+
+
+def _sub_braced(pattern: re.Pattern[str], text: str) -> str:
+    """``pattern.sub(r"\\1", text)`` for a pattern that ends at its first ``}``.
+
+    Past the last closing brace nothing can match, yet each opener there made
+    the pattern read to the end of the text for one: quadratic in a run of
+    unclosed ``_{``. Before it every opener finds its brace, so the pass is
+    linear, with the same result.
+    """
+    end = text.rfind("}") + 1
+    if not end:
+        return text
+    return pattern.sub(r"\1", text[:end]) + text[end:]
+
+
 # Also handle single-char subscripts/superscripts without braces: _x, ^x
 _LATEX_SUB_SINGLE_RE = re.compile(r"_([A-Za-z0-9])")
 _LATEX_SUP_SINGLE_RE = re.compile(r"\^([A-Za-z0-9])")
@@ -1448,11 +1464,11 @@ def _flatten_latex(text: str, *, single_char: bool) -> str:
     result = text
 
     # 1. Unwrap text-mode commands: \mathrm{n=5} -> n=5
-    result = _LATEX_TEXT_CMD_RE.sub(r"\1", result)
+    result = _sub_braced(_LATEX_TEXT_CMD_RE, result)
 
     # 2. Flatten subscripts and superscripts: _{c} -> c, ^{2} -> 2
-    result = _LATEX_SUB_RE.sub(r"\1", result)
-    result = _LATEX_SUP_RE.sub(r"\1", result)
+    result = _sub_braced(_LATEX_SUB_RE, result)
+    result = _sub_braced(_LATEX_SUP_RE, result)
     if single_char:
         result = _LATEX_SUB_SINGLE_RE.sub(r"\1", result)
         result = _LATEX_SUP_SINGLE_RE.sub(r"\1", result)

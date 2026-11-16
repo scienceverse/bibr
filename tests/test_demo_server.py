@@ -4,6 +4,8 @@ The parser is pure ``argparse`` (gradio is imported lazily inside ``main``),
 so these tests do not need the demo extra installed.
 """
 
+import os
+
 import pytest
 
 from bibr.demo.server import build_parser
@@ -90,3 +92,36 @@ def test_create_local_demo_without_gradio_names_the_tool_install(monkeypatch):
     monkeypatch.setitem(sys.modules, "bibr.demo.local_app", None)
     with pytest.raises(ImportError, match=r"uv tool install 'bibr\[demo\]'"):
         create_local_demo()
+
+
+def test_private_gradio_temp_dir_is_created_and_removed_at_exit(monkeypatch):
+    import os
+    import stat
+
+    from bibr.demo import server
+
+    exit_hooks = []
+    monkeypatch.delenv("GRADIO_TEMP_DIR", raising=False)
+    monkeypatch.setattr(
+        server.atexit, "register", lambda fn, *a, **k: exit_hooks.append((fn, a, k))
+    )
+    server._private_gradio_temp_dir()
+    path = os.environ["GRADIO_TEMP_DIR"]
+    try:
+        assert os.path.basename(path).startswith("bibr-demo-")
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+        ((fn, a, k),) = exit_hooks
+        fn(*a, **k)
+        assert not os.path.exists(path)
+    finally:
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def test_operator_gradio_temp_dir_is_left_alone(monkeypatch, tmp_path):
+    from bibr.demo import server
+
+    monkeypatch.setenv("GRADIO_TEMP_DIR", str(tmp_path))
+    server._private_gradio_temp_dir()
+    assert os.environ["GRADIO_TEMP_DIR"] == str(tmp_path)

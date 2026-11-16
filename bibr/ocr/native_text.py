@@ -2301,6 +2301,9 @@ _HIDDEN_TEXT_MIN_LUMA = 0.6
 _HIDDEN_TEXT_BACKGROUND_TOLERANCE = 16
 _HIDDEN_TEXT_MAX_SHOWN_SHARE = 0.01
 _HIDDEN_TEXT_RENDER_SCALE = 1.0
+# Long-side pixel cap for those renders, so a huge MediaBox cannot allocate
+# gigabytes. Pages up to A3/tabloid (about 1200 pt) are rendered at full scale.
+_HIDDEN_TEXT_MAX_RENDER_PX = 4000.0
 _HIDDEN_TEXT_FAINT_TOLERANCE = 32
 _HIDDEN_TEXT_MAX_FAINT_SIZE_PT = 14.0
 _HIDDEN_TEXT_MIN_COVER_SHARE = 0.8
@@ -3210,8 +3213,14 @@ def _shape_render_scale(page) -> float:
     )
 
 
+def _render_scale(page) -> float:
+    """The hidden-text render scale, lowered so the page's long side stays under the pixel cap."""
+    width, height = page.get_size()
+    return min(_HIDDEN_TEXT_RENDER_SCALE, _HIDDEN_TEXT_MAX_RENDER_PX / max(width, height, 1.0))
+
+
 def _render_rgb(page):
-    return page.render(scale=_HIDDEN_TEXT_RENDER_SCALE).to_pil().convert("RGB")
+    return page.render(scale=_render_scale(page)).to_pil().convert("RGB")
 
 
 def _changed_pixels(image, base, tolerance: int = _HIDDEN_TEXT_BACKGROUND_TOLERANCE):

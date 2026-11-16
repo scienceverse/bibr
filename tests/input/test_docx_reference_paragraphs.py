@@ -117,6 +117,19 @@ def test_one_entry_per_paragraph_is_the_segmentation():
     assert reference_entries(_paragraphs(*REFS)) == (REFS, "ok")
 
 
+def test_following_text_skips_empty_paragraphs_after_an_end_heading():
+    # "Annex 2" over blank paragraphs, then a dated entry: the heading is
+    # looked through to the next non-empty text, as before.
+    paragraphs = _paragraphs(*REFS, "Annex 2", "", "  ", *REFS[:2])
+    assert reference_entries(paragraphs) == (REFS + REFS[:2], "ok")
+
+
+def test_many_paragraphs_do_not_cost_a_tail_copy_each():
+    texts = ["Table 1"] * 30000 + [""] * 30000
+    paragraphs = _paragraphs(*REFS, *texts)
+    assert reference_entries(paragraphs) == (REFS, "ok")
+
+
 @pytest.mark.parametrize(
     "end",
     [

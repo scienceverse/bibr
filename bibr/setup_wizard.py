@@ -1106,6 +1106,19 @@ def _install_command_for_extras(
     )
 
 
+def _without_cwd_imports(cmd: list[str]) -> list[str]:
+    """*cmd* with ``-P`` when it starts this interpreter on ``-m`` or ``-c``.
+
+    Both put the working directory first on ``sys.path``, so a ``pip.py`` or
+    ``onnxruntime.py`` lying in the folder ``bibr setup`` runs from (unpacked
+    with a set of papers, say) would run in place of the real one. The command
+    shown to the user stays the plain one.
+    """
+    if len(cmd) > 1 and cmd[0] == sys.executable and cmd[1] in ("-m", "-c"):
+        return [cmd[0], "-P", *cmd[1:]]
+    return cmd
+
+
 def _command_label(cmd: list[str]) -> str:
     if len(cmd) >= 4 and cmd[1:3] == ["-m", "pip"]:
         return "python -m pip"
@@ -1505,7 +1518,7 @@ class SetupWizard:
         self.console.print(f"[dim]{install_label}:[/dim] [cyan]{escape(shlex.join(cmd))}[/cyan]")
         with self.console.status(f"Running {cmd_label} …"):
             result = subprocess.run(  # noqa: S603
-                cmd,
+                _without_cwd_imports(cmd),
                 capture_output=True,
                 text=True,
             )
@@ -1552,14 +1565,14 @@ class SetupWizard:
         cmd = onnxruntime_gpu_reinstall_command(version, uv=uv_bin)
         with self.console.status(f"Reinstalling onnxruntime-gpu {version} over the CPU build …"):
             result = subprocess.run(  # noqa: S603
-                cmd,
+                _without_cwd_imports(cmd),
                 capture_output=True,
                 text=True,
             )
             # A fresh interpreter: this one may hold a build it imported earlier.
             probe = (
                 subprocess.run(  # noqa: S603
-                    [sys.executable, "-c", _GPU_BUILD_PROBE],
+                    [sys.executable, "-P", "-c", _GPU_BUILD_PROBE],
                     capture_output=True,
                     text=True,
                 )

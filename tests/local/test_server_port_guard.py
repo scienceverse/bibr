@@ -55,7 +55,7 @@ class TestGuardHelper:
         assert (
             guard_managed_server_port(
                 "ocr",
-                base_url="http://localhost:8772",
+                base_url="http://127.0.0.1:8772",
                 model="mlx-community/GLM-OCR-bf16",
                 server_label="Rapid-MLX",
                 request_fn=_request_fn_port_free,
@@ -67,7 +67,7 @@ class TestGuardHelper:
         assert (
             guard_managed_server_port(
                 "ocr",
-                base_url="http://localhost:8772",
+                base_url="http://127.0.0.1:8772",
                 model="mlx-community/GLM-OCR-bf16",
                 server_label="Rapid-MLX",
                 request_fn=_request_fn_serving(["mlx-community/GLM-OCR-bf16"]),
@@ -79,7 +79,7 @@ class TestGuardHelper:
         with pytest.raises(UpstreamServiceError) as excinfo:
             guard_managed_server_port(
                 "ocr",
-                base_url="http://localhost:8772",
+                base_url="http://127.0.0.1:8772",
                 model="mlx-community/GLM-OCR-bf16",
                 server_label="Rapid-MLX",
                 request_fn=_request_fn_serving(["mlx-community/GLM-OCR-8bit"]),
@@ -188,7 +188,7 @@ class TestRapidMlxServerGuard:
             settings=GlobalSettings(),
         )
         assert server.loaded is True
-        assert server.base_url == "http://localhost:8772"
+        assert server.base_url == "http://127.0.0.1:8772"
         server.shutdown()  # must not touch the process we don't own
         popen.assert_not_called()
 
@@ -214,7 +214,7 @@ class TestVllmMlxServerGuard:
 
         server = mod.VllmMlxServer(model="requested/model", port=8766)
         assert server.loaded is True
-        assert server.base_url == "http://localhost:8766"
+        assert server.base_url == "http://127.0.0.1:8766"
         server.shutdown()
         popen.assert_not_called()
 
@@ -241,7 +241,7 @@ class TestVllmLlmServerGuard:
         monkeypatch.setattr(mod, "request_bytes", _request_fn_serving(["requested/model"]))
 
         server = mod.VllmLlmServer(model="requested/model", port=8768, settings=GlobalSettings())
-        assert server.base_url == "http://localhost:8768"
+        assert server.base_url == "http://127.0.0.1:8768"
         server.shutdown()
         popen.assert_not_called()
 

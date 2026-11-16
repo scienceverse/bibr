@@ -179,6 +179,17 @@ class TestFrontMatter:
         assert a2.affiliation == "Test Institute"
         assert a2.corresponding is False
 
+    def test_repeated_aff_rid_is_listed_once(self):
+        # A hostile @rid can repeat one id thousands of times; the affiliation
+        # string must not grow with it.
+        xml = FULL_JATS.replace(
+            b'<xref ref-type="aff" rid="a1"/>',
+            b'<xref ref-type="aff" rid="a1 a1 a1 a1"/><xref ref-type="aff" rid="a1"/>',
+        )
+        assert xml != FULL_JATS
+        a1 = _parse(xml)._contents.preparsed_metadata.authors[0]
+        assert a1.affiliation == "University of Test"
+
     def test_issn_falls_back_to_electronic(self):
         xml = FULL_JATS.replace(b'<issn pub-type="ppub">1234-5678</issn>', b"")
         m = _parse(xml)._contents.preparsed_metadata

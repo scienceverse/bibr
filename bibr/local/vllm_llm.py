@@ -58,7 +58,7 @@ def max_model_len(model: str, extra_args: str | None) -> int | None:
 
 
 def _server_url(port: int) -> str:
-    return f"http://localhost:{port}"
+    return f"http://127.0.0.1:{port}"
 
 
 def reuses_running_server(model: str, port: int) -> bool:

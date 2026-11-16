@@ -162,3 +162,25 @@ async def test_save_paper_requires_json_and_refuses_overwrite(tmp_path):
             )
         )
         assert saved["path"] == str(target)
+
+
+@pytest.mark.parametrize("rel", [".mcp.json", ".claude/settings.json", "sub/.hidden/x.json"])
+def test_write_file_refuses_hidden_targets_without_creating_directories(tmp_path, rel):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from bibr.mcp_server import _write_file
+
+    root = tmp_path.resolve()
+    with pytest.raises(ToolError, match="hidden"):
+        _write_file(root / rel, (root,), "{}", overwrite=False)
+    assert list(root.iterdir()) == []
+
+
+def test_write_file_allows_visible_paths_and_roots_inside_dot_directories(tmp_path):
+    from bibr.mcp_server import _write_file
+
+    root = tmp_path.resolve()
+    assert _write_file(root / "out" / "paper.json", (root,), "{}", overwrite=False) == 2
+    dot_root = root / ".cache" / "work"
+    dot_root.mkdir(parents=True)
+    assert _write_file(dot_root / "paper.json", (dot_root,), "{}", overwrite=False) == 2
