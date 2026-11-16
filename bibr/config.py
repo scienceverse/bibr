@@ -2141,8 +2141,9 @@ class MlOptions(_BibrSettings):
         "directory holding one. TRUST BOUNDARY: a .joblib bundle is deserialized with joblib "
         "via the gadget-restricted loader; only point it at a checkpoint you control.",
     )
+    # The pinned revision holds front_role.json/.npz (bibr-gbm/1) beside the joblib bundle.
     front_role_revision: str = Field(
-        "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b",
+        "a1fd66375f44a2db954fd8da66460cd527caca41",
         description="Pinned revision for the front-role classifier bundle. Pinned so a hub push "
         "cannot change front-matter output; 'main' tracks the repo head.",
     )
@@ -2941,8 +2942,9 @@ class GlobalSettings(_BibrSettings):
         "a checkpoint you control — never point it at an untrusted file.",
     )
     # Keep the pinned bundle compatible with geom_adjacent_features patterns.
+    # The pinned revision holds geom_segmenter.json/.npz (bibr-gbm/1) beside the joblib bundle.
     REF_GEOM_SEG_REVISION: str = Field(
-        "4d1702e2c766d96c8887bd4b30ef56637aa9b32c",
+        "88a292ffc709e5338dc5faf078fd8337b3ff962d",
         description="Pinned commit revision for the geometry reference segmenter bundle.",
     )
     # Line-sequence tagger the geom tier tries before the GBM
