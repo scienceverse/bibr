@@ -244,6 +244,19 @@ def test_native_text_min_printable_ratio_env_override(monkeypatch):
     assert s.ocr.native_text_min_printable_ratio == pytest.approx(0.5)
 
 
+def test_text_layer_read_ocr_layer_is_unset_by_default_and_can_be_switched_off(monkeypatch):
+    # Unset reads a scan's OCR layer only in place of a refusal; an explicit
+    # false never reads it, so it must stay distinct from the default.
+    from bibr.config import GlobalSettings
+
+    monkeypatch.delenv("OCR_TEXT_LAYER_READ_OCR_LAYER", raising=False)
+    assert GlobalSettings().ocr.text_layer_read_ocr_layer is None
+    monkeypatch.setenv("OCR_TEXT_LAYER_READ_OCR_LAYER", "false")
+    assert GlobalSettings().ocr.text_layer_read_ocr_layer is False
+    monkeypatch.setenv("OCR_TEXT_LAYER_READ_OCR_LAYER", "true")
+    assert GlobalSettings().ocr.text_layer_read_ocr_layer is True
+
+
 def test_no_worker_count_setting_is_exposed():
     # Worker count is pinned in build_server(), not configurable: one worker
     # already serves concurrent requests via the LitServe async loop + the
@@ -424,7 +437,7 @@ def test_front_role_defaults_to_the_published_bundle(monkeypatch):
 
     s = GlobalSettings()
     assert s.ml.front_role_model_id == "scienceverse/bibr-front-role-v1"
-    assert s.ml.front_role_revision == "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b"
+    assert s.ml.front_role_revision == "a1fd66375f44a2db954fd8da66460cd527caca41"
     assert s.ml.front_role_enabled is True
     assert s.ml.front_role_min_confidence == 0.5
     assert s.ml.front_role_masthead_confidence == 0.8

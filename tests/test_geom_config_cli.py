@@ -13,8 +13,8 @@ def test_geom_settings_defaults(monkeypatch):
     s = GlobalSettings()
     assert s.REF_SEG_STRATEGY == "geom"  # geom is the default segmenter
     assert s.REF_GEOM_SEG_MODEL_ID == "scienceverse/bibr-geom-segmenter-v1"
-    # Pinned to the multilingual feature-port bundle commit.
-    assert s.REF_GEOM_SEG_REVISION == "4d1702e2c766d96c8887bd4b30ef56637aa9b32c"
+    # Pinned to the multilingual feature-port bundle with its bibr-gbm/1 manifest.
+    assert s.REF_GEOM_SEG_REVISION == "88a292ffc709e5338dc5faf078fd8337b3ff962d"
     assert s.REF_GEOM_SEG_CASCADE_THRESHOLD == 0.90
 
 

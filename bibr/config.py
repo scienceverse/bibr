@@ -1110,12 +1110,14 @@ class OcrOptions(_BibrSettings):
         "OCR engine adds to a scan). The legacy layer is often worse than OCR; disable "
         "to trust it as before.",
     )
-    text_layer_read_ocr_layer: bool = Field(
-        False,
+    text_layer_read_ocr_layer: bool | None = Field(
+        None,
         description="With the text-layer backend (no OCR model), read a scanned page from the "
         "OCR text layer the PDF carries, when it has one: invisible text over an image that "
-        "covers the page, as scanners and publishers add to make a scan searchable. Off by "
-        "default, so such a PDF is refused as a scan (scan_needs_ocr). The layer is somebody "
+        "covers the page, as scanners and publishers add to make a scan searchable. True "
+        "reads it on every such page. Unset (the default) reads it only when the PDF would "
+        "otherwise be refused as a scan (scan_needs_ocr) and most of the layer's words are "
+        "known words. False never reads it, so such a PDF is refused. The layer is somebody "
         "else's OCR and is often less accurate than an OCR model; pages read this way are "
         "named in a TEXT_LAYER_OCR_LAYER_READ warning. A scan with no such layer, or one "
         "cropped to its text block, is still refused.",
@@ -2128,18 +2130,19 @@ class MlOptions(_BibrSettings):
     # evidence for front-matter ownership (title/byline/affiliation/abstract
     # admission, masthead suppression) and for non-English reference headers.
     # Null disables it; front matter then rests on the lexical heuristics alone.
-    # Loaded via bibr.ner.checkpoint.resolve_checkpoint (bare repo id gets
-    # ":front_role.joblib" appended). scikit-learn and joblib are core deps, so
-    # this runs on a torch-free install like every other default-path model.
+    # Loaded via bibr.utils.gbm_bundle.load_gbm_bundle: front_role.json and its
+    # .npz (bibr-gbm/1), read with numpy alone.
     front_role_model_id: str | None = Field(
         "scienceverse/bibr-front-role-v1",
         description="HF Hub repo id (or local path) of the first-page region-role classifier "
         "bundle. Null disables the model and rests front matter on the lexical heuristics "
-        "alone. TRUST BOUNDARY: deserialized with joblib via the gadget-restricted loader; "
-        "only point it at a checkpoint you control.",
+        "alone. A local path names the front_role.json manifest (bibr-gbm/1, its .npz "
+        "beside it) or the directory holding them; scripts/export_gbm_bundle.py converts "
+        "a .joblib bundle.",
     )
+    # The pinned revision holds front_role.json/.npz (bibr-gbm/1) beside the joblib bundle.
     front_role_revision: str = Field(
-        "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b",
+        "a1fd66375f44a2db954fd8da66460cd527caca41",
         description="Pinned revision for the front-role classifier bundle. Pinned so a hub push "
         "cannot change front-matter output; 'main' tracks the repo head.",
     )
@@ -2926,18 +2929,18 @@ class GlobalSettings(_BibrSettings):
         "for this call. Bounds degenerate generations to a fast, detectable truncation.",
     )
     # Local geometry reference segmenter (REF_SEG_STRATEGY=geom). Frozen GBM
-    # bundle in a public HF repo, loaded via bibr.ner.checkpoint.resolve_checkpoint
-    # (the bare repo id gets ":geom_segmenter.joblib" appended). Needs the ml extra.
+    # bundle in a public HF repo, loaded via bibr.utils.gbm_bundle.load_gbm_bundle:
+    # geom_segmenter.json and its .npz (bibr-gbm/1), read with numpy alone.
     REF_GEOM_SEG_MODEL_ID: str = Field(
         "scienceverse/bibr-geom-segmenter-v1",
         description="HF Hub repo id for the local geometry reference segmenter (REF_SEG_STRATEGY=geom). "
-        "Needs the ml extra. TRUST BOUNDARY: this is deserialized with joblib (executes code on "
-        "load); a local path here is loaded via the gadget-restricted loader but must still be a "
-        "checkpoint you control — never point it at an untrusted file.",
+        "A local path names the geom_segmenter.json manifest (bibr-gbm/1, its .npz beside it) "
+        "or the directory holding them; scripts/export_gbm_bundle.py converts a .joblib bundle.",
     )
     # Keep the pinned bundle compatible with geom_adjacent_features patterns.
+    # The pinned revision holds geom_segmenter.json/.npz (bibr-gbm/1) beside the joblib bundle.
     REF_GEOM_SEG_REVISION: str = Field(
-        "4d1702e2c766d96c8887bd4b30ef56637aa9b32c",
+        "88a292ffc709e5338dc5faf078fd8337b3ff962d",
         description="Pinned commit revision for the geometry reference segmenter bundle.",
     )
     # Line-sequence tagger the geom tier tries before the GBM

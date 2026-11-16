@@ -45,7 +45,15 @@ _CORRESPONDING_RE = re.compile(
     r"autor(?:a)? (?:de )?correspond|auteur correspondant|korrespondenz|通讯作者|責任著者",
     re.IGNORECASE,
 )
-_ABSTRACT_HEADING_RE = re.compile(
+_ABSTRACT_WORDS = (
+    r"abstract|summary|resumen|resumo|r[ée]sum[ée]|zusammenfassung|riassunto|sommario|"
+    r"аннотация|анотація|резюме|abstrakt|abstrak|samenvatting|streszczenie|özet|"
+    r"sammanfattning|要旨|摘要|초록"
+)
+_ABSTRACT_HEADING_RE = re.compile(rf"^(?:{_ABSTRACT_WORDS})$", re.IGNORECASE)
+# The heading words that split title and abstract runs without ``rules``: the
+# words above less the ones the rules added, so that route reads as before.
+_BASE_ABSTRACT_HEADING_RE = re.compile(
     r"^(?:abstract|summary|resumen|resumo|r[ée]sum[ée]|zusammenfassung|riassunto|"
     r"аннотация|резюме|abstrakt|samenvatting|要旨|摘要|초록)$",
     re.IGNORECASE,
@@ -217,6 +225,11 @@ class TaggedFrontMatter:
     #: where no author carries an affiliation (the rules in
     #: :func:`_untagged_institutions`). In print order. Empty unless ``rules``.
     untagged_affiliations: list[str] = field(default_factory=list)
+    #: The page the abstract runs off the end of the tagger input on: its last
+    #: word closes no sentence and only page furniture follows it on the input's
+    #: last page, so it goes on past the pages read. ``None`` otherwise, and
+    #: unless ``rules``.
+    abstract_runs_on: int | None = None
 
     def affiliation_rows(self, *, untagged: bool = True) -> list[Affiliation]:
         """The affiliations no author carries, as rows that name no author.
@@ -308,7 +321,7 @@ def _clusters(
     tags: Sequence[str],
     inp: TaggerInput,
     wanted: str,
-    heading: re.Pattern[str] = _ABSTRACT_HEADING_RE,
+    heading: re.Pattern[str] = _BASE_ABSTRACT_HEADING_RE,
     ends: frozenset[str] | None = None,
 ) -> list[list[Span]]:
     """Groups of ``wanted`` spans interrupted only by untagged words or furniture.
@@ -483,27 +496,105 @@ def _second_version_start(inp: TaggerInput, group: list[Span]) -> int | None:
     return None
 
 
-def _cut_spans(group: list[Span], inp: TaggerInput, stop: int) -> list[Span]:
-    """The spans of ``group`` with their words from word ``stop`` on dropped."""
+def _cut_spans(group: list[Span], inp: TaggerInput, stop: int, *, start: int = 0) -> list[Span]:
+    """The spans of ``group`` with their words before word ``start`` and from
+    word ``stop`` on dropped."""
     kept: list[Span] = []
     for span in group:
-        words = tuple(i for i in span.words if i < stop)
+        words = tuple(i for i in span.words if start <= i < stop)
         if words:
             text = inp.text[inp.words[words[0]].start : inp.words[words[-1]].end]
             kept.append(replace(span, words=words, text=re.sub(r"\s+", " ", text).strip()))
     return kept
 
 
+# Labels printed above a title, in a region of their own that the tagger ran
+# into the title: a manuscript's running head ("Running head: ...") and a
+# book chapter's number ("Chapter 3", "Part II").
+_RUNNING_HEAD_RE = re.compile(
+    r"^\W*(?:running\s+(?:head|title)|short\s+(?:title|running\s+head)|kolumnentitel|"
+    r"titre\s+courant)\b",
+    re.IGNORECASE,
+)
+_CHAPTER_LABEL_RE = re.compile(
+    r"(?:chapter|chapitre|kapitel|cap[ií]tulo|capitolo|rozdział|hoofdstuk|глава|розділ|"
+    r"part|teil|partie)\s+(?:\d{1,3}|[IVXLC]{1,6})[.:]?",
+    re.IGNORECASE,
+)
+# A rubric region ("Original research article") the tagger tagged in part:
+# it stopped the title inside the region and opened it again, on a B- tag, in
+# the next one. Two untagged words with letters after it show the region goes
+# on as something else. The region must read as a rubric too, a few words set
+# in capitals or mostly naming the kind of article ("ORIGINAL RESEARCH",
+# "Review article | Open access"): a title's first line whose last words the
+# tagger missed ("Growth of reeds in the quiet rivers of the plain", "A review
+# of reed counts") is no label.
+_MIN_RUBRIC_TAIL_WORDS = 2
+_MAX_RUBRIC_WORDS = 5
+_RUBRIC_WORD_RE = re.compile(
+    r"\b(?:article|research|review|original|report|letter|editorial|communication|"
+    r"perspective|commentary|opinion|studies|artigo|art[ií]culo|revisi[oó]n|revis[aã]o|"
+    r"originale?|rapport|lettre|übersicht|originalarbeit|статья|обзор|исследовани[ея]|"
+    r"стаття|огляд|дослідження)\b",
+    re.IGNORECASE,
+)
+
+
+def _reads_as_rubric(inp: TaggerInput, i: int) -> bool:
+    """Whether word ``i``'s region is a few words in capitals or naming a kind of article."""
+    text = _printed(inp, range(_region_start(inp, i), _region_end(inp, i)))
+    letters = [w for w in text.split() if any(c.isalpha() for c in w)]
+    if not letters or len(letters) > _MAX_RUBRIC_WORDS:
+        return False
+    capitals = any(c.isupper() for c in text) and not any(c.islower() for c in text)
+    return capitals or 2 * sum(bool(_RUBRIC_WORD_RE.search(w)) for w in letters) >= len(letters)
+
+
+def _is_title_head_label(inp: TaggerInput, tags, first: list[int], rest: list[int]) -> bool:
+    """Whether the title words ``first`` (one region) are a label above the title ``rest``."""
+    text = " ".join(_printed(inp, first).split())
+    if (
+        _RUNNING_HEAD_RE.match(text)
+        or _CHAPTER_LABEL_RE.fullmatch(text.strip(" .:"))
+        or not any(c.isalnum() for c in text)
+    ):
+        return True
+    tail = range(first[-1] + 1, _region_end(inp, first[-1]))
+    return (
+        all(tags[j] == "O" for j in tail)
+        and sum(any(c.isalpha() for c in inp.words[j].text) for j in tail) >= _MIN_RUBRIC_TAIL_WORDS
+        and tags[rest[0]].startswith("B-")
+        and _reads_as_rubric(inp, first[0])
+    )
+
+
+def _trim_title_head(group: list[Span], tags, inp: TaggerInput) -> list[Span]:
+    """``group`` without the labels above the title it runs on from.
+
+    While the title spans regions, the words in its first region go when
+    they are a label (:func:`_is_title_head_label`) rather than the title's
+    first line.
+    """
+    while True:
+        runs = _region_runs(inp, [i for span in group for i in span.words])
+        if len(runs) < 2 or not _is_title_head_label(inp, tags, runs[0], runs[1]):
+            return group
+        group = _cut_spans(group, inp, len(inp.words), start=runs[1][0])
+
+
 def _title(
     spans: list[Span], tags, inp: TaggerInput, conf, *, rules: bool = False
 ) -> tuple[str | None, float, list[str]]:
-    groups = _clusters(spans, tags, inp, "TITLE")
+    heading = _ABSTRACT_HEADING_RE if rules else _BASE_ABSTRACT_HEADING_RE
+    groups = _clusters(spans, tags, inp, "TITLE", heading=heading)
     if not groups:
         return None, 0.0, ["no_title"]
     group = groups[0]  # the version printed first
     second = _second_version_start(inp, group) if rules else None
     if second is not None:
         group = _cut_spans(group, inp, second)
+    if rules:
+        group = _trim_title_head(group, tags, inp)
     title = _joined(group)
     first_word, last_word = group[0].words[0], group[-1].words[-1]
     problems = _title_text_problems(inp, tags, first_word, last_word)
@@ -528,18 +619,396 @@ def _title(
 
 def _abstract(
     spans: list[Span], tags, inp: TaggerInput, conf, *, rules: bool = False
-) -> tuple[str | None, float | None]:
+) -> tuple[str | None, float | None, int | None]:
     """The abstract printed first; parallel-language versions are not joined.
 
+    Returns its text, its confidence (the mean posterior of its tagged words)
+    and, with ``rules``, the page it runs off the end of the input on
+    (:func:`_runs_off_input`), else ``None``.
+
     With ``rules`` an email, date, volume, affiliation or licence line between
-    two runs does not end the abstract: such lines float into its column.
+    two runs does not end the abstract: such lines float into its column. The
+    words are then read back from the print: the head of its region the tagger
+    left out (:func:`_with_region_head`), cut where a version in another
+    language starts (:func:`_before_language_switch`), without a companion
+    summary (:func:`_without_companions`), with the closing marks the tagger
+    left out (:func:`_with_closing_marks`) and without a leading "Abstract"
+    label (:func:`_strip_abstract_label`). With no abstract tagged at all, a
+    region the layout calls one is read (:func:`_layout_abstract`).
     """
-    groups = _clusters(spans, tags, inp, "ABSTRACT", ends=_ABSTRACT_ENDS if rules else None)
+    if rules:
+        groups = _clusters(
+            spans, tags, inp, "ABSTRACT", heading=_ABSTRACT_HEADING_RE, ends=_ABSTRACT_ENDS
+        )
+    else:
+        groups = _clusters(spans, tags, inp, "ABSTRACT")
     if not groups:
-        return None, None
+        body = _layout_abstract(inp, tags) if rules else None
+        if body is None:
+            return None, None, None
+        # No tag vouches for it: the posteriors are the untagged reading's.
+        return _printed(inp, body), 0.0, None
     group = groups[0]
     words = [i for span in group for i in span.words]
-    return _joined(group), sum(conf[i] for i in words) / len(words)
+    if not rules:
+        return _joined(group), sum(conf[i] for i in words) / len(words), None
+    picked = _with_region_head(inp, tags, conf, words)
+    picked = _before_language_switch(inp, picked)
+    picked = _without_companions(inp, picked)
+    picked = _with_closing_marks(inp, tags, picked)
+    text = _strip_abstract_label(_printed(inp, picked), bare=_may_open_with_label(inp, picked))
+    if not text:
+        return None, None, None
+    tagged = set(words)
+    kept = [i for i in picked if i in tagged] or words
+    return text, sum(conf[i] for i in kept) / len(kept), _runs_off_input(inp, picked)
+
+
+def _printed(inp: TaggerInput, words: Sequence[int]) -> str:
+    """The text of ``words`` (in order): runs of neighbours as printed, runs joined by a space."""
+    runs: list[str] = []
+    start = 0
+    for n in range(1, len(words) + 1):
+        if n == len(words) or words[n] != words[n - 1] + 1:
+            first, last = inp.words[words[start]], inp.words[words[n - 1]]
+            runs.append(re.sub(r"\s+", " ", inp.text[first.start : last.end]).strip())
+            start = n
+    return " ".join(runs).strip()
+
+
+def _region_start(inp: TaggerInput, i: int) -> int:
+    """The first word of word ``i``'s region."""
+    region = inp.words[i].region
+    while i > 0 and inp.words[i - 1].region == region:
+        i -= 1
+    return i
+
+
+def _region_end(inp: TaggerInput, i: int) -> int:
+    """One past the last word of word ``i``'s region."""
+    region = inp.words[i].region
+    while i < len(inp.words) and inp.words[i].region == region:
+        i += 1
+    return i
+
+
+def _region_runs(inp: TaggerInput, words: Sequence[int]) -> list[list[int]]:
+    """``words`` split where the region changes, in order."""
+    runs: list[list[int]] = []
+    for i in words:
+        if runs and inp.words[runs[-1][-1]].region == inp.words[i].region:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return runs
+
+
+def _opening(inp: TaggerInput, i: int, n: int = 6) -> str:
+    """The first ``n`` words of word ``i``'s region, as printed."""
+    start = _region_start(inp, i)
+    return _printed(inp, range(start, min(start + n, _region_end(inp, i))))
+
+
+# A tagged run that opens mid-region on an unsure B- tag, after only untagged
+# words, in a region the layout calls an abstract, began at the region's start:
+# the tagger read the region's first words ("Purpose", "This study") as a
+# heading or a rubric and cut them off. A head that repeats the abstract's
+# own words is a second print of them (a doubled text layer, its glyphs often
+# broken), which the tagger was right to leave out. So is a head that prints
+# an abstract label after its first word ("Resumen: Contamos ... Abstract:"):
+# the region holds two versions, and the tagger read the second.
+_MAX_HEAD_START_CONFIDENCE = 0.5
+
+
+def _labels_a_version(inp: TaggerInput, head: Sequence[int]) -> bool:
+    """Whether a word of ``head`` after its first is a capitalised abstract label."""
+    return any(
+        not inp.words[j].text[:1].islower() and _is_heading_word(inp, j, _ABSTRACT_HEADING_RE)
+        for j in head[1:]
+    )
+
+
+def _trigrams(inp: TaggerInput, words: Sequence[int]) -> set[tuple[str, ...]]:
+    texts = [inp.words[i].text.casefold() for i in words]
+    letters = [t for t in texts if any(c.isalnum() for c in t)]
+    return {tuple(letters[n : n + 3]) for n in range(len(letters) - 2)}
+
+
+def _repeats_words(inp: TaggerInput, head: Sequence[int], before: Sequence[int]) -> bool:
+    """Whether most of the word triples of ``head`` were printed in ``before`` already."""
+    own = _trigrams(inp, head)
+    return bool(own) and 2 * len(own & _trigrams(inp, before)) >= len(own)
+
+
+def _with_region_head(inp: TaggerInput, tags, conf, words: list[int]) -> list[int]:
+    """``words`` with the untagged head of each of their regions the tagger cut off."""
+    head: list[int] = []
+    for run in _region_runs(inp, words):
+        i = run[0]
+        start = _region_start(inp, i)
+        if (
+            start < i
+            and (inp.regions[inp.words[i].region].label or "") == "abstract"
+            and tags[i].startswith("B-")
+            and conf[i] < _MAX_HEAD_START_CONFIDENCE
+            and all(tags[j] == "O" for j in range(start, i))
+            and not _repeats_words(inp, range(start, i), [j for j in words if j < i])
+            and not _labels_a_version(inp, range(start, i))
+        ):
+            head.extend(range(start, i))
+    return sorted({*words, *head})
+
+
+# A version in another language is a region of its own, of an abstract's length.
+_MIN_VERSION_WORDS = 15
+# A translation is about as long as the version before it, or opens with its
+# own label; a short passage in another language after a long abstract (a
+# survey item it quotes) is the abstract's own. A second version cut by the end
+# of the input still comes to a third of the first.
+_MAX_VERSION_RATIO = 3
+
+
+def _word_count(inp: TaggerInput, words: Sequence[int]) -> int:
+    return sum(any(c.isalnum() for c in inp.words[i].text) for i in words)
+
+
+def _before_language_switch(inp: TaggerInput, words: list[int]) -> list[int]:
+    """``words`` up to a region that starts a version in another language or script.
+
+    Parallel abstracts are often tagged as one run when no heading separates
+    them (an English abstract under the Portuguese one). As for titles
+    (:func:`_second_version_start`), a region whose text reads as another
+    language or script than the text before it, both long enough to tell,
+    starts the second version, and the version printed first is kept. The
+    text from that region on must read as a version: it opens with an
+    abstract label, or is not much shorter than the text before it
+    (:data:`_MAX_VERSION_RATIO`).
+    """
+    from bibr.extract.front_matter import _dominant_script, language_from_title
+
+    for n in range(1, len(words)):
+        if inp.words[words[n]].region == inp.words[words[n - 1]].region:
+            continue
+        before, after = words[:n], words[n:]
+        lengths = _word_count(inp, before), _word_count(inp, after)
+        if min(lengths) < _MIN_VERSION_WORDS:
+            continue
+        before_text, after_text = _printed(inp, before), _printed(inp, after)
+        labelled = bool(_ABSTRACT_LABEL_RE.match(after_text))
+        if not labelled and lengths[0] > _MAX_VERSION_RATIO * lengths[1]:
+            continue
+        for read in (_dominant_script, language_from_title):
+            first, other = read(before_text), read(after_text)
+            if (
+                first
+                and other
+                and first != other
+                and (read is _dominant_script or _opens_in(inp, after, first))
+            ):
+                return before
+    return words
+
+
+# The words of a region that tell the language it opens in.
+_VERSION_OPENING_WORDS = 8
+
+
+def _opens_in(inp: TaggerInput, after: Sequence[int], first: str) -> bool:
+    """Whether the text ``after`` opens in another language than ``first``.
+
+    A translation is in its language from its first words; a region of the
+    abstract that quotes a passage in another language ("Most answered the
+    item «¿Con qué ...?»") opens in the abstract's own.
+    """
+    from bibr.extract.front_matter import language_from_title
+
+    opening = [i for i in after if any(c.isalnum() for c in inp.words[i].text)]
+    last = opening[min(_VERSION_OPENING_WORDS, len(opening)) - 1]
+    language = language_from_title(_printed(inp, [i for i in after if i <= last]))
+    return bool(language) and language != first
+
+
+# Summaries printed beside the abstract, under their own heading: a journal's
+# lay summary or highlights come before or after the abstract proper, and the
+# tagger often runs the two together.
+_COMPANION_HEADING_RE = re.compile(
+    r"^\W*(?:simple\s+summary|plain\s+(?:language|english)\s+summary|lay\s+summary|"
+    r"author\s+summary|graphical\s+abstract|research\s+highlights|highlights|"
+    r"significance\s+statement)\b",
+    re.IGNORECASE,
+)
+# Boxed summaries; some journals print the same words as a part of the
+# abstract, so only a heading region of its own opens a box.
+_BOX_HEADING_RE = re.compile(
+    r"^\W*(?:key\s+messages|key\s+points|what\s+is\s+already\s+known|what\s+this\s+study\s+adds)\b",
+    re.IGNORECASE,
+)
+
+
+def _opens_companion(opening: str, heading: bool) -> bool:
+    """Whether a region opening with ``opening`` opens a companion summary.
+
+    The heading is printed as one: capitalised, and in a heading region or
+    followed by a mark, the region's end or a capitalised word. An abstract
+    run on into the next region in mid-sentence ("This study" "highlights the
+    need ...") opens with the same word in prose.
+    """
+    m = _COMPANION_HEADING_RE.match(opening)
+    if not m or not next((c for c in m.group() if c.isalpha()), "").isupper():
+        return False
+    after = opening[m.end() :].lstrip()
+    return heading or not after or not after[0].isalnum() or after[0].isupper()
+
+
+def _without_companions(inp: TaggerInput, words: list[int]) -> list[int]:
+    """``words`` without the regions of a companion summary.
+
+    A region that opens with a companion heading (or a box heading, in a region
+    the layout calls a heading) starts a summary that is not the abstract; it
+    runs until a region that opens with an abstract label. When every region is
+    a summary's, the words are kept: there is nothing better to read.
+    """
+    kept: list[int] = []
+    dropping = False
+    for run in _region_runs(inp, words):
+        opening = _opening(inp, run[0])
+        heading = (inp.regions[inp.words[run[0]].region].label or "") == "paragraph_title"
+        if _opens_companion(opening, heading) or (heading and _BOX_HEADING_RE.match(opening)):
+            dropping = True
+            continue
+        if dropping and _ABSTRACT_LABEL_RE.match(opening):
+            dropping = False
+        if not dropping:
+            kept.extend(run)
+    return kept or words
+
+
+# The marks that close a sentence. The tagger leaves the full stop after an
+# abstract's last word untagged nearly always, and the one between two of its
+# runs as often ("... along the river. The reeds ...").
+_SENTENCE_MARKS = frozenset({".", "?", "!", "。", "．"})
+
+
+def _with_closing_marks(inp: TaggerInput, tags, words: list[int]) -> list[int]:
+    """``words`` with the untagged sentence mark printed right after each of their runs."""
+    picked = set(words)
+    marks = [
+        i + 1
+        for i in words
+        if i + 1 < len(inp.words)
+        and i + 1 not in picked
+        and inp.words[i + 1].region == inp.words[i].region
+        and tags[i + 1] == "O"
+        and inp.words[i + 1].text in _SENTENCE_MARKS
+    ]
+    return sorted([*words, *marks])
+
+
+# The page furniture and notes that may follow an abstract cut by the end of
+# the input: a later region of any other kind holds the paper's next text.
+_FURNITURE_LABELS = frozenset(
+    {"header", "footer", "footnote", "number", "vision_footnote", "aside_text"}
+)
+
+
+def _runs_off_input(inp: TaggerInput, words: list[int]) -> int | None:
+    """The page the abstract runs off the input on, else ``None``.
+
+    An abstract whose last word closes no sentence, ends its region, and is
+    followed only by page furniture on the input's last page goes on past the
+    pages the tagger read.
+    """
+    last = words[-1]
+    if inp.words[last].text in _SENTENCE_MARKS or _region_end(inp, last) != last + 1:
+        return None
+    region = inp.words[last].region
+    if any((r.label or "") not in _FURNITURE_LABELS for r in inp.regions[region + 1 :]):
+        return None
+    page = inp.regions[region].page
+    return page if page == max(r.page for r in inp.regions) else None
+
+
+_ABSTRACT_LABEL_RE = re.compile(
+    rf"^\W*(?:{_ABSTRACT_WORDS})\b(?P<mark>\s*(?:[:.：–—]|-(?!\w)))?\s*", re.IGNORECASE
+)
+
+
+def _strip_abstract_label(text: str, *, bare: bool = True) -> str:
+    """``text`` without the "Abstract" label it opens with.
+
+    A label is punctuated ("Abstract:", "Resumo."), set in capitals
+    ("SUMMARY") or, where it may stand ``bare`` (:func:`_may_open_with_label`),
+    followed by a capitalised word ("Abstract Background"); an opening word
+    in prose ("Summary statistics of ...") stays.
+    """
+    m = _ABSTRACT_LABEL_RE.match(text)
+    if not m:
+        return text
+    label, rest = text[: m.end()].strip(), text[m.end() :]
+    if m.group("mark") or label.isupper() or (bare and rest[:1].isupper()):
+        return rest.strip()
+    return text
+
+
+def _may_open_with_label(inp: TaggerInput, words: Sequence[int]) -> bool:
+    """Whether the abstract ``words`` may open with a label that is not punctuated.
+
+    Only where its first word opens a region that no heading region printing
+    the label comes right before: under its "Abstract" heading, an abstract
+    opening "Abstract Meaning Representation (AMR) is ..." starts with a term.
+    """
+    first = words[0]
+    if _region_start(inp, first) != first:
+        return False
+    if first == 0:
+        return True
+    above = range(_region_start(inp, first - 1), first)
+    return not _ABSTRACT_HEADING_RE.match(_printed(inp, above).strip(_TRIM) or "-")
+
+
+# What a region the layout calls an abstract may carry and still be untagged
+# text: the furniture and the citation line set into its column.
+_LAYOUT_ABSTRACT_FIELDS = frozenset(
+    {None, "FURNITURE", "VOLUME", "ISSUE", "PAGES", "DATE", "JOURNAL", "DOI"}
+)
+
+
+def _is_heading_word(inp: TaggerInput, i: int, heading: re.Pattern[str]) -> bool:
+    return bool(heading.match(inp.words[i].text.strip(_TRIM) or "-"))
+
+
+def _layout_abstract(inp: TaggerInput, tags) -> list[int] | None:
+    """The words of a region the layout calls an abstract, when none was tagged.
+
+    The tagger misses an abstract printed in a layout it rarely saw. The
+    layout's label alone also falls on a cover note or an opening paragraph,
+    so the region must read as an abstract too: it opens with an abstract
+    heading, follows a region that is only that heading, or is followed by a
+    keywords line. The heading is not part of the text.
+    """
+    runs = _region_runs(inp, range(len(inp.words)))
+    for k, run in enumerate(runs):
+        if (inp.regions[inp.words[run[0]].region].label or "") != "abstract":
+            continue
+        if any(_field(tags[i]) not in _LAYOUT_ABSTRACT_FIELDS for i in run):
+            continue
+        headed = _is_heading_word(inp, run[0], _ABSTRACT_HEADING_RE)
+        after_heading = k > 0 and bool(
+            _ABSTRACT_HEADING_RE.match(_printed(inp, runs[k - 1]).strip(_TRIM) or "-")
+        )
+        following = runs[k + 1] if k + 1 < len(runs) else []
+        before_keywords = bool(following) and (
+            any(_field(tags[i]) == "KEYWORD" for i in following)
+            or _is_heading_word(inp, following[0], _KEYWORD_HEADING_RE)
+        )
+        if not (headed or after_heading or before_keywords):
+            continue
+        body = run[1:] if headed else run
+        while body and not inp.words[body[0]].text.strip(_TRIM):
+            body = body[1:]
+        if len(body) >= _MIN_ABSTRACT_WORDS:
+            return body
+    return None
 
 
 def _keywords(spans: list[Span], tags, inp: TaggerInput, *, rules: bool = False) -> list[str]:
@@ -1023,7 +1492,81 @@ def _given_first(names: list[Span]) -> bool:
     return given_family > family_given
 
 
-def _group_authors(spans: list[Span]) -> list[_Author]:
+def _closes_inverted_item(
+    inp: TaggerInput, names: list[Span], pos: int, tagged: Collection[int]
+) -> bool:
+    """Whether the given name at ``names[pos]`` ends a "Family, Given" item.
+
+    A byline that prints given names first may still print one author the other
+    way round ("Ada Kell & Moss, Bea T."): :func:`_inverted_item_at` reads the
+    shape. One full word alone after a one-name author ("Ada Kell, Bea Moss,
+    Suprihatin, Wahyudi") has that shape too, and is the next one-name author: the
+    given name must read as an inverted item's (:func:`_inverted_given`), or the
+    byline (the given name's region) must print another item that does ("Moss,
+    B., ..., Kell, Ada").
+    """
+    if not _inverted_item_at(inp, names, pos, tagged):
+        return False
+    region = inp.words[names[pos].words[0]].region
+    return _inverted_given(inp, names[pos], tagged) or any(
+        k != pos
+        and names[k].field == "GIVEN"
+        and inp.words[names[k].words[0]].region == region
+        and _inverted_item_at(inp, names, k, tagged)
+        and _inverted_given(inp, names[k], tagged)
+        for k in range(1, len(names))
+    )
+
+
+def _inverted_given(inp: TaggerInput, given: Span, tagged: Collection[int]) -> bool:
+    """Whether a given name reads as an inverted item's: initials ("Moss, B.",
+    "Moss, J.R."), more words than one ("Moss, Bea T.", "Moss, Bea Ann"), or an
+    initial left untagged right after it ("Moss, Bea/GIVEN T.")."""
+    words = inp.words
+    parts = [words[i].text for i in given.words if any(c.isalpha() for c in words[i].text)]
+    after = given.words[-1] + 1
+    return (
+        len(parts) > 1
+        or any(sum(c.isalpha() for c in part) == 1 for part in parts)
+        or (
+            after < len(words)
+            and after not in tagged
+            and words[after].region == words[given.words[-1]].region
+            and len(words[after].text) == 1
+            and words[after].text.isupper()
+        )
+    )
+
+
+def _inverted_item_at(
+    inp: TaggerInput, names: list[Span], pos: int, tagged: Collection[int]
+) -> bool:
+    """Whether the given name at ``names[pos]`` is printed as a "Family, Given"
+    item: the family name right before it ends in a comma, nothing but that comma
+    stands between them, and the next name part is no family name: the next item
+    opens with its given name, or the list ends there. A capitalised word left
+    untagged right after the given name ("Moss, Bea Toller") is a family name the
+    tagger missed, so the given name opens a "Given Family" item of its own.
+    """
+    if pos == 0:
+        return False
+    words = inp.words
+    before, given = names[pos - 1], names[pos]
+    comma = before.words[-1] + 1
+    if before.field != "FAMILY" or given.words[0] != comma + 1 or words[comma].text != ",":
+        return False
+    if pos + 1 < len(names) and names[pos + 1].field == "FAMILY":
+        return False
+    after = given.words[-1] + 1
+    return not (
+        after < len(words)
+        and after not in tagged
+        and words[after].region == words[given.words[-1]].region
+        and _is_name_word(words[after].text)
+    )
+
+
+def _group_authors(spans: list[Span], inp: TaggerInput | None = None) -> list[_Author]:
     """One author per given/family pair, in either printed order.
 
     An author is complete once it holds one name part of each kind; the next
@@ -1032,18 +1575,26 @@ def _group_authors(spans: list[Span]) -> list[_Author]:
     (a family part alone) followed by another one as two authors. In a byline
     that prints given names first, a given name also starts the next author
     after a family name, so a one-name author ("Suprihatin, Siti Nuraini") does
-    not take the next author's given name.
+    not take the next author's given name. With ``inp`` (the rules), a given
+    name that closes a "Family, Given" item (:func:`_closes_inverted_item`) stays
+    with the family name before it.
     """
     names = [span for span in spans if span.field in _NAME_FIELDS]
     given_first = _given_first(names)
+    tagged = {i for span in spans for i in span.words} if inp is not None else set()
     authors: list[_Author] = []
-    for span in names:
+    for pos, span in enumerate(names):
         slot = "given" if span.field == "GIVEN" else "family"
         current = authors[-1] if authors else None
         if (
             current is None
             or getattr(current, slot)
-            or (given_first and slot == "given" and current.family)
+            or (
+                given_first
+                and slot == "given"
+                and current.family
+                and not (inp is not None and _closes_inverted_item(inp, names, pos, tagged))
+            )
         ):
             authors.append(_Author(first_word=span.words[0]))
         getattr(authors[-1], slot).append(span)
@@ -1290,16 +1841,90 @@ def _complete_names(inp: TaggerInput, tags: list[str], authors: list[_Author]) -
             tags[i] = f"{'I' if pos else 'B'}-{name}"
 
 
+def _only_separators_between(
+    inp: TaggerInput, tags: list[str], authors: list[_Author], region: int, skip: range
+) -> bool:
+    """Whether every other gap between two authors in ``region`` holds separators,
+    connectives and keys only, and there is one such gap at least: with two
+    authors alone ("Ada Kell, Vela Dora, Bea Moss, Norland") nothing shows that
+    the list prints no affiliation inside it."""
+    words = inp.words
+    checked = 0
+    for a, b in zip(authors, authors[1:], strict=False):
+        other = range(a.last_word + 1, b.first_word)
+        if other == skip or not other or words[other[0]].region != region:
+            continue
+        checked += 1
+        if any(
+            _field(tags[i]) not in (None, "AUTHOR_MARK", "AFF_MARK")
+            or (
+                _field(tags[i]) is None
+                and words[i].text not in _LIST_SEPARATORS
+                and not _is_connective(words[i].text)
+            )
+            for i in other
+        ):
+            return False
+    return checked > 0
+
+
+def _list_name_read_as_affiliation(
+    inp: TaggerInput, tags: list[str], gap: range, authors: list[_Author]
+) -> list[list[int]]:
+    """The name units of a list item between two authors that the tagger read as an
+    affiliation; [] when the gap is anything else.
+
+    "Ada Kell, Bea Moss, Ivo Marn, and Tea Roth" with "Ivo Marn" tagged an
+    affiliation: the gap is in one region, holds that one affiliation span and
+    nothing else but separators and keys, the span is bounded by separators (or
+    a connective after it) and reads as one whole name with no institution word
+    and no country ("Ada Kell, New Zealand, and Bea Moss"), and every other gap
+    between two authors of the region is separators, connectives and keys only:
+    a list of names that prints no affiliation inside it.
+    """
+    from bibr.extract.affiliation_rules import _is_country
+
+    words = inp.words
+    region = words[gap[0]].region
+    if any(words[i].region != region for i in gap):
+        return []
+    if any(_field(tags[i]) not in (None, "AFFILIATION", "AUTHOR_MARK", "AFF_MARK") for i in gap):
+        return []
+    aff = [i for i in gap if _field(tags[i]) == "AFFILIATION"]
+    if aff != list(range(aff[0], aff[-1] + 1)) or tags[aff[0]] != "B-AFFILIATION":
+        return []
+    after = aff[-1] + 1
+    if words[aff[0] - 1].text not in _LIST_SEPARATORS or not (
+        after < len(words)
+        and (words[after].text in _LIST_SEPARATORS or _is_connective(words[after].text))
+    ):
+        return []
+    if any(_INSTITUTION_RE.search(words[i].text) or not _is_name_word(words[i].text) for i in aff):
+        return []
+    if _is_country(" ".join(words[i].text for i in aff)):
+        return []
+    units = _name_units(inp, tags, aff[0], after)
+    if not units or units[-1][-1] != aff[-1] or not _whole_name(inp, units):
+        return []
+    if not _only_separators_between(inp, tags, authors, region, gap):
+        return []
+    return units
+
+
 def _names_between(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
     """Tag whole names the tagger skipped in a list: between two authors, and after
-    the last one when a connective leads to it ("..., and Dimitri van der Linden")."""
+    the last one when a connective leads to it ("..., and Dimitri van der Linden").
+    A name between two authors that the tagger read as an affiliation is read
+    back too (:func:`_list_name_read_as_affiliation`)."""
     words = inp.words
     for a, b in zip(authors, authors[1:], strict=False):
         lo, hi = a.last_word + 1, b.first_word
         gap = range(lo, hi)
-        if not 0 < len(gap) <= _MAX_NAME_GAP_WORDS or any(
-            _field(tags[i]) not in (None, "AUTHOR_MARK", "AFF_MARK") for i in gap
-        ):
+        if not 0 < len(gap) <= _MAX_NAME_GAP_WORDS:
+            continue
+        if any(_field(tags[i]) not in (None, "AUTHOR_MARK", "AFF_MARK") for i in gap):
+            if units := _list_name_read_as_affiliation(inp, tags, gap, authors):
+                _tag_whole_name(inp, tags, units)
             continue
         if any(
             _INSTITUTION_RE.search(words[i].text)
@@ -1467,6 +2092,26 @@ def _one_name_per_line(inp: TaggerInput, tags: list[str], lines: list[tuple[int,
                 _tag_whole_name(inp, tags, units)
 
 
+# The most letters run-together initials print ("AJ"): a longer word in
+# capitals is a surname.
+_MAX_INITIALS_LETTERS = 2
+
+
+def _surname_in_capitals(inp: TaggerInput, author: _Author, run: list[int]) -> bool:
+    """Whether a family name tagged alone is printed in capitals and the words after
+    it are not: "KOVAR Tilen", a surname set apart the way many bylines print it,
+    with the given name after it. Initials are in capitals too ("J. Smith", "AJ
+    Smith", "J.R. Smith"): a word with a period, or of two letters or fewer, is
+    read as one, so a two-letter surname in capitals ("LI Wei") reads as before."""
+    family = " ".join(s.text for s in author.family)
+    return (
+        "." not in family
+        and sum(c.isalpha() for c in family) > _MAX_INITIALS_LETTERS
+        and family.isupper()
+        and not all(inp.words[j].text.isupper() for j in run)
+    )
+
+
 def _complete_lines(
     inp: TaggerInput, tags: list[str], authors: list[_Author], lines: list[tuple[int, int]]
 ) -> None:
@@ -1479,7 +2124,9 @@ def _complete_lines(
     its line, takes the name words after it even when the line goes on
     ("Imamul/FAMILY Arifin S,Sy."). A given name alone printed right after a
     whole name on the same line, ending it, is the rest of that name's family
-    ("Camila V. Bordón Gabriele/GIVEN").
+    ("Camila V. Bordón Gabriele/GIVEN"). A family name tagged alone stays the
+    family name when it is printed in capitals and the words after it are not
+    (:func:`_surname_in_capitals`): they are its given name.
     """
     words = inp.words
     n = len(words)
@@ -1537,6 +2184,15 @@ def _complete_lines(
             at_line_end or (one_part and starts_line and not affiliated)
         ):
             continue
+        if (
+            one_part
+            and author.family
+            and not author.given
+            and _surname_in_capitals(inp, author, run)
+        ):
+            for k, j in enumerate(run):
+                tags[j] = "I-GIVEN" if k else "B-GIVEN"
+            continue
         if one_part and author.family and not author.given:
             # "Faried/FAMILY Dirgantara Putra": the tagged word starts the name.
             for s in author.family:
@@ -1554,21 +2210,442 @@ def _complete_lines(
             tags[j] = f"I-{last}"
 
 
+def _names_inside_repeated_affiliations(
+    inp: TaggerInput, tags: list[str], spans: list[Span], lines: list[tuple[int, int]]
+) -> None:
+    """Split a name line out of an affiliation printed on both sides of it.
+
+    A byline stacked author by author prints each name on a line of its own and
+    the affiliation under it, so "Faculty of Law, Norland University / Ivo Marn /
+    Faculty of Law, Norland University" comes out as one affiliation span. A
+    line inside such a span is the next author when it reads as one whole name
+    and no institution, and the span's lines before it are printed again, word
+    for word, right after it.
+    """
+    words = inp.words
+    for span in spans:
+        if span.field != "AFFILIATION":
+            continue
+        rows: dict[tuple[int, int], list[int]] = {}
+        for i in span.words:
+            rows.setdefault(lines[i], []).append(i)
+        keys = list(rows)
+        for pos in range(1, len(keys) - 1):
+            row = rows[keys[pos]]
+            units = _name_units(inp, tags, row[0], row[-1] + 1)
+            if not units or units[-1][-1] != row[-1] or not _whole_name(inp, units):
+                continue
+            if any(_INSTITUTION_RE.search(words[i].text) for i in row):
+                continue
+            before = [_fold(words[i].text) for key in keys[:pos] for i in rows[key]]
+            after = [_fold(words[i].text) for key in keys[pos + 1 :] for i in rows[key]]
+            if after[: len(before)] != before:
+                continue
+            _tag_whole_name(inp, tags, units)
+            tags[rows[keys[pos + 1]][0]] = "B-AFFILIATION"
+            break
+
+
+# Keyed authors that show a list keys every name: one key alone may be a note's.
+_MIN_KEYED_AUTHORS = 2
+
+
+def _ends_with_keys(tags: list[str], author: _Author) -> bool:
+    return author.last_word + 1 < len(tags) and _field(tags[author.last_word + 1]) == "AUTHOR_MARK"
+
+
+def _keyed_last_name(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
+    """Tag the last name of a keyed list that the tagger left out.
+
+    "Ada Kell1, Bea Moss2, ivo3": when every author of the list carries a key,
+    the words between the last author's separator (and a connective) and the
+    next key are one more author, whatever their case; the last of them is the
+    family name. Only in the byline's region, or the next one when the list
+    runs on into it, and never a title, a degree or an institution word.
+    """
+    words = inp.words
+    n = len(words)
+    if len(authors) < _MIN_KEYED_AUTHORS or not all(_ends_with_keys(tags, a) for a in authors):
+        return
+    i = authors[-1].last_word + 1
+    while i < n and _field(tags[i]) == "AUTHOR_MARK":
+        i += 1
+    if i >= n or words[i].text not in _LIST_SEPARATORS:
+        return
+    i += 1
+    if i < n and _is_connective(words[i].text):
+        i += 1
+    run: list[int] = []
+    while i < n and tags[i] == "O" and words[i].text.isalpha() and len(run) < _MAX_NAME_UNITS:
+        run.append(i)
+        i += 1
+    if not run or i >= n or _field(tags[i]) != "AUTHOR_MARK":
+        return
+    region = words[authors[-1].last_word].region
+    if any(words[j].region != region for j in run) and words[run[0]].region != region + 1:
+        return
+    if any(
+        words[j].text.casefold() in _NOT_GIVEN_WORDS or _INSTITUTION_RE.search(words[j].text)
+        for j in run
+    ):
+        return
+    for k, j in enumerate(run):
+        name = "FAMILY" if k == len(run) - 1 else "GIVEN"
+        tags[j] = f"{'B' if k in (0, len(run) - 1) else 'I'}-{name}"
+
+
+def _given_across_regions(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
+    """Tag the given name a region break cut off a family name.
+
+    "Ada Kell, Ivo" ending one region and "Marn2, and Bea Moss" opening the
+    next: the layout split the byline at a line break, and the family name
+    opening the region takes the name words that end the region before it, back
+    to a separator or a connective. Only when that region holds tagged names.
+    """
+    words = inp.words
+    for author in authors:
+        first = author.first_word
+        if author.given or not author.family or first == 0:
+            continue
+        region = words[first - 1].region
+        if region == words[first].region:
+            continue
+        i = first - 1
+        picked: list[int] = []
+        while (
+            i >= 0
+            and words[i].region == region
+            and tags[i] == "O"
+            and _is_name_word(words[i].text)
+            and len(picked) < _MAX_GIVEN_UNITS
+        ):
+            picked.append(i)
+            i -= 1
+        if not picked or i < 0 or words[i].region != region:
+            continue
+        if words[i].text not in _LIST_SEPARATORS and not _is_connective(words[i].text):
+            continue
+        if not any(
+            _field(tags[j]) in _NAME_FIELDS for j in range(i, -1, -1) if words[j].region == region
+        ):
+            continue
+        for k, j in enumerate(sorted(picked)):
+            tags[j] = "I-GIVEN" if k else "B-GIVEN"
+
+
+_EMAIL_PART_SEPARATORS_RE = re.compile(r"[._\-]")
+# An address that spells a name: a given and a family part ("ivo.marn@").
+_EMAIL_NAME_PARTS = 2
+# Words of an office's or a role's address, which spells no one's name
+# ("editorial.office@", "data.availability@").
+_ROLE_ADDRESS_WORDS = frozenset(
+    {"editorial", "editor", "office", "data", "availability", "contact", "journal", "support"}
+    | {"admin", "info", "press", "secretariat", "team", "help", "desk", "service", "general"}
+    | {"enquiries", "inquiries", "submissions", "permissions", "reprints", "media", "managing"}
+)
+
+
+def _names_from_emails(inp: TaggerInput, tags: list[str], spans: list[Span]) -> None:
+    """Tag a name the tagger left out that its address spells.
+
+    A byline that runs on in prose ("Ada Kell is at Norland University, Ivo Marn
+    studies with Bea Moss ... ivo.marn@vela.example") holds no list for
+    :func:`_names_between` to read. Two untagged capitalised words printed next
+    to each other before the address, in its region, that are the address's two
+    local parts in order, are a given and a family name. Not when either part
+    already is a word of a tagged name: the address is then that author's, and
+    the words its name printed once more ("Correspondence: Ada Kell"). Nor when
+    the two words are printed as a label ("Norland Lab: norland.lab@"), or either
+    part is a role's or an office's word (``_ROLE_ADDRESS_WORDS``): an office's
+    address spells the office's name ("Editorial Office editorial.office@").
+    """
+    words = inp.words
+    known = {
+        words[i].text.casefold()
+        for author in _group_authors(spans, inp)
+        for s in (*author.given, *author.family)
+        for i in s.words
+    }
+    for span in spans:
+        if span.field != "EMAIL" or "@" not in span.text:
+            continue
+        local = span.text.split("@", 1)[0].replace(" ", "").casefold()
+        parts = [p for p in _EMAIL_PART_SEPARATORS_RE.split(local) if p]
+        if len(parts) != _EMAIL_NAME_PARTS or any(
+            p in known or p in _ROLE_ADDRESS_WORDS for p in parts
+        ):
+            continue
+        region = words[span.words[0]].region
+        members = [i for i in range(span.words[0]) if words[i].region == region]
+        for a, b in zip(members, members[1:], strict=False):
+            if (
+                b == a + 1
+                and tags[a] == tags[b] == "O"
+                and _is_name_word(words[a].text)
+                and _is_name_word(words[b].text)
+                and [words[a].text.casefold(), words[b].text.casefold()] == parts
+                and not (b + 1 < len(words) and words[b + 1].text == ":")
+            ):
+                tags[a], tags[b] = "B-GIVEN", "B-FAMILY"
+                break
+
+
+def _listed_after(inp: TaggerInput, tags: list[str], before: _Author, author: _Author) -> bool:
+    """Whether only separators, keys, connectives and fillers stand between two authors."""
+    words = inp.words
+    return all(
+        words[i].text in _LIST_SEPARATORS
+        or _is_connective(words[i].text)
+        or _field(tags[i]) in ("AUTHOR_MARK", "AFF_MARK")
+        or words[i].text.casefold() in _BYLINE_FILLERS
+        for i in range(before.last_word + 1, author.first_word)
+    )
+
+
+# Capitalised words an institution's name may print between its eponym and the
+# institution word ("Ivo Marn Volga State University").
+_MAX_EPONYM_GAP_WORDS = 3
+
+
+def _opens_line(inp: TaggerInput, tags: list[str], i: int, lines: list[tuple[int, int]]) -> bool:
+    """Whether only keys, marks and titles stand before word ``i`` on its line
+    ("2 Ivo Marn", "Dr. Ivo Marn")."""
+    words = inp.words
+    j = i - 1
+    while j >= 0 and lines[j] == lines[i]:
+        text = words[j].text
+        if not (
+            _field(tags[j]) in ("AUTHOR_MARK", "AFF_MARK")
+            or text.isdigit()
+            or text in _SYMBOL_MARKS
+            or text == "."
+            or text.casefold() in _HONORIFICS
+        ):
+            return False
+        j -= 1
+    return True
+
+
+def _names_an_institution(
+    inp: TaggerInput, tags: list[str], author: _Author, lines: list[tuple[int, int]]
+) -> bool:
+    """Whether the name is an eponym: printed inside a line, not opening it, and an
+    institution word follows it on its line after nothing but a few capitalised
+    words ("Faculty of Law, Ivo Marn State University"). A name opening its line,
+    after its key or title at most, is the author whose affiliation the line goes
+    on with ("2 Ada Kell Assistant Professor, Department of Law")."""
+    words = inp.words
+    if _opens_line(inp, tags, author.first_word, lines):
+        return False
+    line = lines[author.last_word]
+    i = author.last_word + 1
+    while i < len(words) and lines[i] == line and i - author.last_word <= _MAX_EPONYM_GAP_WORDS + 1:
+        text = words[i].text
+        if text in _LIST_SEPARATORS or not text[:1].isupper():
+            return False
+        if _INSTITUTION_RE.search(text) or _INSTITUTION_RE.search(f"{text} of"):
+            return True
+        i += 1
+    return False
+
+
+def _names_a_place(inp: TaggerInput, author: _Author, lines: list[tuple[int, int]]) -> bool:
+    """Whether the name is a place in an address: an institution word earlier on its
+    line, and a country after one separator closing the line ("Faculty of Law,
+    Norland University, Vela Dora, Vietnam")."""
+    from bibr.extract.affiliation_rules import _is_country
+
+    words = inp.words
+    n = len(words)
+    line = lines[author.last_word]
+    comma = author.last_word + 1
+    if comma + 1 >= n or words[comma].text not in _LIST_SEPARATORS or lines[comma + 1] != line:
+        return False
+    i = comma + 1
+    while i < n and lines[i] == line and words[i].text not in _LIST_SEPARATORS:
+        i += 1
+    closes = (
+        i >= n
+        or lines[i] != line
+        or (words[i].text in _LIST_SEPARATORS and (i + 1 >= n or lines[i + 1] != line))
+    )
+    if not closes or not _is_country(" ".join(words[j].text for j in range(comma + 1, i))):
+        return False
+    start = lines[author.first_word]
+    return any(
+        _INSTITUTION_RE.search(words[j].text) for j in range(author.first_word) if lines[j] == start
+    )
+
+
+def _drop_names_in_affiliations(
+    inp: TaggerInput, tags: list[str], authors: list[_Author], lines: list[tuple[int, int]]
+) -> None:
+    """Untag a name that is part of an institution's name or of its address.
+
+    Affiliation lines print people's names in them: a university named after
+    someone ("Ivo Marn State University") and a town named after one ("...,
+    Vela Dora, Vietnam"), which the tagger reads as one more author. Only a
+    whole name (a given and a family part), never the first author, nor one in
+    a list of names (only separators, keys and connectives since the author
+    before), nor one a key, an email or an ORCID follows.
+    """
+    words = inp.words
+    for before, author in zip(authors, authors[1:], strict=False):
+        if not (author.given and author.family) or _listed_after(inp, tags, before, author):
+            continue
+        after = author.last_word + 1
+        if after < len(words) and _field(tags[after]) in ("AUTHOR_MARK", "EMAIL", "ORCID"):
+            continue
+        if _names_an_institution(inp, tags, author, lines) or _names_a_place(inp, author, lines):
+            for s in (*author.given, *author.family):
+                for i in s.words:
+                    tags[i] = "O"
+
+
+# What the labels of a printed citation leave after them: "Full citation:".
+_CITATION_LABEL_TRIM = " \t:|.-–—"
+
+
+def _own_citation_regions(inp: TaggerInput) -> tuple[set[int], bool]:
+    """The regions printing the paper's own citation, and whether a label names the paper.
+
+    A region opening with a citation label (the labels
+    :func:`bibr.extract.self_citation.find_printed_citation` reads: "To cite this
+    article:", "Full citation:", "Citation:") is one; a label alone in its region
+    makes the next region one. The second value is true when a label says the
+    citation is this paper's ("To cite this article") rather than any citation.
+    """
+    from bibr.extract.self_citation import _cue
+
+    found: set[int] = set()
+    names_paper = False
+    for pos, region in enumerate(inp.regions):
+        text = (region.text or "").strip()
+        match, strong = _cue(text)
+        if match is None:
+            continue
+        names_paper = names_paper or strong
+        if text[match.end() :].strip(_CITATION_LABEL_TRIM):
+            found.add(pos)
+        elif pos + 1 < len(inp.regions):
+            found.add(pos + 1)
+    return found, names_paper
+
+
+def _drop_own_citation_names(inp: TaggerInput, tags: list[str]) -> None:
+    """Untag the names printed in the paper's own citation.
+
+    A cover page or a first-page box prints how to cite the paper ("To cite this
+    article: Kell, A., & Moss, B. (2020). ..."), the authors once more, family
+    names first, which the tagger reads as a byline: "B." alone comes out as an
+    author. The names in it are no byline when the tagger found a name outside
+    the citation, or when the label names this paper; with no byline left, the
+    authors are read from the citation itself
+    (:func:`bibr.extract.self_citation.apply_printed_citation`).
+    """
+    regions, names_paper = _own_citation_regions(inp)
+    if not regions:
+        return
+    words = inp.words
+    outside = any(
+        _field(tags[i]) in _NAME_FIELDS for i, w in enumerate(words) if w.region not in regions
+    )
+    if not (outside or names_paper):
+        return
+    for i, word in enumerate(words):
+        if word.region in regions and _field(tags[i]) in (*_NAME_FIELDS, "AUTHOR_MARK"):
+            tags[i] = "O"
+
+
 def _repair_byline(inp: TaggerInput, tags: Sequence[str], conf: Sequence[float]) -> list[str]:
-    """The tags with the name parts in print that the tagger left out added back."""
+    """The tags with the name parts in print that the tagger left out added back,
+    and the names that are no author's taken out."""
     repaired = list(tags)
     _tidy_name_spans(inp, repaired, _spans(inp, repaired, conf))
     spans = _spans(inp, repaired, conf)
-    authors = _group_authors(spans)
+    authors = _group_authors(spans, inp)
     if not authors:
         _byline_under_title(inp, repaired, spans)
         return repaired
     _complete_names(inp, repaired, authors)
     lines = _word_lines(inp)
+    _names_inside_repeated_affiliations(inp, repaired, _spans(inp, repaired, conf), lines)
     _one_name_per_line(inp, repaired, lines)
-    _complete_lines(inp, repaired, _group_authors(_spans(inp, repaired, conf)), lines)
-    _names_between(inp, repaired, _group_authors(_spans(inp, repaired, conf)))
+    _complete_lines(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp), lines)
+    _names_between(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp))
+    _keyed_last_name(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp))
+    _given_across_regions(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp))
+    _names_from_emails(inp, repaired, _spans(inp, repaired, conf))
+    _drop_names_in_affiliations(
+        inp, repaired, _group_authors(_spans(inp, repaired, conf), inp), lines
+    )
+    _drop_own_citation_names(inp, repaired)
     return repaired
+
+
+def _given_text(inp: TaggerInput, author: _Author) -> str:
+    """The author's given name as printed; "" for one name printed twice.
+
+    A given name equal to the family name is a name printed so ("Lin Lin"), its
+    two parts next to each other in one region with at most a separator between
+    them, and the extractor keeps it (``_convert_llm_authors``, ``tagged``). The
+    same word in two places ("Suprihatin" in the byline, "Suprihatin" again in a
+    correspondence line), which :func:`_group_authors` pairs into one author, is
+    a one-name author's name printed twice: the family name alone, as the
+    extractor reads an LLM's echo of one field into the other. With ``rules`` or
+    without: the extractor keeps a tagged given name equal to the family name on
+    every route, and for this one the result is the extractor's as before.
+    """
+    given = " ".join(s.text for s in author.given)
+    if (
+        not given
+        or given.strip() != _strip_orcid_icon(" ".join(s.text for s in author.family)).strip()
+    ):
+        return given
+    words = inp.words
+    first, second = sorted(
+        ([i for s in author.given for i in s.words], [i for s in author.family for i in s.words])
+    )
+    printed_so = words[first[0]].region == words[second[-1]].region and all(
+        words[i].text in _LIST_SEPARATORS for i in range(first[-1] + 1, second[0])
+    )
+    return given if printed_so else ""
+
+
+def _full_name_key(author: _Author) -> str:
+    return _fold(" ".join(s.text for s in (*author.given, *author.family)))
+
+
+def _drop_note_strangers(
+    inp: TaggerInput, spans: list[Span], authors: list[_Author]
+) -> list[_Author]:
+    """Drop the people an author note after the abstract names besides the authors.
+
+    A note printed after the abstract may repeat the byline with each author's
+    post ("Ada Kell is Professor of Law at Norland University and the Ivo Marn
+    Fellow"): the other names in it, a chair's or a colleague's, are no authors.
+    Only when a byline with whole names is printed before the abstract and the
+    note's region repeats one of its authors in full.
+    """
+    abstract = next((s.words[0] for s in spans if s.field == "ABSTRACT"), None)
+    if abstract is None:
+        return authors
+    byline = {_full_name_key(a) for a in authors if a.last_word < abstract and a.given and a.family}
+    if not byline:
+        return authors
+    words = inp.words
+    notes = {
+        words[a.first_word].region
+        for a in authors
+        if a.first_word > abstract and _full_name_key(a) in byline
+    }
+    return [
+        a
+        for a in authors
+        if a.first_word < abstract
+        or words[a.first_word].region not in notes
+        or _full_name_key(a) in byline
+    ]
 
 
 def _words_between(inp: TaggerInput, tags, lo: int, hi: int, name: str) -> list[str]:
@@ -1608,7 +2685,9 @@ def assemble(
     title, title_conf, title_problems = _title(spans, tags, inp, confidences, rules=rules)
     problems.extend(title_problems)
     confidence["title"] = title_conf
-    abstract, abstract_conf = _abstract(spans, tags, inp, confidences, rules=rules)
+    abstract, abstract_conf, abstract_runs_on = _abstract(
+        spans, tags, inp, confidences, rules=rules
+    )
     if abstract_conf is not None:
         confidence["abstract"] = abstract_conf
     if abstract is None:
@@ -1636,7 +2715,11 @@ def assemble(
         license=_license_short(license_span.text if license_span else None),
     )
 
-    authors = [a for a in _group_authors(spans) if not (rules and _is_publisher(a))]
+    authors = [
+        a for a in _group_authors(spans, inp if rules else None) if not (rules and _is_publisher(a))
+    ]
+    if rules:
+        authors = _drop_note_strangers(inp, spans, authors)
     if not authors:
         problems.append("no_authors")
     name_words = [i for a in authors for s in (*a.given, *a.family) for i in s.words]
@@ -1705,7 +2788,7 @@ def assemble(
 
     author_rows = [
         AuthorLLM(
-            given=" ".join(s.text for s in a.given),
+            given=_given_text(inp, a),
             family=_strip_orcid_icon(" ".join(s.text for s in a.family)),
             affiliation=a.affiliation,
             email=a.email,
@@ -1721,6 +2804,7 @@ def assemble(
         problems=problems,
         unattached_affiliations=unattached,
         untagged_affiliations=_untagged_institutions(inp, tags) if rules and not carried else [],
+        abstract_runs_on=abstract_runs_on,
     )
 
 

@@ -172,9 +172,11 @@ header, which covers the non-English headings (`Literaturverzeichnis`, `Bibliogr
 `ML_FRONT_ROLE_MODEL_ID` defaults to `scienceverse/bibr-front-role-v1`, pinned to a commit
 by `ML_FRONT_ROLE_REVISION` so a hub push cannot change front-matter output. Set the id to
 null to fall back to the lexical heuristics alone, or `ML_FRONT_ROLE_ENABLED=false` to keep
-a configured bundle unloaded. The bundle is a joblib **pickle**, read through the
-gadget-restricted loader — only point the setting at a checkpoint you control. scikit-learn
-and joblib are core dependencies, so the model runs on a torch-free install.
+a configured bundle unloaded. The bundle is a pickle-free `bibr-gbm/1` bundle
+(`front_role.json` and the trees in `front_role.npz`), read with numpy alone, so the model
+runs on a core install with neither torch nor scikit-learn. `scripts/export_gbm_bundle.py`
+converts a trainer's joblib bundle into this form and checks that it scores rows exactly as
+scikit-learn does.
 Loading is soft: an unavailable bundle logs one warning and the pipeline runs on the
 heuristics alone. Resolutions influenced by the model carry the `front_role_model` reason
 flag, and every candidate records the roles the model contributed (`model_roles`) with its

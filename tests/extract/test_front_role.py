@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import joblib
 import pytest
+
+# Training the fixture models and converting them needs scikit-learn and joblib
+# (the dev group); bibr reads the converted bundles without them.
+joblib = pytest.importorskip("joblib")
+pytest.importorskip("sklearn")
+
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.feature_extraction import DictVectorizer
 
@@ -103,9 +108,17 @@ def bundle_path(tmp_path):
         "model_kind": "front_role_v1",
         "version": "test",
     }
-    path = tmp_path / "front_role.joblib"
-    joblib.dump(bundle, path)
-    return path
+    return _converted(bundle, tmp_path)
+
+
+def _converted(bundle, directory):
+    """``bundle`` (a joblib bundle dict) as the bibr-gbm/1 ``front_role.json`` in ``directory``."""
+    from scripts.export_gbm_bundle import main as export_main
+
+    pickle = directory / "front_role.trained.joblib"
+    joblib.dump(bundle, pickle)
+    assert export_main([str(pickle), str(directory), "--stem", "front_role"]) == 0
+    return directory / "front_role.json"
 
 
 def _typed_region(index: int, label: str, content: str, bbox, *, font_size=9.0, bold=False):
@@ -180,12 +193,23 @@ def test_start_page_offset_keeps_page_numbers_relative_to_processed_pages(bundle
 
 
 def test_bundle_with_foreign_feature_keys_is_rejected(tmp_path):
-    joblib.dump(
-        {"model": None, "vectorizer": None, "feature_keys": ["nope"], "roles": list(ROLES)},
-        tmp_path / "front_role.joblib",
+    dv = DictVectorizer(sparse=False)
+    x = dv.fit_transform([{"nope": float(i)} for i in range(40)])
+    model = HistGradientBoostingClassifier(max_iter=5, random_state=0, min_samples_leaf=5)
+    model.fit(x, [i % 2 for i in range(40)])
+    path = _converted(
+        {"model": model, "vectorizer": dv, "feature_keys": ["nope"], "roles": list(ROLES)},
+        tmp_path,
     )
     with pytest.raises(ValueError, match="feature_keys"):
-        FrontRoleClassifier(str(tmp_path / "front_role.joblib"))
+        FrontRoleClassifier(str(path))
+
+
+def test_a_pickle_is_refused_with_how_to_convert_it(bundle_path):
+    with pytest.raises(ValueError, match="export_gbm_bundle"):
+        FrontRoleClassifier(str(bundle_path.with_name("front_role.trained.joblib")))
+    # The directory names its manifest.
+    assert FrontRoleClassifier(str(bundle_path.parent)).path == str(bundle_path)
 
 
 def test_loader_is_soft_and_caches_failures(monkeypatch, caplog):

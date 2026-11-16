@@ -61,6 +61,18 @@ class TestStxNonAsciiStillJoinsRealHyphenation:
     def test_russian_hyphenation_joins(self):
         assert _resolve_stx_marks("полная информа\x02ция здесь") == "полная информация здесь"
 
+    def test_ukrainian_hyphenation_without_ukrainian_letters_joins(self):
+        # Neither fragment has a letter only Ukrainian writes, and Russian reads
+        # both halves as words of their own ("сис", "теми"): the Ukrainian
+        # lexicon, which knows the joined word, must be consulted too.
+        assert _resolve_stx_marks("сис\x02теми") == "системи"
+        assert _resolve_stx_marks("вироб\x02ництво") == "виробництво"
+        assert fix_ocr_artifacts("сис-\nтеми") == "системи"
+
+    def test_russian_compound_still_keeps_hyphen(self):
+        assert _resolve_stx_marks("научно\x02исследовательский") == "научно-исследовательский"
+        assert _resolve_stx_marks("северо\x02западный") == "северо-западный"
+
     def test_region_language_rescues_ascii_fragments(self):
         # The wrap falls between two undiacriticked syllables, so only the
         # surrounding region names the language.  Without it, English knows
@@ -115,3 +127,41 @@ class TestDehyphenateWordLinewrapsNonAscii:
 
     def test_ascii_linewrap_compound_still_keeps_hyphen(self):
         assert _dehyphenate_word_linewraps("subjective well-\nbeing") == "subjective well-being"
+
+
+class TestStxCyrillicRegionLanguage:
+    """Plain Cyrillic fragments take the region's language when it writes Russian-only letters."""
+
+    def test_wrap_in_russian_text_joins_where_ukrainian_knows_both_halves(self):
+        # "бо" and "калу" are Ukrainian words; in a Russian region (it writes
+        # "ы") the wrap is adjudicated by the Russian lexicon alone and joins.
+        assert _resolve_stx_marks("мы подошли к бо\x02калу") == "мы подошли к бокалу"
+
+    def test_plain_cyrillic_fragment_without_russian_letters_in_region_consults_ukrainian(self):
+        assert _resolve_stx_marks("це сис\x02теми") == "це системи"
+
+    def test_accented_latin_fragment_in_russian_text_keeps_its_own_language(self):
+        assert _resolve_stx_marks("мы santé\x02publique") == "мы santé-publique"
+
+
+class TestStxRareWordJudgedByTheLexiconThatKnowsIt:
+    """A rare joined word is judged in the lexicon that knows it best."""
+
+    def test_rare_russian_word_in_a_short_region_joins(self):
+        # No letter only Russian writes, so Ukrainian is consulted too. It
+        # knows the halves as words ("методи", "стов") but not the joined
+        # word, which Russian knows: the lexicon that knows it judges it.
+        assert _resolve_stx_marks("Подготовка методи\x02стов для школ") == (
+            "Подготовка методистов для школ"
+        )
+        assert _resolve_stx_marks("Они грози\x02лись уйти") == "Они грозились уйти"
+        assert fix_ocr_artifacts("Подготовка методи-\nстов для школ") == (
+            "Подготовка методистов для школ"
+        )
+        # Ukrainian knows "мотори" as a word and the joined word less than Russian.
+        assert fix_ocr_artifacts("мотори-\nку") == "моторику"
+
+    def test_rare_ukrainian_word_russian_knows_less_joins(self):
+        assert _resolve_stx_marks("кали\x02нова") == "калинова"
+        assert _resolve_stx_marks("пере\x02возила") == "перевозила"
+        assert fix_ocr_artifacts("заки-\nдала") == "закидала"

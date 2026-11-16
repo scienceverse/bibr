@@ -2413,7 +2413,9 @@ class CoreMetadataExtractor:
             # The tagger labels printed tokens and cannot loop: its byline is
             # not trimmed like a model's.
             cap = None if "authors" in tagger_parts else _MAX_LLM_AUTHORS
-            authors = self._convert_llm_authors(llm_metadata.authors, cap=cap)
+            authors = self._convert_llm_authors(
+                llm_metadata.authors, cap=cap, tagged="authors" in tagger_parts
+            )
             self._record_author_anomaly(llm_metadata.authors, authors, cap=cap)
             authors, transforms = self._sanitize_authors(authors, full_text)
             veto = None
@@ -3309,11 +3311,17 @@ class CoreMetadataExtractor:
 
     @staticmethod
     def _convert_llm_authors(
-        llm_authors, *, cap: int | None = _MAX_LLM_AUTHORS
+        llm_authors, *, cap: int | None = _MAX_LLM_AUTHORS, tagged: bool = False
     ) -> list[PaperAuthor]:
         """Convert LLM author models to PaperAuthor; strip affiliation markers,
         collapse same-name given/family pairs (consortium echoes), and sanitise
         degenerate output provider-independently.
+
+        ``tagged`` says the authors are the front tagger's, read off the print:
+        a given name equal to the family name is then a real name printed so
+        ("Lin Lin"), not a model echoing one field into the other, and is kept.
+        The tagger's assembler has already blanked the given name of one name
+        printed twice in two places (``assemble._given_text``).
 
         AuthorLLM IS A PaperAuthor (subclass), so we promote via model_validate
         on the LLM dump with the sanitisation transforms applied. Post-transform
@@ -3348,7 +3356,7 @@ class CoreMetadataExtractor:
                     trimmed = g[: len(g) - len(f)].rstrip(" ,")
                     if trimmed:
                         given = trimmed
-            if given and given.strip() == family.strip():
+            if given and given.strip() == family.strip() and not tagged:
                 given = ""
 
             given_s = (given or "").strip()

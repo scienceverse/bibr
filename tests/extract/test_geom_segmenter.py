@@ -1,5 +1,10 @@
-import joblib
 import pytest
+
+# Training the fixture models and converting them needs scikit-learn and joblib
+# (the dev group); bibr reads the converted bundles without them.
+joblib = pytest.importorskip("joblib")
+pytest.importorskip("sklearn")
+
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.feature_extraction import DictVectorizer
 
@@ -27,7 +32,11 @@ def _with_adjacent_rows(rows, lines):
 
 
 def _train_tiny_bundle(path, *, feature_keys=None, model_kind=None):
-    """Train a tiny GBM that learns 'indented line == not a boundary'."""
+    """Train a tiny GBM that learns 'indented line == not a boundary', as the
+    bibr-gbm/1 bundle ``path`` (``geom_segmenter.json``) names."""
+    from scripts.export_gbm_bundle import main as export_main
+
+    pickle = path.with_name(path.stem + ".trained.joblib")
     lines = [
         _ln("Aknin, L. B. (2013). A title.", 72.0, y=700),
         _ln("Journal of X, 1, 2-3.", 108.0, y=688),
@@ -56,12 +65,13 @@ def _train_tiny_bundle(path, *, feature_keys=None, model_kind=None):
             "version": "test",
             **({"model_kind": model_kind} if model_kind else {}),
         },
-        path,
+        pickle,
     )
+    assert export_main([str(pickle), str(path.parent), "--stem", path.stem]) == 0
 
 
 def test_segment_round_trips_to_ref_strings(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     lines = [
@@ -76,21 +86,21 @@ def test_segment_round_trips_to_ref_strings(tmp_path):
 
 
 def test_empty_lines_returns_empty_and_zero_conf(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     assert seg.segment("whatever", []) == ([], 0.0)
 
 
 def test_feature_key_mismatch_raises_at_load(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle, feature_keys=["dx_prev", "x0_rel_page"])  # wrong subset
     with pytest.raises(ValueError, match="feature_keys"):
         GeomSegmenter(str(bundle))
 
 
 def test_adjacent_boundary_bundle_loads_and_predicts_with_augmented_features(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     keys = sorted({*PROD_FEATURE_KEYS, *ADJACENT_FEATURE_KEYS})
     _train_tiny_bundle(bundle, feature_keys=keys, model_kind=MODEL_KIND_ADJACENT_BOUNDARY_V2)
     seg = GeomSegmenter(str(bundle))
@@ -129,7 +139,7 @@ def test_predict_forces_first_line_b_ref_even_with_later_b_ref(tmp_path):
     then drop the genuine first reference. labels[0] must be forced B-REF
     unconditionally — not only when no B-REF exists anywhere.
     """
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     seg.model = _FakeModel([0.2, 0.1, 0.9])  # line 0 I-REF, line 2 B-REF
@@ -141,7 +151,7 @@ def test_predict_forces_first_line_b_ref_even_with_later_b_ref(tmp_path):
 
 
 def test_predict_forces_first_line_b_ref_when_none_present(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     seg.model = _FakeModel([0.1, 0.2, 0.3])  # all I-REF
@@ -157,7 +167,7 @@ _REF_TEXT = "Aknin, L. B. (2013). A title. Journal of X, 1, 2-3. Carstensen, L. 
 
 
 def test_segment_spans_returns_char_spans_and_confidence(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     lines = [record_to_dict(x) for x in _LINES]
@@ -174,7 +184,7 @@ def test_segment_spans_returns_char_spans_and_confidence(tmp_path):
 
 
 def test_segment_strings_are_span_slices(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     lines = [record_to_dict(x) for x in _LINES]
@@ -186,7 +196,7 @@ def test_segment_strings_are_span_slices(tmp_path):
 
 
 def test_segment_spans_empty_lines(tmp_path):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     assert seg.segment_spans("whatever", []) == ([], 0.0, 0, 0)
@@ -197,7 +207,7 @@ def test_segment_spans_labeled_count_survives_collapsed_alignment(tmp_path):
     therefore ``spans``) collapses -- this is the signal the yield gate in
     ref_extractor consumes (see REF_GEOM_MIN_ALIGN_YIELD in config.py for the
     OOD rationale)."""
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     lines = [record_to_dict(x) for x in _LINES]
@@ -217,7 +227,7 @@ def test_segment_spans_labeled_count_survives_collapsed_alignment(tmp_path):
 
 @pytest.mark.parametrize("ending", ["Ware, J. J., &", "Ware, J. J., and", "Ware, J. J., & "])
 def test_line_after_an_open_author_list_is_not_a_boundary(tmp_path, ending):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     seg.model = _FakeModel([0.9, 0.1, 0.9])
@@ -244,7 +254,7 @@ def test_line_after_an_open_author_list_is_not_a_boundary(tmp_path, ending):
     ],
 )
 def test_line_after_a_complete_line_can_still_be_a_boundary(tmp_path, ending):
-    bundle = tmp_path / "geom_segmenter.joblib"
+    bundle = tmp_path / "geom_segmenter.json"
     _train_tiny_bundle(bundle)
     seg = GeomSegmenter(str(bundle))
     seg.model = _FakeModel([0.9, 0.1, 0.9])
@@ -257,3 +267,15 @@ def test_line_after_a_complete_line_can_still_be_a_boundary(tmp_path, ending):
     labels, _ = seg._predict(lines)
 
     assert labels == ["B-REF", "I-REF", "B-REF"]
+
+
+def test_a_directory_names_its_bundle_and_a_pickle_is_refused(tmp_path):
+    """The setting may name the bundle's directory; a joblib pickle is not read,
+    and the error says how to convert it."""
+    bundle = tmp_path / "geom_segmenter.json"
+    _train_tiny_bundle(bundle)
+    seg = GeomSegmenter(str(tmp_path))
+    assert seg.path == str(bundle)
+
+    with pytest.raises(ValueError, match="export_gbm_bundle"):
+        GeomSegmenter(str(tmp_path / "geom_segmenter.trained.joblib"))

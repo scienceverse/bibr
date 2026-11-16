@@ -852,11 +852,11 @@ setting and once with it. No other setting changes:
 | Model | Setting | Candidate format |
 |---|---|---|
 | Reference parser | `NER_PARSER_CKPT` | ONNX bundle directory (`model: ner_parser`) |
-| Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `.joblib` bundle file |
+| Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `geom_segmenter.json` manifest (with its `.npz`), or the directory holding them; `scripts/export_gbm_bundle.py` converts a `.joblib` bundle |
 | Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`), or a Hub repo id |
 | CRF reference segmenter | `NER_SEG_CKPT` | checkpoint file (`torch` extra) |
 | Text reference segmenter (replaces the CRF) | `REF_TEXT_SEG_MODEL_ID` | directory with `segmenter.json`, `model.onnx` and `tokenizer.json` (in it or in `onnx/`), or a Hub repo id |
-| Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `.joblib` bundle file |
+| Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `front_role.json` manifest (with its `.npz`), or the directory holding them; `scripts/export_gbm_bundle.py` converts a `.joblib` bundle |
 | Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
 | Statement tagger (adds a source) | `ML_STATEMENT_TAGGER_MODEL_ID` | ONNX bundle directory (`model: statement_tagger`), or a Hub repo id |
 | Section classifier | `ML_SECTION_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: section_classifier`) |

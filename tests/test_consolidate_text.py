@@ -103,6 +103,42 @@ class TestStxSoftHyphen:
     def test_stx_in_year_range_restores_hyphen(self):
         assert fix_ocr_artifacts("between 2010\x022014 the") == "between 2010-2014 the"
 
+    def test_stx_between_letter_and_digit_restores_hyphen(self):
+        # A code of letters and a number is never syllable-hyphenated.
+        assert fix_ocr_artifacts("during the ZORB\x0217 outbreak") == "during the ZORB-17 outbreak"
+        assert fix_ocr_artifacts("levels of QX\x024 rose") == "levels of QX-4 rose"
+        assert fix_ocr_artifacts("the VAN-Gol\x022 strain") == "the VAN-Gol-2 strain"
+
+    def test_stx_between_digit_and_letter_restores_hyphen(self):
+        assert fix_ocr_artifacts("over a 12\x02month span") == "over a 12-month span"
+
+    def test_stx_next_to_digit_skips_a_line_break(self):
+        assert fix_ocr_artifacts("the ZORB\x02\r\n17 outbreak") == "the ZORB-17 outbreak"
+        assert fix_ocr_artifacts("a 12\x02\nmonth span") == "a 12-month span"
+        assert fix_ocr_artifacts("in 2010\x02\r\n2014 the") == "in 2010-2014 the"
+
+    def test_stx_after_a_number_before_a_function_word_keeps_the_word_break(self):
+        # A suspended hyphen at a line end ("5-" / "and 10-year"): the next
+        # word stands alone and must not be glued onto the hyphen.
+        assert fix_ocr_artifacts("in 5\x02\nand 10-year plots") == "in 5- and 10-year plots"
+        assert fix_ocr_artifacts("a 2\x02\r\nor 3-fold rise") == "a 2- or 3-fold rise"
+        assert fix_ocr_artifacts("for 10\x02\nto 15-min bouts") == "for 10- to 15-min bouts"
+        assert fix_ocr_artifacts("nach 5\x02\nund 10-jährigen") == "nach 5- und 10-jährigen"
+        # A continuation of the number's compound still joins.
+        assert fix_ocr_artifacts("a 12\x02\nmonth span") == "a 12-month span"
+        assert fix_ocr_artifacts("the ZORB\x02\n17 outbreak") == "the ZORB-17 outbreak"
+        assert fix_ocr_artifacts("a 3\x02\nandrostane ring") == "a 3-androstane ring"
+        assert fix_ocr_artifacts("the 4\x02\nO-methyl group") == "the 4-O-methyl group"
+
+    def test_stx_next_to_digit_needs_a_letter_or_digit_beyond(self):
+        # A mark between a number and punctuation or a space is no hyphen of a code.
+        assert fix_ocr_artifacts("rose 4.26\x02 then") == "rose 4.26 then"
+        assert fix_ocr_artifacts("at 17\x02.") == "at 17."
+        assert fix_ocr_artifacts("ends 17\x02") == "ends 17"
+
+    def test_stx_between_letters_still_joins_across_digit_free_words(self):
+        assert fix_ocr_artifacts("the plim\x02bort ran") == "the plimbort ran"
+
 
 class TestStxLiteralCompoundHyphens:
     """Literal compound hyphens the OCR STX-marked at line wraps.
