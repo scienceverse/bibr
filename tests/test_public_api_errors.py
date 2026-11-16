@@ -74,7 +74,9 @@ def test_missing_file_raises_before_any_model_loads(tmp_path, monkeypatch):
 
 
 def test_missing_file_error_pickles():
-    error = pickle.loads(pickle.dumps(exceptions.InputFileNotFoundError("a.pdf")))
+    # A round trip of an object this test builds itself.
+    payload = pickle.dumps(exceptions.InputFileNotFoundError("a.pdf"))  # nosemgrep
+    error = pickle.loads(payload)  # nosemgrep
     assert isinstance(error, exceptions.InputFileNotFoundError)
     assert str(error) == "input file not found: a.pdf"
 
