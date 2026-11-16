@@ -64,8 +64,12 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# A text-layer region may carry one unmapped glyph, or one per this many characters.
+# A text-layer region may carry one unmapped glyph, or one per this many characters ...
 _CHARS_PER_UNMAPPED_GLYPH = 100
+# ... or, in a region of at most this many characters (a byline or a heading)
+# where no two of them stand side by side, one per this many.
+_MAX_SPARSE_UNMAPPED_GLYPH_CHARS = 200
+_CHARS_PER_SPARSE_UNMAPPED_GLYPH = 20
 _UNMAPPED_GLYPH = "\ufffd"
 
 
@@ -412,13 +416,43 @@ def _mark_unmapped_glyphs(text: str) -> tuple[str, int]:
     recovered, and dropping them changes the text without a trace ("W m-1" reads
     as "W m1"), so the mark stays in their place. No OCR follows on this route, so
     rejecting the region would lose the whole paragraph for one symbol.
+
+    A short line takes a few more, see :func:`_sparse_unmapped_glyphs`.
     """
     from bibr.ocr.native_text import _is_disallowed_control_char
 
-    count = sum(1 for ch in text if _is_disallowed_control_char(ch))
-    if not count or count > max(1, len(text) // _CHARS_PER_UNMAPPED_GLYPH):
+    unmapped = [_is_disallowed_control_char(ch) for ch in text]
+    count = sum(unmapped)
+    if not count:
         return text, 0
-    return "".join(_UNMAPPED_GLYPH if _is_disallowed_control_char(ch) else ch for ch in text), count
+    if count > max(1, len(text) // _CHARS_PER_UNMAPPED_GLYPH) and not _sparse_unmapped_glyphs(
+        unmapped
+    ):
+        return text, 0
+    marked = (_UNMAPPED_GLYPH if bad else ch for ch, bad in zip(text, unmapped, strict=True))
+    return "".join(marked), count
+
+
+def _sparse_unmapped_glyphs(unmapped: Sequence[bool]) -> bool:
+    """Whether the unmapped glyphs (*unmapped* flags each char) are a few single letters.
+
+    A byline or a heading set in a font that maps every letter but its
+    accented ones reads "Ana Mar\x03a Lo\x04pez" among its names: two marks in a
+    line of fifty characters, more than one per hundred. They are single letters of
+    otherwise whole words, never two side by side, and at most one per
+    :data:`_CHARS_PER_SPARSE_UNMAPPED_GLYPH` characters. A broken font
+    encoding turns runs of letters into control characters, which this
+    leaves rejected. Only a short line (:data:`_MAX_SPARSE_UNMAPPED_GLYPH_CHARS`
+    characters at most) takes them: a paragraph that shows a mark every few
+    words ("e\x0ecient") is body text in a font with a broken ligature, which
+    the one-per-hundred limit rejects.
+    """
+    count = sum(unmapped)
+    if len(unmapped) > _MAX_SPARSE_UNMAPPED_GLYPH_CHARS:
+        return False
+    if count > len(unmapped) // _CHARS_PER_SPARSE_UNMAPPED_GLYPH:
+        return False
+    return not any(a and b for a, b in zip(unmapped, unmapped[1:], strict=False))
 
 
 def _unmapped_glyph_warning(count: int) -> ProcessingWarning | None:
@@ -959,7 +993,9 @@ def has_unread_ocr_layer(fs: Any) -> bool:
 
     A page the gate turned down for its invisible text that the native pass
     found to be a scan under a page-sized image. With the option on such a page
-    is read, so this is true only when it is off.
+    is read, so this is true only when it is unset or off: unset, the layer was
+    left unread or turned down in place of a refusal (see
+    :func:`_read_ocr_layer_instead`).
     """
     inspection = getattr(fs, "pdf_inspection", None)
     return any(
@@ -1003,6 +1039,112 @@ def text_layer_stream(fs: Any, settings: GlobalSettings) -> TextLayerStream | No
     )
 
 
+# --- A scan's own OCR layer, read rather than refused --------------------------
+
+# Page verdicts that make a page a scan, not a broken font. A file whose failed
+# pages all carry one, at least one for an invisible OCR layer, is read from
+# that layer instead of being refused (see _read_ocr_layer_instead).
+_SCAN_REASONS = frozenset({"invisible_ocr_layer", "no_text_layer", "low_coverage"})
+
+
+def _text_region_share(layout_results: list[list[dict[str, Any]]]) -> float | None:
+    """Share of the running-text regions that hold text, or None when there are none.
+
+    The share ``OcrStage._check_text_layer_success`` refuses a file under, on
+    the layout regions before they become OCR regions.
+    """
+    from bibr.scan.page_kind import _TEXT_LABELS
+
+    needed = filled = 0
+    for page in layout_results:
+        for region in page:
+            # The OCR stage emits no region for an abandoned one.
+            if region.get("task_type") == "abandon":
+                continue
+            if str(region.get("label") or "text") not in _TEXT_LABELS:
+                continue
+            needed += 1
+            filled += bool(str(region.get("content") or "").strip())
+    return filled / needed if needed else None
+
+
+def _refused_for_its_ocr_layer(read: TextLayerRead, threshold: float) -> bool:
+    """Whether *read* leaves the file to be refused as a scan, for its OCR layer only."""
+    share = _text_region_share(read.layout_results)
+    if share is None or share >= threshold:
+        return False
+    failed = {page.reason for page in read.pages if not page.ok}
+    return "invisible_ocr_layer" in failed and failed <= _SCAN_REASONS
+
+
+def _ocr_layer_texts(read: TextLayerRead) -> list[str]:
+    """The region texts of the pages *read* took from the PDF's OCR layer."""
+    layer_pages = set(read.ocr_layer_pages)
+    return [
+        str(region.get("content") or "")
+        for page, regions in zip(read.pages, read.layout_results, strict=False)
+        if page.index + 1 in layer_pages
+        for region in regions
+    ]
+
+
+def _read_ocr_layer_instead(
+    fs: Any, settings: GlobalSettings, read: TextLayerRead
+) -> tuple[TextLayerRead, str | None]:
+    """*read*, or the file read from its scans' OCR layer when *read* would refuse it.
+
+    A scan with the scanner's OCR text under its image (invisible text over a
+    page-sized image) has no text this route can read, and the OCR stage
+    refuses it (``scan_needs_ocr``) unless ``OCR_TEXT_LAYER_READ_OCR_LAYER``
+    is on. Refusing loses the whole paper for want of an OCR model, while the
+    layer under the image usually reads well, so a file that would be refused
+    for that reason alone, and never for a font with no usable text, is read
+    again with the layer. The layer read is kept when it lifts the file over
+    the refusal threshold and its words are words
+    (:func:`~bibr.ocr.text_layer_quality.lexicon_word_share`); its
+    ``TEXT_LAYER_OCR_LAYER_READ`` warning says the text is the PDF's own OCR.
+    Called only with the option unset: off keeps the refusal.
+
+    Returns the read to apply and, when the layer was tried and turned down,
+    why, for the refusal to say.
+    """
+    from bibr.ocr.text_layer_quality import MIN_LEXICON_WORD_SHARE, lexicon_word_share
+
+    threshold = settings.ocr.min_success_rate
+    if threshold <= 0 or not _refused_for_its_ocr_layer(read, threshold):
+        return read, None
+    try:
+        layer = read_text_layer(
+            fs.pdf_bytes,
+            fs.layout_results,
+            page_indices=fs.page_indices,
+            min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
+            read_ocr_layer=True,
+        )
+        words = lexicon_word_share(_ocr_layer_texts(layer), enough=MIN_LEXICON_WORD_SHARE)
+    except Exception:  # noqa: BLE001 - the first read stands, and the file is refused
+        logger.warning("Reading the OCR layer of a scan failed", exc_info=True)
+        return read, None
+    if not layer.ocr_layer_pages:
+        return read, "no page of it could be read"
+    share = _text_region_share(layer.layout_results)
+    if share is None or share < threshold:
+        return read, f"still leaves too many text regions unread ({share or 0.0:.0%} read)"
+    if words is not None and words < MIN_LEXICON_WORD_SHARE:
+        return read, f"does not read as words (only {words:.0%} of its words are known words)"
+    layer.warnings = [
+        ProcessingWarning(
+            warning.code,
+            f"{warning.message}, because the file would otherwise be refused as a scan "
+            "(scan_needs_ocr)",
+        )
+        if warning.code == WarningCode.TEXT_LAYER_OCR_LAYER_READ
+        else warning
+        for warning in layer.warnings
+    ]
+    return layer, None
+
+
 async def read_file_text_layer(
     fs: Any,
     settings: GlobalSettings,
@@ -1016,7 +1158,9 @@ async def read_file_text_layer(
     start, and by the OCR stage for files the automatic backend's fallback
     reaches after their native-text pass. A file read once is not read again.
     *read*, when given, is the file's read already done (a
-    :class:`TextLayerStream`'s) and is applied as it is.
+    :class:`TextLayerStream`'s) and is applied as it is. A file the read would
+    leave to be refused for its scans' OCR layer is read from that layer
+    instead (:func:`_read_ocr_layer_instead`).
     """
     import asyncio
 
@@ -1047,6 +1191,11 @@ async def read_file_text_layer(
                 )
             )
         return
+    # Unset, not off: OCR_TEXT_LAYER_READ_OCR_LAYER=false keeps the refusal.
+    if settings.ocr.text_layer_read_ocr_layer is None:
+        read, fs.text_layer_ocr_layer_refusal = await asyncio.to_thread(
+            _read_ocr_layer_instead, fs, settings, read
+        )
     apply_text_layer_read(fs, read)
     failed = [page for page in read.pages if not page.ok]
     logger.info(

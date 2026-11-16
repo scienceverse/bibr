@@ -77,6 +77,9 @@ class FileState:
     page_kinds: dict[int, str] | None = None
     # The text-layer backend read this file's regions (bibr.ocr.text_layer).
     text_layer_read: bool = False
+    # Why the text-layer read turned down the OCR layer of this file's scans,
+    # when it tried that layer in place of refusing the file (bibr.ocr.text_layer).
+    text_layer_ocr_layer_refusal: str | None = None
     # Pages OCR attempted, and pages that failed wholesale. A page that raises
     # substitutes an empty region list, contributing to neither side of the
     # region-level success ratio — so a run where most pages died outright
