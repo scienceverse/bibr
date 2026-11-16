@@ -59,7 +59,7 @@ uses the lookup-only path.
 
 Some sections have no printed heading: an abstract or introduction found by its
 position, a section named after a layout region, and the acknowledgment and
-author-contribution sections the opt-in statement tagger adds. Their
+author-contribution sections the statement tagger adds. Their
 `section[].header` is bibr's own wording ("Abstract", "Introduction",
 "Acknowledgments", "Author contributions"), and their row in
 `extraction.diagnostics.section_classification` carries `header_supplied: true`.
@@ -137,7 +137,7 @@ When the PP-DocLayoutV3 layout model tags a region with a semantic label (abstra
 
 **Module:** `bibr/extract/front_role.py` (bundle loading, scoring), `bibr/extract/front_role_features.py` (the feature contract shared with the trainer), consumed by `bibr/extract/front_matter.py` and `bibr/extract/ref_locator.py`
 
-An optional gradient-boosted model scores every OCR text region with a distribution over
+A gradient-boosted model, on by default, scores every OCR text region with a distribution over
 eleven roles: `title`, `byline`, `affiliation`, `abstract`, `keywords`, `doi_line`,
 `masthead`, `heading`, `ref_header`, `body`, `other`. Its features are the region's
 geometry in a page-relative frame, its font relative to the largest type on the page, and
@@ -160,8 +160,8 @@ keeps its lexical heuristics and adds the model's roles on top:
   (`ML_FRONT_ROLE_RECORD_ROOT_CONFIDENCE`, default `0.9`) keeps the title role and loses
   only the right to root a *second* record. `Correspondence`, `A R T I C L E I N F O`,
   `CITATION` and `Key Features` all score `heading` at 1.00 and all sit above an abstract,
-  which is anatomy enough to develop a record — so admitting a correct byline above them
-  used to cut the real title away from its own abstract. Layout's `doc_title` and a match
+  which is anatomy enough to develop a record, so without the veto a correct byline
+  admitted above them would cut the real title away from its own abstract. Layout's `doc_title` and a match
   against the reference parser's detected title both outrank the veto, and `1.0` disables
   it.
 

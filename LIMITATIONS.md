@@ -1,6 +1,6 @@
 # Known limitations
 
-Last updated: 2026-11-01
+Last updated: 2026-11-16
 
 bibr is alpha software. It already exports rich paper structure, metadata,
 references, cross-references, tables, figures, equations, and provenance fields,
@@ -41,6 +41,12 @@ because bibr changes every week.
 - **None yet**: no systematic measurement.
 
 ### Reading the paper
+
+The results on this page were measured in **full mode**, with a language model
+reading the front matter. bibr runs in **fast mode** (local models only, no
+language model and no API key) when none is configured, and this page does not
+yet report a fast-mode score on these answer keys; what it knows about fast
+mode is under [Choosing an extraction model](#choosing-an-extraction-model).
 
 Most of these results use Qwen3.8-27B, a large open model, to read the front
 matter (title, authors, abstract and so on). The sealed whole-paper test used
@@ -86,8 +92,8 @@ than the 27B, and the 2B passed 4 fewer.
 
 ### Choosing an extraction model
 
-A language model reads the title, authors and other front matter, and
-`bibr setup` picks one that fits your machine. We scored them the same way on
+In full mode, a language model reads the title, authors and other front matter,
+and `bibr setup` picks one that fits your machine. We scored them the same way on
 252 development papers in October 2026. A paper passes when its title, DOI,
 author names and reference list are all right.
 
@@ -95,11 +101,15 @@ author names and reference list are all right.
 |---|---|---|---|
 | Qwen3.8-27B | Your own model server on a 24 GB GPU | 223 of 252 (88.5%) | Reference |
 | Claude Haiku 5.5 | Anthropic's API, with your key. Page images and text from your papers go to Anthropic. Setup offers it when there's no suitable GPU | 221 of 252 | −0.8 points |
-| bibr extract 4B (Qwen3.5-4B, fine-tuned for bibr) | bibr's default on Linux with an NVIDIA GPU of 12 GB or more | 216 of 252 | −2.8 points |
-| bibr extract 2B (Qwen3.5-2B, fine-tuned for bibr) | bibr's default on Linux with an NVIDIA GPU of 8 to 11 GB | 207 of 252 | −6.3 points |
+| bibr extract 4B (Qwen3.5-4B, fine-tuned for bibr), previous revision | bibr's default wherever one of its builds fits: on vLLM with a Linux NVIDIA GPU of 10 GB or more; on llama.cpp on Windows, NVIDIA GPUs of 5 to 9 GB and cards older than Ampere; on Apple Silicon (experimental) | 216 of 252 | −2.8 points |
+| bibr extract 2B (Qwen3.5-2B, fine-tuned for bibr) | Not a default on NVIDIA GPUs: `bibr setup --advanced` offers it on vLLM from 12 GB, and its llama.cpp builds for smaller cards. Setup picks it on an Apple Silicon Mac with too little memory for the 4B | 207 of 252 | −6.3 points |
 
-On Windows, and on NVIDIA GPUs with 5 to 7 GB, setup runs a compressed build of
-the 4B through llama.cpp, which you install yourself. On the same papers, its
+The current revision of the 4B was not part of this comparison; on a later
+build it passed 218 to the previous revision's 217 on the same machine.
+
+On Windows, on NVIDIA GPUs with 5 to 9 GB and on cards older than Ampere, setup
+runs a compressed build of the 4B through llama.cpp, which you install yourself;
+on a 10 or 11 GB card it does so too when it finds a CUDA build of llama.cpp. On the same papers, its
 8-bit build passed 218 and its 4-bit build 214, in single runs. On Apple Silicon
 Macs, setup runs a Mac build of the 4B, or of the 2B on a Mac with less memory.
 We have only smoke-tested these, so setup marks them as experimental. Haiku's result used bibr's own OCR. When setup offers
@@ -108,9 +118,20 @@ Haiku, it uses Claude for the OCR too, which we haven't scored yet. The
 comparison, and the [configuration guide](docs/guides/configuration.md) shows
 how to use another model.
 
-On a computer with only a CPU, PDFs need llama.cpp (which is slow there), your
-own OCR and model server, or cloud processing. Word, JATS, HTML and ePub files
-need no OCR.
+**Fast mode** (the default when no language model is configured) uses none of
+these models. It needs no GPU: it reads born-digital PDFs from their text layer
+(see [the text-layer route](#the-text-layer-route-reads-born-digital-pdfs-only)),
+and a scanned PDF needs an OCR route. This page has no fast-mode score on the
+252 papers above. What it does report: on 70 scanned papers of a development
+set, reading the scans' own OCR text layer let a fast run read 64 instead of 5,
+and 38 of the 59 it added met the pass floors (title, authors, reference
+matching), against 41 when the same build read them with an OCR model and 47
+for bibr 0.8.0 with an OCR model and the LLM. Under an 8 GB memory limit, a fast
+batch of 60 papers peaked at 4.7 GB.
+
+On a computer with only a CPU, scanned PDFs, and the automatic OCR that full
+mode starts, need llama.cpp (which is slow there), your own OCR and model
+server, or cloud processing. Word, JATS, HTML and ePub files need no OCR.
 
 **Found a paper bibr gets wrong?** Please tell us with the
 [wrong-extraction form](https://github.com/scienceverse/bibr/issues/new?template=wrong-extraction.yml).

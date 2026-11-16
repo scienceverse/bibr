@@ -149,7 +149,8 @@ source("../../scripts/read_json_response.R")
 ```{r}
 result <- parse_bibr_json(resp_body_string(result_resp))
 metadata <- result$metadata %||% result$info
-cat("bibr version:", result$extraction$bibr_version %||% metadata$bibr_version, "\n")
+cat("bibr version:", result$extraction$producer$version %||% result$extraction$bibr_version %||%
+  metadata$bibr_version, "\n")
 ```
 
 ## 5. Explore the extracted data

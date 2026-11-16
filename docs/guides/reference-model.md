@@ -1,6 +1,6 @@
 # Fine-tuned reference model
 
-bibr 0.7.0 supports automatic review of local NER parses with a fine-tuned
+bibr can review local NER parses automatically with a fine-tuned
 **Qwen3.5-0.8B** LoRA adapter. NER parses each reference first. Missing titles or
 printed years, unsupported primary fields, low word coverage, missing year
 suffixes and unusually long entries trigger review. These checks are routing

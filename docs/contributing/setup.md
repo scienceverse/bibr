@@ -123,9 +123,9 @@ only when deliberately suspending PyPI delivery; tags created while it is
 disabled skip the PyPI upload. Manual release rehearsals never publish.
 
 Container registry delivery is a separate opt-in: `PUBLISH_GHCR=true` enables
-edge and release uploads, including manual container workflow runs. It is
-disabled for the initial public 0.5.0 launch; users can build the containers
-from the public source. CI still builds the serve image and blocks fixable
+edge and release uploads, including manual container workflow runs. Releases
+ship no prebuilt images; users build the containers from the public source
+(see [Docker deployment](../guides/deployment.md#docker-deployment)). CI still builds the serve image and blocks fixable
 HIGH/CRITICAL vulnerabilities before `CI / required` passes.
 
 A manual container workflow run publishes only a commit that is on `main`. A

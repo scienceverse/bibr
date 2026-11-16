@@ -26,11 +26,23 @@ and does not need LLM credentials: if the LLM check at startup fails (no API
 key, no local launcher), the server still starts, logs the problem on
 stderr, and `chew_paper` / `chew_url` return it as a tool error.
 
-Register it with your client — for Claude Code, from your project directory:
+Register it with your client. Which command depends on how you installed
+bibr. For Claude Code:
 
 ```bash
+# bibr is a dependency of your uv project: run this from the project directory
 claude mcp add bibr -- uv run bibr mcp
+
+# bibr is installed as a tool (uv tool install 'bibr[mcp]'), so bibr is on PATH
+claude mcp add bibr -- bibr mcp --allow-dir /path/to/papers
+
+# nothing installed: uvx fetches bibr with the mcp extra when the client starts it
+claude mcp add bibr -- uvx --from 'bibr[mcp]' bibr mcp --allow-dir /path/to/papers
 ```
+
+The server starts in whatever directory the client starts it in, and its file
+tools reach only that directory unless you name others with `--allow-dir`
+(see [File access](#file-access)).
 
 or in JSON client configs (Claude Desktop and most others):
 
@@ -46,9 +58,10 @@ or in JSON client configs (Claude Desktop and most others):
 }
 ```
 
-`uv --directory` also sets the directory the server starts in, so the second
+`uv --directory` also sets the directory the server starts in, so this
 example names the papers directory with `--allow-dir`; see
-[File access](#file-access).
+[File access](#file-access). With bibr installed as a tool, the entry is
+`"command": "bibr", "args": ["mcp", "--allow-dir", "/path/to/papers"]`.
 
 Pipeline options are fixed at server start (they configure the shared warm
 pipeline, exactly like `bibr.Chewer`): pass a subset of the `bibr chew`

@@ -1,21 +1,33 @@
 # Production deployment
 
-`bibr chew` processes files and directories locally. For production use, batch
-processing, or team-shared infrastructure, `bibr serve` runs the same
-pipeline behind an HTTP API — with an external OCR server and optional
-Redis caching. This guide covers running it: the API itself, its
-concurrency model, authentication, the OCR server it depends on, the
-bundled Docker stack, reference extraction at scale, and hardware sizing.
+`bibr serve` runs the pipeline that `bibr chew` runs behind an HTTP API, for
+other programs, a team or a web front end. It needs no other infrastructure:
+with nothing configured it serves in fast mode (local models only, no LLM and
+no API key) and reads each PDF from its own text layer, on a CPU. An OCR
+server (for scanned PDFs), an LLM and Redis caching are optional additions.
+This guide covers running it: the API itself, its concurrency model,
+authentication, the OCR server, the bundled Docker stack, reference
+extraction at scale, and hardware sizing.
 
 ## One-machine API
 
 ```bash
-bibr serve
+bibr serve                                                  # wait for "bibr serve is ready"
+curl http://127.0.0.1:8000/health                           # ok
+curl -X POST http://127.0.0.1:8000/papers/extract -F "file=@paper.pdf" -o paper.json
 ```
+
+The interactive API docs are at <http://127.0.0.1:8000/docs>, and `GET /`
+lists the main paths. The server loads its models before it answers: uvicorn
+reports it is running first, and the line
+`bibr serve is ready: http://127.0.0.1:8000  (API docs …)` comes once
+requests are answered. Stop it with Ctrl-C, or SIGTERM (`kill <pid>`,
+`docker stop`): either shuts down the API process and the inference worker.
 
 This starts a [LitServe](https://lightning.ai/docs/litserve/home)
 application exposing the full extraction pipeline over HTTP, bound by
-default to loopback at `127.0.0.1:8000`. Two flags control the bind address:
+default to loopback at `127.0.0.1:8000`. `--host` and `--port` set the bind
+address; the other flags choose the run mode and the OCR route:
 
 | Flag | Description | Default |
 |---|---|---|
@@ -56,7 +68,7 @@ no credentials, cannot multiply requests to those services.
 underlying `POST /_bibr/inference` route is private descriptor dispatch, not a
 second upload API; direct HTTP requests to it always receive `404`.
 
-The API process accepts exactly one `file` part and the nine documented option
+The API process accepts exactly one `file` part and the ten documented option
 fields, each at most once; text fields it does not know are ignored, up to 25
 text parts in all. A duplicate field, a second file, more text parts or any
 option value over 64 bytes is rejected with `400` before descriptor creation.
@@ -502,9 +514,27 @@ declares a GPU device reservation for `bibr-ocr` — add one to `bibr-serve` too
 `nvidia` as the Docker default runtime) if you want its models on GPU as
 well. Without a GPU, `bibr-serve` starts and its layout detector and
 segmenter fall back to CPU (see `LAYOUT_USE_GPU` / `SEGMENTER_USE_GPU`
-below), but it can only process PDFs when an OCR server is reachable: the
-bundled `bibr-ocr` needs a GPU, so a CPU-only host needs an external
-`OCR_BASE_URL` (see the split deployment above).
+below). Compose always gives `bibr-serve` an `OCR_BASE_URL` (its private
+`bibr-ocr` service unless you set another), so on a host without a GPU,
+where `bibr-ocr` cannot run, choose one of two routes:
+
+- **No OCR server (CPU only).** Read each PDF from its own text layer, as
+  `bibr serve --ocr text-layer` does. Born-digital PDFs only; a scanned PDF is
+  answered with `422` and `error_code: scan_needs_ocr`. In `.env`:
+
+    ```bash
+    OCR_BACKEND=text-layer     # takes precedence over OCR_BASE_URL: no OCR server is contacted
+    REDIS_PASSWORD=...         # Compose runs with ENVIRONMENT=production,
+    AUTH_API_KEY=...           # which requires both (the key: 32+ characters)
+    ```
+
+    ```bash
+    docker compose --profile serve up -d --build    # no --profile ocr
+    curl http://localhost:8000/ready                # "ready"; checks.ocr: not_used (text layer) with the token
+    ```
+
+- **An OCR server on another host**, set as `OCR_BASE_URL` (see the split
+  deployment above).
 
 The image builds on the PyTorch stack by default. `--build-arg ML_STACK=onnx` builds
 it without PyTorch or the `ml` extra: every model, layout included, runs on ONNX
