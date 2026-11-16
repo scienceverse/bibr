@@ -21,6 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   holds only a short abstract the tagger is unsure of, reads an abstract cut
   by the end of its window on from the next page, and takes the longer title
   a later page reprints when the title page's was read in part.
+- A fast run's authors no longer include the names in the paper's own
+  citation line, a person an institution is named after, a place in an
+  address, a role e-mail address's owner (such as an editorial office) or a
+  stranger an author note names. A name inverted as "Family, Given", a
+  surname printed in capitals, a given name a region break cut off, the last
+  name of a keyed list and a name only an e-mail address spells are read as
+  printed, and a name printed with its family twice keeps both parts.
 
 ## [0.9.1] - 2026-11-16
 

@@ -1492,7 +1492,81 @@ def _given_first(names: list[Span]) -> bool:
     return given_family > family_given
 
 
-def _group_authors(spans: list[Span]) -> list[_Author]:
+def _closes_inverted_item(
+    inp: TaggerInput, names: list[Span], pos: int, tagged: Collection[int]
+) -> bool:
+    """Whether the given name at ``names[pos]`` ends a "Family, Given" item.
+
+    A byline that prints given names first may still print one author the other
+    way round ("Ada Kell & Moss, Bea T."): :func:`_inverted_item_at` reads the
+    shape. One full word alone after a one-name author ("Ada Kell, Bea Moss,
+    Suprihatin, Wahyudi") has that shape too, and is the next one-name author: the
+    given name must read as an inverted item's (:func:`_inverted_given`), or the
+    byline (the given name's region) must print another item that does ("Moss,
+    B., ..., Kell, Ada").
+    """
+    if not _inverted_item_at(inp, names, pos, tagged):
+        return False
+    region = inp.words[names[pos].words[0]].region
+    return _inverted_given(inp, names[pos], tagged) or any(
+        k != pos
+        and names[k].field == "GIVEN"
+        and inp.words[names[k].words[0]].region == region
+        and _inverted_item_at(inp, names, k, tagged)
+        and _inverted_given(inp, names[k], tagged)
+        for k in range(1, len(names))
+    )
+
+
+def _inverted_given(inp: TaggerInput, given: Span, tagged: Collection[int]) -> bool:
+    """Whether a given name reads as an inverted item's: initials ("Moss, B.",
+    "Moss, J.R."), more words than one ("Moss, Bea T.", "Moss, Bea Ann"), or an
+    initial left untagged right after it ("Moss, Bea/GIVEN T.")."""
+    words = inp.words
+    parts = [words[i].text for i in given.words if any(c.isalpha() for c in words[i].text)]
+    after = given.words[-1] + 1
+    return (
+        len(parts) > 1
+        or any(sum(c.isalpha() for c in part) == 1 for part in parts)
+        or (
+            after < len(words)
+            and after not in tagged
+            and words[after].region == words[given.words[-1]].region
+            and len(words[after].text) == 1
+            and words[after].text.isupper()
+        )
+    )
+
+
+def _inverted_item_at(
+    inp: TaggerInput, names: list[Span], pos: int, tagged: Collection[int]
+) -> bool:
+    """Whether the given name at ``names[pos]`` is printed as a "Family, Given"
+    item: the family name right before it ends in a comma, nothing but that comma
+    stands between them, and the next name part is no family name: the next item
+    opens with its given name, or the list ends there. A capitalised word left
+    untagged right after the given name ("Moss, Bea Toller") is a family name the
+    tagger missed, so the given name opens a "Given Family" item of its own.
+    """
+    if pos == 0:
+        return False
+    words = inp.words
+    before, given = names[pos - 1], names[pos]
+    comma = before.words[-1] + 1
+    if before.field != "FAMILY" or given.words[0] != comma + 1 or words[comma].text != ",":
+        return False
+    if pos + 1 < len(names) and names[pos + 1].field == "FAMILY":
+        return False
+    after = given.words[-1] + 1
+    return not (
+        after < len(words)
+        and after not in tagged
+        and words[after].region == words[given.words[-1]].region
+        and _is_name_word(words[after].text)
+    )
+
+
+def _group_authors(spans: list[Span], inp: TaggerInput | None = None) -> list[_Author]:
     """One author per given/family pair, in either printed order.
 
     An author is complete once it holds one name part of each kind; the next
@@ -1501,18 +1575,26 @@ def _group_authors(spans: list[Span]) -> list[_Author]:
     (a family part alone) followed by another one as two authors. In a byline
     that prints given names first, a given name also starts the next author
     after a family name, so a one-name author ("Suprihatin, Siti Nuraini") does
-    not take the next author's given name.
+    not take the next author's given name. With ``inp`` (the rules), a given
+    name that closes a "Family, Given" item (:func:`_closes_inverted_item`) stays
+    with the family name before it.
     """
     names = [span for span in spans if span.field in _NAME_FIELDS]
     given_first = _given_first(names)
+    tagged = {i for span in spans for i in span.words} if inp is not None else set()
     authors: list[_Author] = []
-    for span in names:
+    for pos, span in enumerate(names):
         slot = "given" if span.field == "GIVEN" else "family"
         current = authors[-1] if authors else None
         if (
             current is None
             or getattr(current, slot)
-            or (given_first and slot == "given" and current.family)
+            or (
+                given_first
+                and slot == "given"
+                and current.family
+                and not (inp is not None and _closes_inverted_item(inp, names, pos, tagged))
+            )
         ):
             authors.append(_Author(first_word=span.words[0]))
         getattr(authors[-1], slot).append(span)
@@ -1759,16 +1841,90 @@ def _complete_names(inp: TaggerInput, tags: list[str], authors: list[_Author]) -
             tags[i] = f"{'I' if pos else 'B'}-{name}"
 
 
+def _only_separators_between(
+    inp: TaggerInput, tags: list[str], authors: list[_Author], region: int, skip: range
+) -> bool:
+    """Whether every other gap between two authors in ``region`` holds separators,
+    connectives and keys only, and there is one such gap at least: with two
+    authors alone ("Ada Kell, Vela Dora, Bea Moss, Norland") nothing shows that
+    the list prints no affiliation inside it."""
+    words = inp.words
+    checked = 0
+    for a, b in zip(authors, authors[1:], strict=False):
+        other = range(a.last_word + 1, b.first_word)
+        if other == skip or not other or words[other[0]].region != region:
+            continue
+        checked += 1
+        if any(
+            _field(tags[i]) not in (None, "AUTHOR_MARK", "AFF_MARK")
+            or (
+                _field(tags[i]) is None
+                and words[i].text not in _LIST_SEPARATORS
+                and not _is_connective(words[i].text)
+            )
+            for i in other
+        ):
+            return False
+    return checked > 0
+
+
+def _list_name_read_as_affiliation(
+    inp: TaggerInput, tags: list[str], gap: range, authors: list[_Author]
+) -> list[list[int]]:
+    """The name units of a list item between two authors that the tagger read as an
+    affiliation; [] when the gap is anything else.
+
+    "Ada Kell, Bea Moss, Ivo Marn, and Tea Roth" with "Ivo Marn" tagged an
+    affiliation: the gap is in one region, holds that one affiliation span and
+    nothing else but separators and keys, the span is bounded by separators (or
+    a connective after it) and reads as one whole name with no institution word
+    and no country ("Ada Kell, New Zealand, and Bea Moss"), and every other gap
+    between two authors of the region is separators, connectives and keys only:
+    a list of names that prints no affiliation inside it.
+    """
+    from bibr.extract.affiliation_rules import _is_country
+
+    words = inp.words
+    region = words[gap[0]].region
+    if any(words[i].region != region for i in gap):
+        return []
+    if any(_field(tags[i]) not in (None, "AFFILIATION", "AUTHOR_MARK", "AFF_MARK") for i in gap):
+        return []
+    aff = [i for i in gap if _field(tags[i]) == "AFFILIATION"]
+    if aff != list(range(aff[0], aff[-1] + 1)) or tags[aff[0]] != "B-AFFILIATION":
+        return []
+    after = aff[-1] + 1
+    if words[aff[0] - 1].text not in _LIST_SEPARATORS or not (
+        after < len(words)
+        and (words[after].text in _LIST_SEPARATORS or _is_connective(words[after].text))
+    ):
+        return []
+    if any(_INSTITUTION_RE.search(words[i].text) or not _is_name_word(words[i].text) for i in aff):
+        return []
+    if _is_country(" ".join(words[i].text for i in aff)):
+        return []
+    units = _name_units(inp, tags, aff[0], after)
+    if not units or units[-1][-1] != aff[-1] or not _whole_name(inp, units):
+        return []
+    if not _only_separators_between(inp, tags, authors, region, gap):
+        return []
+    return units
+
+
 def _names_between(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
     """Tag whole names the tagger skipped in a list: between two authors, and after
-    the last one when a connective leads to it ("..., and Dimitri van der Linden")."""
+    the last one when a connective leads to it ("..., and Dimitri van der Linden").
+    A name between two authors that the tagger read as an affiliation is read
+    back too (:func:`_list_name_read_as_affiliation`)."""
     words = inp.words
     for a, b in zip(authors, authors[1:], strict=False):
         lo, hi = a.last_word + 1, b.first_word
         gap = range(lo, hi)
-        if not 0 < len(gap) <= _MAX_NAME_GAP_WORDS or any(
-            _field(tags[i]) not in (None, "AUTHOR_MARK", "AFF_MARK") for i in gap
-        ):
+        if not 0 < len(gap) <= _MAX_NAME_GAP_WORDS:
+            continue
+        if any(_field(tags[i]) not in (None, "AUTHOR_MARK", "AFF_MARK") for i in gap):
+            if units := _list_name_read_as_affiliation(inp, tags, gap, authors):
+                _tag_whole_name(inp, tags, units)
             continue
         if any(
             _INSTITUTION_RE.search(words[i].text)
@@ -1936,6 +2092,26 @@ def _one_name_per_line(inp: TaggerInput, tags: list[str], lines: list[tuple[int,
                 _tag_whole_name(inp, tags, units)
 
 
+# The most letters run-together initials print ("AJ"): a longer word in
+# capitals is a surname.
+_MAX_INITIALS_LETTERS = 2
+
+
+def _surname_in_capitals(inp: TaggerInput, author: _Author, run: list[int]) -> bool:
+    """Whether a family name tagged alone is printed in capitals and the words after
+    it are not: "KOVAR Tilen", a surname set apart the way many bylines print it,
+    with the given name after it. Initials are in capitals too ("J. Smith", "AJ
+    Smith", "J.R. Smith"): a word with a period, or of two letters or fewer, is
+    read as one, so a two-letter surname in capitals ("LI Wei") reads as before."""
+    family = " ".join(s.text for s in author.family)
+    return (
+        "." not in family
+        and sum(c.isalpha() for c in family) > _MAX_INITIALS_LETTERS
+        and family.isupper()
+        and not all(inp.words[j].text.isupper() for j in run)
+    )
+
+
 def _complete_lines(
     inp: TaggerInput, tags: list[str], authors: list[_Author], lines: list[tuple[int, int]]
 ) -> None:
@@ -1948,7 +2124,9 @@ def _complete_lines(
     its line, takes the name words after it even when the line goes on
     ("Imamul/FAMILY Arifin S,Sy."). A given name alone printed right after a
     whole name on the same line, ending it, is the rest of that name's family
-    ("Camila V. Bordón Gabriele/GIVEN").
+    ("Camila V. Bordón Gabriele/GIVEN"). A family name tagged alone stays the
+    family name when it is printed in capitals and the words after it are not
+    (:func:`_surname_in_capitals`): they are its given name.
     """
     words = inp.words
     n = len(words)
@@ -2006,6 +2184,15 @@ def _complete_lines(
             at_line_end or (one_part and starts_line and not affiliated)
         ):
             continue
+        if (
+            one_part
+            and author.family
+            and not author.given
+            and _surname_in_capitals(inp, author, run)
+        ):
+            for k, j in enumerate(run):
+                tags[j] = "I-GIVEN" if k else "B-GIVEN"
+            continue
         if one_part and author.family and not author.given:
             # "Faried/FAMILY Dirgantara Putra": the tagged word starts the name.
             for s in author.family:
@@ -2023,21 +2210,442 @@ def _complete_lines(
             tags[j] = f"I-{last}"
 
 
+def _names_inside_repeated_affiliations(
+    inp: TaggerInput, tags: list[str], spans: list[Span], lines: list[tuple[int, int]]
+) -> None:
+    """Split a name line out of an affiliation printed on both sides of it.
+
+    A byline stacked author by author prints each name on a line of its own and
+    the affiliation under it, so "Faculty of Law, Norland University / Ivo Marn /
+    Faculty of Law, Norland University" comes out as one affiliation span. A
+    line inside such a span is the next author when it reads as one whole name
+    and no institution, and the span's lines before it are printed again, word
+    for word, right after it.
+    """
+    words = inp.words
+    for span in spans:
+        if span.field != "AFFILIATION":
+            continue
+        rows: dict[tuple[int, int], list[int]] = {}
+        for i in span.words:
+            rows.setdefault(lines[i], []).append(i)
+        keys = list(rows)
+        for pos in range(1, len(keys) - 1):
+            row = rows[keys[pos]]
+            units = _name_units(inp, tags, row[0], row[-1] + 1)
+            if not units or units[-1][-1] != row[-1] or not _whole_name(inp, units):
+                continue
+            if any(_INSTITUTION_RE.search(words[i].text) for i in row):
+                continue
+            before = [_fold(words[i].text) for key in keys[:pos] for i in rows[key]]
+            after = [_fold(words[i].text) for key in keys[pos + 1 :] for i in rows[key]]
+            if after[: len(before)] != before:
+                continue
+            _tag_whole_name(inp, tags, units)
+            tags[rows[keys[pos + 1]][0]] = "B-AFFILIATION"
+            break
+
+
+# Keyed authors that show a list keys every name: one key alone may be a note's.
+_MIN_KEYED_AUTHORS = 2
+
+
+def _ends_with_keys(tags: list[str], author: _Author) -> bool:
+    return author.last_word + 1 < len(tags) and _field(tags[author.last_word + 1]) == "AUTHOR_MARK"
+
+
+def _keyed_last_name(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
+    """Tag the last name of a keyed list that the tagger left out.
+
+    "Ada Kell1, Bea Moss2, ivo3": when every author of the list carries a key,
+    the words between the last author's separator (and a connective) and the
+    next key are one more author, whatever their case; the last of them is the
+    family name. Only in the byline's region, or the next one when the list
+    runs on into it, and never a title, a degree or an institution word.
+    """
+    words = inp.words
+    n = len(words)
+    if len(authors) < _MIN_KEYED_AUTHORS or not all(_ends_with_keys(tags, a) for a in authors):
+        return
+    i = authors[-1].last_word + 1
+    while i < n and _field(tags[i]) == "AUTHOR_MARK":
+        i += 1
+    if i >= n or words[i].text not in _LIST_SEPARATORS:
+        return
+    i += 1
+    if i < n and _is_connective(words[i].text):
+        i += 1
+    run: list[int] = []
+    while i < n and tags[i] == "O" and words[i].text.isalpha() and len(run) < _MAX_NAME_UNITS:
+        run.append(i)
+        i += 1
+    if not run or i >= n or _field(tags[i]) != "AUTHOR_MARK":
+        return
+    region = words[authors[-1].last_word].region
+    if any(words[j].region != region for j in run) and words[run[0]].region != region + 1:
+        return
+    if any(
+        words[j].text.casefold() in _NOT_GIVEN_WORDS or _INSTITUTION_RE.search(words[j].text)
+        for j in run
+    ):
+        return
+    for k, j in enumerate(run):
+        name = "FAMILY" if k == len(run) - 1 else "GIVEN"
+        tags[j] = f"{'B' if k in (0, len(run) - 1) else 'I'}-{name}"
+
+
+def _given_across_regions(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
+    """Tag the given name a region break cut off a family name.
+
+    "Ada Kell, Ivo" ending one region and "Marn2, and Bea Moss" opening the
+    next: the layout split the byline at a line break, and the family name
+    opening the region takes the name words that end the region before it, back
+    to a separator or a connective. Only when that region holds tagged names.
+    """
+    words = inp.words
+    for author in authors:
+        first = author.first_word
+        if author.given or not author.family or first == 0:
+            continue
+        region = words[first - 1].region
+        if region == words[first].region:
+            continue
+        i = first - 1
+        picked: list[int] = []
+        while (
+            i >= 0
+            and words[i].region == region
+            and tags[i] == "O"
+            and _is_name_word(words[i].text)
+            and len(picked) < _MAX_GIVEN_UNITS
+        ):
+            picked.append(i)
+            i -= 1
+        if not picked or i < 0 or words[i].region != region:
+            continue
+        if words[i].text not in _LIST_SEPARATORS and not _is_connective(words[i].text):
+            continue
+        if not any(
+            _field(tags[j]) in _NAME_FIELDS for j in range(i, -1, -1) if words[j].region == region
+        ):
+            continue
+        for k, j in enumerate(sorted(picked)):
+            tags[j] = "I-GIVEN" if k else "B-GIVEN"
+
+
+_EMAIL_PART_SEPARATORS_RE = re.compile(r"[._\-]")
+# An address that spells a name: a given and a family part ("ivo.marn@").
+_EMAIL_NAME_PARTS = 2
+# Words of an office's or a role's address, which spells no one's name
+# ("editorial.office@", "data.availability@").
+_ROLE_ADDRESS_WORDS = frozenset(
+    {"editorial", "editor", "office", "data", "availability", "contact", "journal", "support"}
+    | {"admin", "info", "press", "secretariat", "team", "help", "desk", "service", "general"}
+    | {"enquiries", "inquiries", "submissions", "permissions", "reprints", "media", "managing"}
+)
+
+
+def _names_from_emails(inp: TaggerInput, tags: list[str], spans: list[Span]) -> None:
+    """Tag a name the tagger left out that its address spells.
+
+    A byline that runs on in prose ("Ada Kell is at Norland University, Ivo Marn
+    studies with Bea Moss ... ivo.marn@vela.example") holds no list for
+    :func:`_names_between` to read. Two untagged capitalised words printed next
+    to each other before the address, in its region, that are the address's two
+    local parts in order, are a given and a family name. Not when either part
+    already is a word of a tagged name: the address is then that author's, and
+    the words its name printed once more ("Correspondence: Ada Kell"). Nor when
+    the two words are printed as a label ("Norland Lab: norland.lab@"), or either
+    part is a role's or an office's word (``_ROLE_ADDRESS_WORDS``): an office's
+    address spells the office's name ("Editorial Office editorial.office@").
+    """
+    words = inp.words
+    known = {
+        words[i].text.casefold()
+        for author in _group_authors(spans, inp)
+        for s in (*author.given, *author.family)
+        for i in s.words
+    }
+    for span in spans:
+        if span.field != "EMAIL" or "@" not in span.text:
+            continue
+        local = span.text.split("@", 1)[0].replace(" ", "").casefold()
+        parts = [p for p in _EMAIL_PART_SEPARATORS_RE.split(local) if p]
+        if len(parts) != _EMAIL_NAME_PARTS or any(
+            p in known or p in _ROLE_ADDRESS_WORDS for p in parts
+        ):
+            continue
+        region = words[span.words[0]].region
+        members = [i for i in range(span.words[0]) if words[i].region == region]
+        for a, b in zip(members, members[1:], strict=False):
+            if (
+                b == a + 1
+                and tags[a] == tags[b] == "O"
+                and _is_name_word(words[a].text)
+                and _is_name_word(words[b].text)
+                and [words[a].text.casefold(), words[b].text.casefold()] == parts
+                and not (b + 1 < len(words) and words[b + 1].text == ":")
+            ):
+                tags[a], tags[b] = "B-GIVEN", "B-FAMILY"
+                break
+
+
+def _listed_after(inp: TaggerInput, tags: list[str], before: _Author, author: _Author) -> bool:
+    """Whether only separators, keys, connectives and fillers stand between two authors."""
+    words = inp.words
+    return all(
+        words[i].text in _LIST_SEPARATORS
+        or _is_connective(words[i].text)
+        or _field(tags[i]) in ("AUTHOR_MARK", "AFF_MARK")
+        or words[i].text.casefold() in _BYLINE_FILLERS
+        for i in range(before.last_word + 1, author.first_word)
+    )
+
+
+# Capitalised words an institution's name may print between its eponym and the
+# institution word ("Ivo Marn Volga State University").
+_MAX_EPONYM_GAP_WORDS = 3
+
+
+def _opens_line(inp: TaggerInput, tags: list[str], i: int, lines: list[tuple[int, int]]) -> bool:
+    """Whether only keys, marks and titles stand before word ``i`` on its line
+    ("2 Ivo Marn", "Dr. Ivo Marn")."""
+    words = inp.words
+    j = i - 1
+    while j >= 0 and lines[j] == lines[i]:
+        text = words[j].text
+        if not (
+            _field(tags[j]) in ("AUTHOR_MARK", "AFF_MARK")
+            or text.isdigit()
+            or text in _SYMBOL_MARKS
+            or text == "."
+            or text.casefold() in _HONORIFICS
+        ):
+            return False
+        j -= 1
+    return True
+
+
+def _names_an_institution(
+    inp: TaggerInput, tags: list[str], author: _Author, lines: list[tuple[int, int]]
+) -> bool:
+    """Whether the name is an eponym: printed inside a line, not opening it, and an
+    institution word follows it on its line after nothing but a few capitalised
+    words ("Faculty of Law, Ivo Marn State University"). A name opening its line,
+    after its key or title at most, is the author whose affiliation the line goes
+    on with ("2 Ada Kell Assistant Professor, Department of Law")."""
+    words = inp.words
+    if _opens_line(inp, tags, author.first_word, lines):
+        return False
+    line = lines[author.last_word]
+    i = author.last_word + 1
+    while i < len(words) and lines[i] == line and i - author.last_word <= _MAX_EPONYM_GAP_WORDS + 1:
+        text = words[i].text
+        if text in _LIST_SEPARATORS or not text[:1].isupper():
+            return False
+        if _INSTITUTION_RE.search(text) or _INSTITUTION_RE.search(f"{text} of"):
+            return True
+        i += 1
+    return False
+
+
+def _names_a_place(inp: TaggerInput, author: _Author, lines: list[tuple[int, int]]) -> bool:
+    """Whether the name is a place in an address: an institution word earlier on its
+    line, and a country after one separator closing the line ("Faculty of Law,
+    Norland University, Vela Dora, Vietnam")."""
+    from bibr.extract.affiliation_rules import _is_country
+
+    words = inp.words
+    n = len(words)
+    line = lines[author.last_word]
+    comma = author.last_word + 1
+    if comma + 1 >= n or words[comma].text not in _LIST_SEPARATORS or lines[comma + 1] != line:
+        return False
+    i = comma + 1
+    while i < n and lines[i] == line and words[i].text not in _LIST_SEPARATORS:
+        i += 1
+    closes = (
+        i >= n
+        or lines[i] != line
+        or (words[i].text in _LIST_SEPARATORS and (i + 1 >= n or lines[i + 1] != line))
+    )
+    if not closes or not _is_country(" ".join(words[j].text for j in range(comma + 1, i))):
+        return False
+    start = lines[author.first_word]
+    return any(
+        _INSTITUTION_RE.search(words[j].text) for j in range(author.first_word) if lines[j] == start
+    )
+
+
+def _drop_names_in_affiliations(
+    inp: TaggerInput, tags: list[str], authors: list[_Author], lines: list[tuple[int, int]]
+) -> None:
+    """Untag a name that is part of an institution's name or of its address.
+
+    Affiliation lines print people's names in them: a university named after
+    someone ("Ivo Marn State University") and a town named after one ("...,
+    Vela Dora, Vietnam"), which the tagger reads as one more author. Only a
+    whole name (a given and a family part), never the first author, nor one in
+    a list of names (only separators, keys and connectives since the author
+    before), nor one a key, an email or an ORCID follows.
+    """
+    words = inp.words
+    for before, author in zip(authors, authors[1:], strict=False):
+        if not (author.given and author.family) or _listed_after(inp, tags, before, author):
+            continue
+        after = author.last_word + 1
+        if after < len(words) and _field(tags[after]) in ("AUTHOR_MARK", "EMAIL", "ORCID"):
+            continue
+        if _names_an_institution(inp, tags, author, lines) or _names_a_place(inp, author, lines):
+            for s in (*author.given, *author.family):
+                for i in s.words:
+                    tags[i] = "O"
+
+
+# What the labels of a printed citation leave after them: "Full citation:".
+_CITATION_LABEL_TRIM = " \t:|.-–—"
+
+
+def _own_citation_regions(inp: TaggerInput) -> tuple[set[int], bool]:
+    """The regions printing the paper's own citation, and whether a label names the paper.
+
+    A region opening with a citation label (the labels
+    :func:`bibr.extract.self_citation.find_printed_citation` reads: "To cite this
+    article:", "Full citation:", "Citation:") is one; a label alone in its region
+    makes the next region one. The second value is true when a label says the
+    citation is this paper's ("To cite this article") rather than any citation.
+    """
+    from bibr.extract.self_citation import _cue
+
+    found: set[int] = set()
+    names_paper = False
+    for pos, region in enumerate(inp.regions):
+        text = (region.text or "").strip()
+        match, strong = _cue(text)
+        if match is None:
+            continue
+        names_paper = names_paper or strong
+        if text[match.end() :].strip(_CITATION_LABEL_TRIM):
+            found.add(pos)
+        elif pos + 1 < len(inp.regions):
+            found.add(pos + 1)
+    return found, names_paper
+
+
+def _drop_own_citation_names(inp: TaggerInput, tags: list[str]) -> None:
+    """Untag the names printed in the paper's own citation.
+
+    A cover page or a first-page box prints how to cite the paper ("To cite this
+    article: Kell, A., & Moss, B. (2020). ..."), the authors once more, family
+    names first, which the tagger reads as a byline: "B." alone comes out as an
+    author. The names in it are no byline when the tagger found a name outside
+    the citation, or when the label names this paper; with no byline left, the
+    authors are read from the citation itself
+    (:func:`bibr.extract.self_citation.apply_printed_citation`).
+    """
+    regions, names_paper = _own_citation_regions(inp)
+    if not regions:
+        return
+    words = inp.words
+    outside = any(
+        _field(tags[i]) in _NAME_FIELDS for i, w in enumerate(words) if w.region not in regions
+    )
+    if not (outside or names_paper):
+        return
+    for i, word in enumerate(words):
+        if word.region in regions and _field(tags[i]) in (*_NAME_FIELDS, "AUTHOR_MARK"):
+            tags[i] = "O"
+
+
 def _repair_byline(inp: TaggerInput, tags: Sequence[str], conf: Sequence[float]) -> list[str]:
-    """The tags with the name parts in print that the tagger left out added back."""
+    """The tags with the name parts in print that the tagger left out added back,
+    and the names that are no author's taken out."""
     repaired = list(tags)
     _tidy_name_spans(inp, repaired, _spans(inp, repaired, conf))
     spans = _spans(inp, repaired, conf)
-    authors = _group_authors(spans)
+    authors = _group_authors(spans, inp)
     if not authors:
         _byline_under_title(inp, repaired, spans)
         return repaired
     _complete_names(inp, repaired, authors)
     lines = _word_lines(inp)
+    _names_inside_repeated_affiliations(inp, repaired, _spans(inp, repaired, conf), lines)
     _one_name_per_line(inp, repaired, lines)
-    _complete_lines(inp, repaired, _group_authors(_spans(inp, repaired, conf)), lines)
-    _names_between(inp, repaired, _group_authors(_spans(inp, repaired, conf)))
+    _complete_lines(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp), lines)
+    _names_between(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp))
+    _keyed_last_name(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp))
+    _given_across_regions(inp, repaired, _group_authors(_spans(inp, repaired, conf), inp))
+    _names_from_emails(inp, repaired, _spans(inp, repaired, conf))
+    _drop_names_in_affiliations(
+        inp, repaired, _group_authors(_spans(inp, repaired, conf), inp), lines
+    )
+    _drop_own_citation_names(inp, repaired)
     return repaired
+
+
+def _given_text(inp: TaggerInput, author: _Author) -> str:
+    """The author's given name as printed; "" for one name printed twice.
+
+    A given name equal to the family name is a name printed so ("Lin Lin"), its
+    two parts next to each other in one region with at most a separator between
+    them, and the extractor keeps it (``_convert_llm_authors``, ``tagged``). The
+    same word in two places ("Suprihatin" in the byline, "Suprihatin" again in a
+    correspondence line), which :func:`_group_authors` pairs into one author, is
+    a one-name author's name printed twice: the family name alone, as the
+    extractor reads an LLM's echo of one field into the other. With ``rules`` or
+    without: the extractor keeps a tagged given name equal to the family name on
+    every route, and for this one the result is the extractor's as before.
+    """
+    given = " ".join(s.text for s in author.given)
+    if (
+        not given
+        or given.strip() != _strip_orcid_icon(" ".join(s.text for s in author.family)).strip()
+    ):
+        return given
+    words = inp.words
+    first, second = sorted(
+        ([i for s in author.given for i in s.words], [i for s in author.family for i in s.words])
+    )
+    printed_so = words[first[0]].region == words[second[-1]].region and all(
+        words[i].text in _LIST_SEPARATORS for i in range(first[-1] + 1, second[0])
+    )
+    return given if printed_so else ""
+
+
+def _full_name_key(author: _Author) -> str:
+    return _fold(" ".join(s.text for s in (*author.given, *author.family)))
+
+
+def _drop_note_strangers(
+    inp: TaggerInput, spans: list[Span], authors: list[_Author]
+) -> list[_Author]:
+    """Drop the people an author note after the abstract names besides the authors.
+
+    A note printed after the abstract may repeat the byline with each author's
+    post ("Ada Kell is Professor of Law at Norland University and the Ivo Marn
+    Fellow"): the other names in it, a chair's or a colleague's, are no authors.
+    Only when a byline with whole names is printed before the abstract and the
+    note's region repeats one of its authors in full.
+    """
+    abstract = next((s.words[0] for s in spans if s.field == "ABSTRACT"), None)
+    if abstract is None:
+        return authors
+    byline = {_full_name_key(a) for a in authors if a.last_word < abstract and a.given and a.family}
+    if not byline:
+        return authors
+    words = inp.words
+    notes = {
+        words[a.first_word].region
+        for a in authors
+        if a.first_word > abstract and _full_name_key(a) in byline
+    }
+    return [
+        a
+        for a in authors
+        if a.first_word < abstract
+        or words[a.first_word].region not in notes
+        or _full_name_key(a) in byline
+    ]
 
 
 def _words_between(inp: TaggerInput, tags, lo: int, hi: int, name: str) -> list[str]:
@@ -2107,7 +2715,11 @@ def assemble(
         license=_license_short(license_span.text if license_span else None),
     )
 
-    authors = [a for a in _group_authors(spans) if not (rules and _is_publisher(a))]
+    authors = [
+        a for a in _group_authors(spans, inp if rules else None) if not (rules and _is_publisher(a))
+    ]
+    if rules:
+        authors = _drop_note_strangers(inp, spans, authors)
     if not authors:
         problems.append("no_authors")
     name_words = [i for a in authors for s in (*a.given, *a.family) for i in s.words]
@@ -2176,7 +2788,7 @@ def assemble(
 
     author_rows = [
         AuthorLLM(
-            given=" ".join(s.text for s in a.given),
+            given=_given_text(inp, a),
             family=_strip_orcid_icon(" ".join(s.text for s in a.family)),
             affiliation=a.affiliation,
             email=a.email,
