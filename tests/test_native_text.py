@@ -288,6 +288,122 @@ def test_space_before_the_next_line_stays_with_the_glyph_before_it(monkeypatch):
     assert text == "n. "
 
 
+_GLYPH_W = 5.0
+_GLYPH_H = 10.0
+
+
+def _generated_space_lines(lines, *, stray, left=100.0, top=700.0):
+    """Lines of 5-pt glyphs whose word gaps are pdfium-generated spaces.
+
+    Each space is a flat box on the baseline; the first *stray* of them lie
+    150 pt past their gap, beyond the end of the line, the rest in their gap.
+    Returns ``(chars, generated)``: the recorded triples and the indexes of
+    the generated spaces. Lines are 20 pt apart, separated by a line break.
+    """
+    chars, generated = [], set()
+    for row, line in enumerate(lines):
+        y = top - 20.0 * row
+        x = left
+        for ch in line:
+            if ch == " ":
+                at = x + (150.0 if len(generated) < stray else 1.0)
+                generated.add(len(chars))
+                chars.append((" ", (at, y, at, y), (at, y - 2.0, at, y + _GLYPH_H)))
+                x += 3.0
+                continue
+            box = (x, y, x + _GLYPH_W, y + _GLYPH_H)
+            chars.append((ch, box, (x, y - 2.0, x + _GLYPH_W, y + _GLYPH_H)))
+            x += _GLYPH_W + 0.5
+        chars.append(("\n", None, None))
+    return chars, generated
+
+
+def _generated_space_records(monkeypatch, chars, generated):
+    monkeypatch.setattr(
+        pypdfium2.raw, "FPDFText_GetUnicode", lambda _raw, index: ord(chars[index][0])
+    )
+    monkeypatch.setattr(
+        pypdfium2.raw, "FPDFText_IsGenerated", lambda _raw, index: int(index in generated)
+    )
+    return _build_page_char_records(_BoxTextPage(chars))
+
+
+# Invented words, four gaps per line: six lines hold 24 generated spaces.
+_STRAY_SPACE_LINES = [
+    "brel tomo vask quil rend",
+    "sorn plim adet voru kesh",
+    "mant ilso trev bonu cald",
+    "fesk orim lupa gant wern",
+    "dosi hark mepu tolv zenk",
+    "rasp ulmo biko feln sart",
+]
+# The first line ends at x = 100 + 20 * 5.5 + 4 * 3 = 222 pt.
+_FIRST_LINE = (99.0, 699.0, 222.0, 711.0)
+
+
+def test_page_of_stray_generated_spaces_puts_them_after_the_glyph_before_them(monkeypatch):
+    # Every generated space lies 150 pt past its gap, outside the line's region:
+    # without the repair the words of a region run together.
+    chars, generated = _generated_space_lines(_STRAY_SPACE_LINES, stray=24)
+
+    records = _generated_space_records(monkeypatch, chars, generated)
+
+    assert _reconstruct_text_from_records(records, *_FIRST_LINE) == "brel tomo vask quil rend"
+
+
+def test_moved_generated_space_still_rises_to_its_line(monkeypatch):
+    # The region's bottom edge lies between the baseline the flat space box
+    # sits on and the letters' centres; the moved space is raised with its line.
+    chars, generated = _generated_space_lines(_STRAY_SPACE_LINES, stray=24)
+
+    records = _generated_space_records(monkeypatch, chars, generated)
+    left, _bottom, right, top = _FIRST_LINE
+
+    assert _reconstruct_text_from_records(records, left, 703.0, right, top) == (
+        "brel tomo vask quil rend"
+    )
+
+
+def test_a_few_stray_generated_spaces_stay_where_pdfium_put_them(monkeypatch):
+    # 19 stray spaces are too few to say the page boxes its spaces wrongly.
+    chars, generated = _generated_space_lines(_STRAY_SPACE_LINES, stray=19)
+
+    records = _generated_space_records(monkeypatch, chars, generated)
+
+    assert _reconstruct_text_from_records(records, *_FIRST_LINE) == "breltomovaskquilrend"
+
+
+def test_stray_generated_spaces_on_a_page_of_mostly_placed_ones_stay(monkeypatch):
+    # 20 stray spaces of 28: fewer than 80% of the page's generated spaces.
+    chars, generated = _generated_space_lines(
+        [*_STRAY_SPACE_LINES, "pelo dun riva wesk sond"], stray=20
+    )
+    assert len(generated) == 28
+
+    records = _generated_space_records(monkeypatch, chars, generated)
+
+    assert _reconstruct_text_from_records(records, *_FIRST_LINE) == "breltomovaskquilrend"
+
+
+def test_generated_spaces_out_of_place_gate():
+    from bibr.ocr.native_text import _generated_spaces_misplaced
+
+    assert _generated_spaces_misplaced(20, 5)
+    assert not _generated_spaces_misplaced(19, 0)
+    assert not _generated_spaces_misplaced(20, 6)
+
+
+def test_generated_space_placement_is_judged_only_between_glyphs_of_one_line():
+    from bibr.ocr.native_text import _generated_space_misplaced
+
+    before, after = (100.0, 700.0, 105.0, 710.0), (108.0, 700.0, 113.0, 710.0)
+    assert _generated_space_misplaced((105.5, 700.0, 107.5, 700.0), before, after) is False
+    assert _generated_space_misplaced((190.0, 700.0, 190.0, 700.0), before, after) is True
+    assert _generated_space_misplaced((90.0, 700.0, 90.0, 700.0), before, after) is True
+    below = (60.0, 680.0, 65.0, 690.0)
+    assert _generated_space_misplaced((190.0, 700.0, 190.0, 700.0), before, below) is None
+
+
 def _encode_wide(text: str):
     """Encode a Python str as the ctypes c_ushort array FPDFText_SetText wants."""
     return (ctypes.c_ushort * (len(text) + 1))(*[ord(c) for c in text], 0)
