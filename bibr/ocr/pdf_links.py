@@ -12,7 +12,6 @@ the frame the text layer's character boxes use.
 
 from __future__ import annotations
 
-import ctypes
 import html
 from dataclasses import dataclass
 from urllib.parse import unquote
@@ -35,33 +34,17 @@ def page_uri_links(document, page, page_index: int) -> list[PdfUriLink]:
 
     Operates on caller-provided pypdfium2 objects; the caller holds
     :data:`bibr.ocr.utils.pdfium_lock`. Links whose action is not a URI (a
-    jump inside the document, a launch action) are skipped.
+    jump inside the document, a launch action) are skipped. The pdfium read is
+    the document layer's (:func:`bibr.document.links.read_page_uri_links`), so
+    the two never disagree about what a link annotation says.
     """
-    import pypdfium2.raw as pdfium_c
+    # Imported here: bibr.export modules import this one, and must never load the layer.
+    from bibr.document import links
 
-    links: list[PdfUriLink] = []
-    position = ctypes.c_int(0)
-    link = pdfium_c.FPDF_LINK()
-    while pdfium_c.FPDFLink_Enumerate(page.raw, ctypes.byref(position), ctypes.byref(link)):
-        action = pdfium_c.FPDFLink_GetAction(link)
-        if not action or pdfium_c.FPDFAction_GetType(action) != pdfium_c.PDFACTION_URI:
-            continue
-        rect = pdfium_c.FS_RECTF()
-        if not pdfium_c.FPDFLink_GetAnnotRect(link, ctypes.byref(rect)):
-            continue
-        # The URI is 7-bit ASCII with a terminating NUL; the first call sizes it.
-        size = pdfium_c.FPDFAction_GetURIPath(document.raw, action, None, 0)
-        if size <= 1:
-            continue
-        buffer = ctypes.create_string_buffer(size)
-        pdfium_c.FPDFAction_GetURIPath(document.raw, action, buffer, size)
-        uri = buffer.raw[: size - 1].decode("utf-8", "replace").strip()
-        if not uri:
-            continue
-        left, right = sorted((float(rect.left), float(rect.right)))
-        bottom, top = sorted((float(rect.bottom), float(rect.top)))
-        links.append(PdfUriLink(page_index=page_index, rect=(left, bottom, right, top), uri=uri))
-    return links
+    return [
+        PdfUriLink(page_index=page_index, rect=rect, uri=uri)
+        for rect, uri in links.read_page_uri_links(links.reader_api(), document, page)
+    ]
 
 
 def read_uri_links(
