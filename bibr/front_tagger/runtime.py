@@ -19,6 +19,7 @@ stitched sequence.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 from dataclasses import replace
@@ -413,6 +414,7 @@ def tag_front_matter(
     *,
     first_page_index: int = 0,
     rules: bool = False,
+    min_confidence: float | None = None,
 ) -> TaggedFrontMatter:
     """Tag the first pages; with no abstract there, take it from a later window.
 
@@ -424,14 +426,33 @@ def tag_front_matter(
     later are tagged with the same model and the first abstract one yields
     replaces the missing one; every other field keeps the first window's
     answer, also when a later window fails to run.
+
+    With ``rules``, three more readings:
+
+    - a short abstract the tagger is unsure of (its confidence below
+      ``min_confidence``, the bar the tagger's answer is held to; ``None``
+      leaves this reading out) is a fragment, and is looked for in the later
+      windows the same way; only an abstract that is not short itself
+      replaces it;
+    - the title of the later window the abstract came from replaces the
+      first window's when it extends it by words the first window prints
+      next to it (:func:`_extended_title`);
+    - an abstract that runs off the end of its window
+      (:attr:`~bibr.front_tagger.assemble.TaggedFrontMatter.abstract_runs_on`)
+      is read on from the window that starts on its page
+      (:func:`_continue_abstract`).
     """
     from bibr.front_tagger.assemble import assemble
     from bibr.front_tagger.contract import build_tagger_input
 
     inp = build_tagger_input(regions, first_page_index=first_page_index)
-    result = assemble(inp, *tagger.tag(inp), rules=rules)
-    if "no_abstract" not in result.problems or result.title_keywords is None:
+    tags, conf = tagger.tag(inp)
+    result = assemble(inp, tags, conf, rules=rules)
+    if result.title_keywords is None:
         return result
+    short = rules and _unsure_short_abstract(result, min_confidence)
+    if "no_abstract" not in result.problems and not short:
+        return _continue_abstract(tagger, regions, result) if rules else result
     pages = {region.page for region in regions}
     for offset in ABSTRACT_WINDOW_STARTS:
         start = first_page_index + offset
@@ -452,18 +473,154 @@ def tag_front_matter(
         abstract = later.title_keywords.abstract if later.title_keywords else None
         if not (abstract or "").strip():
             continue
-        problems = [p for p in result.problems if p != "no_abstract"]
+        if short and "short_abstract" in later.problems:
+            continue  # a fragment again, no better than the first window's
+        problems = [p for p in result.problems if p not in ("no_abstract", "short_abstract")]
         problems += [p for p in later.problems if p == "short_abstract"]
         confidence = dict(result.confidence)
         if "abstract" in later.confidence:
             confidence["abstract"] = later.confidence["abstract"]
-        return replace(
+        update = {"abstract": abstract}
+        if rules and (title := _extended_title(result, later, inp, tags)):
+            update["title"] = title
+        result = replace(
             result,
-            title_keywords=result.title_keywords.model_copy(update={"abstract": abstract}),
+            title_keywords=result.title_keywords.model_copy(update=update),
             confidence=confidence,
             problems=problems,
+            abstract_runs_on=later.abstract_runs_on,
         )
+        return _continue_abstract(tagger, regions, result) if rules else result
     return result
+
+
+def _unsure_short_abstract(result: TaggedFrontMatter, min_confidence: float | None) -> bool:
+    """Whether the abstract is short and under the confidence bar: a fragment.
+
+    A short abstract the tagger is sure of is a short abstract (a letter's,
+    a meeting abstract's) and stays.
+    """
+    if min_confidence is None or "short_abstract" not in result.problems:
+        return False
+    return result.confidence.get("abstract", 1.0) < min_confidence
+
+
+def _normalized_words(text: str | None) -> list[str]:
+    return re.sub(r"\W+", " ", (text or "").casefold()).split()
+
+
+def _holds_run(words: list[str], run: list[str], within: int | None = None) -> bool:
+    """Whether ``run`` is a run of ``words`` (starting in the first ``within`` of them)."""
+    starts = len(words) - len(run) + 1 if within is None else min(within, len(words))
+    return bool(run) and any(words[n : n + len(run)] == run for n in range(max(starts, 0)))
+
+
+def _title_span(words: list[str], titled: list[bool], first: list[str]) -> tuple[int, int] | None:
+    """Where the title ``first`` is printed among ``words``: its first and last word.
+
+    That is the first run of ``first`` tagged as the title (``titled``); a title
+    read with a gap (a subtitle after a mark) spans its tagged words.
+    """
+    for n in range(len(words) - len(first) + 1):
+        if words[n : n + len(first)] == first and all(titled[n : n + len(first)]):
+            return n, n + len(first) - 1
+    tagged = [n for n, t in enumerate(titled) if t]
+    return (tagged[0], tagged[-1]) if tagged else None
+
+
+def _extended_title(
+    result: TaggedFrontMatter, later: TaggedFrontMatter, inp: TaggerInput, tags: Sequence[str]
+) -> str | None:
+    """The later window's title, where it is the first window's with more words.
+
+    A title page whose title the tagger read in part (a heading printed
+    above it taken for a rubric) is often reprinted over the article, where
+    the tagger reads it whole. The first window's title words must be a run
+    inside the later title's, and the first window must print the whole
+    later title as one run of its text over its own title's words: the words
+    its title left out are printed right next to it. The later title printed
+    elsewhere in the first window (on the page the two windows share, a
+    heading "Comment on <title>") does not count.
+    """
+    first = _normalized_words(result.title_keywords.title if result.title_keywords else None)
+    title = later.title_keywords.title if later.title_keywords else None
+    extended = _normalized_words(title)
+    if len(extended) <= len(first) or not _holds_run(extended, first):
+        return None
+    words: list[str] = []
+    titled: list[bool] = []
+    for word, tag in zip(inp.words, tags, strict=True):
+        for part in _normalized_words(word.text):
+            words.append(part)
+            titled.append(tag[2:] in ("TITLE", "SUBTITLE"))
+    span = _title_span(words, titled, first)
+    if span is None:
+        return None
+    lo, hi = span
+    starts = range(max(hi - len(extended) + 1, 0), lo + 1)
+    return title if any(words[n : n + len(extended)] == extended for n in starts) else None
+
+
+# An abstract read again from its last page is the same abstract when the
+# first words of the cut one open the new one, give or take a label printed
+# in front of them ("Background").
+_CONTINUED_LEAD_WORDS = 8
+_CONTINUED_LEAD_SLACK = 4
+
+
+def _continue_abstract(
+    tagger: OnnxFrontTagger, regions: Sequence[FrontRegion], result: TaggedFrontMatter
+) -> TaggedFrontMatter:
+    """``result`` with an abstract cut by the end of its window read on from its page.
+
+    The window that starts on the page the abstract runs off holds the rest
+    of it; that window's abstract replaces the cut one when it is longer and
+    opens with the cut one's first words. The next page must have text
+    regions, or the window would read the same text again: a page holding
+    only a figure or a table is left out of the tagger's input.
+    """
+    from bibr.extract.front_role_features import NON_TEXT_LABELS
+    from bibr.front_tagger.assemble import assemble
+    from bibr.front_tagger.contract import build_tagger_input
+
+    page = result.abstract_runs_on
+    cut = result.title_keywords.abstract if result.title_keywords else None
+    if page is None or not cut:
+        return result
+    if not any(
+        region.page == page + 1
+        and (region.label or "") not in NON_TEXT_LABELS
+        and (region.text or "").strip()
+        for region in regions
+    ):
+        return result
+    later_inp = build_tagger_input(regions, first_page_index=page)
+    try:
+        later = assemble(later_inp, *tagger.tag(later_inp), rules=True)
+    except Exception:  # noqa: BLE001 - the cut abstract still stands
+        logger.warning(
+            "Front-matter tagger failed on the window from page %d; keeping the cut abstract",
+            page,
+            exc_info=True,
+        )
+        return result
+    longer = later.title_keywords.abstract if later.title_keywords else None
+    old, new = _normalized_words(cut), _normalized_words(longer)
+    lead = old[:_CONTINUED_LEAD_WORDS]
+    if len(new) <= len(old) or not _holds_run(new, lead, within=_CONTINUED_LEAD_SLACK + 1):
+        return result
+    problems = [p for p in result.problems if p != "short_abstract"]
+    problems += [p for p in later.problems if p == "short_abstract"]
+    confidence = dict(result.confidence)
+    if "abstract" in later.confidence:
+        confidence["abstract"] = later.confidence["abstract"]
+    return replace(
+        result,
+        title_keywords=result.title_keywords.model_copy(update={"abstract": longer}),
+        confidence=confidence,
+        problems=problems,
+        abstract_runs_on=later.abstract_runs_on,
+    )
 
 
 def release_front_tagger(tagger: OnnxFrontTagger) -> None:

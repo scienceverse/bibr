@@ -449,12 +449,56 @@ def test_key_changes_only_when_the_ocr_layer_is_read(monkeypatch):
     cfg = RunConfig(ocr_backend="text-layer")
     base = ocr_cache._key(fs, cfg, _identity())
 
-    # Off is what every key before the option meant: it adds nothing.
-    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", False)
+    # Unset, the default, adds nothing.
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", None)
     assert ocr_cache._key(fs, cfg, _identity()) == base
 
     monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", True)
     assert ocr_cache._key(fs, cfg, _identity()) != base
+
+
+def test_text_layer_key_changes_when_the_ocr_layer_is_never_read(monkeypatch):
+    # Unset, a scan's OCR layer is read in place of a refusal and the read is
+    # stored; off, the same scan must be refused, not served that read.
+    from bibr.ocr.profiles import text_layer_identity
+
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="text-layer")
+    text_layer = text_layer_identity()
+    base = ocr_cache._key(fs, cfg, text_layer)
+    other_base = ocr_cache._key(fs, cfg, _identity())
+
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", False)
+
+    assert ocr_cache._key(fs, cfg, text_layer) != base
+    # An OCR model's regions do not depend on it.
+    assert ocr_cache._key(fs, cfg, _identity()) == other_base
+
+
+def test_text_layer_key_changes_with_a_refusal_threshold_other_than_the_default(monkeypatch):
+    # The threshold decides whether a scan's OCR layer is read in place of a
+    # refusal, and so what the regions hold. The default adds nothing.
+    from bibr.ocr.profiles import text_layer_identity
+
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="text-layer")
+    text_layer = text_layer_identity()
+    base = ocr_cache._key(fs, cfg, text_layer)
+    other_base = ocr_cache._key(fs, cfg, _identity())
+
+    monkeypatch.setattr(Settings.ocr, "min_success_rate", 0.5)
+    assert ocr_cache._key(fs, cfg, text_layer) == base
+
+    monkeypatch.setattr(Settings.ocr, "min_success_rate", 0.0)
+    assert ocr_cache._key(fs, cfg, text_layer) != base
+    # An OCR model's regions do not depend on it.
+    assert ocr_cache._key(fs, cfg, _identity()) == other_base
+
+    # With the option on every scanned page is read whatever the threshold.
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", True)
+    with_layer = ocr_cache._key(fs, cfg, text_layer)
+    monkeypatch.setattr(Settings.ocr, "min_success_rate", 0.5)
+    assert ocr_cache._key(fs, cfg, text_layer) == with_layer
 
 
 def test_key_changes_with_effective_reference_segmentation_strategy():
