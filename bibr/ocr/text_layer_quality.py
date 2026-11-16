@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -238,3 +239,72 @@ def judge_page(
     if is_implausible(lexical):
         return PageGateResult("implausible_text", metrics)
     return PageGateResult(None, metrics)
+
+
+# --- The OCR layer a scan carries ----------------------------------------------
+
+#: A scan refused for its invisible OCR layer is read from that layer instead
+#: only when at least this share of the layer's words are words a lexicon
+#: knows (:func:`lexicon_word_share`). The letter and function-word gates above
+#: pass a scanner's poor OCR ("tbe rcsults wcre"); this gate does not.
+#: Checked on the development sets: the body text of 555 born-digital papers
+#: scores 0.91 or more (0.99 median, many languages), the OCR layers of the
+#: two scans that carry one 0.98.
+MIN_LEXICON_WORD_SHARE = 0.7
+#: Words of at least this many letters are judged ...
+LEXICON_WORD_LETTERS = 3
+#: ... the first this many of them, and none when there are fewer than
+#: MIN_LEXICON_WORDS: a few words say nothing about the layer.
+MAX_LEXICON_WORDS = 3000
+MIN_LEXICON_WORDS = 50
+#: Lexicons consulted beside those the text's own letters name: a Dutch,
+#: Italian or Indonesian layer written without accents names none.
+_BROAD_LEXICONS = ("en", "de", "fr", "es", "it", "nl", "pt", "id")
+
+
+def _lexicon_script(word: str) -> bool:
+    """Whether *word* is written in a script the lexicons can judge.
+
+    The alphabets below U+0980 (Latin, Greek, Cyrillic, Hebrew, Arabic,
+    Devanagari) and the extended Latin and Greek blocks. Chinese, Japanese
+    and Korean run words together, so a wordfreq lookup of a run says nothing.
+    """
+    return all(ch < "\u0980" or "\u1e00" <= ch <= "\u1fff" for ch in word)
+
+
+def lexicon_word_share(texts: Iterable[str], enough: float | None = None) -> float | None:
+    """Share of the words in *texts* that a wordfreq lexicon has seen, or None.
+
+    None when there are fewer than :data:`MIN_LEXICON_WORDS` words of
+    :data:`LEXICON_WORD_LETTERS` letters or more in a script the lexicons can
+    judge (:func:`_lexicon_script`). The lexicons are every one the text's
+    letters name, then English and a broad Latin-script set; a word counts
+    when any of them knows it at all.
+
+    A lexicon costs a load of its table (some 30 MB each, kept for the life of
+    the process), so they are consulted one at a time, each for the words the
+    ones before it did not know, and with *enough* no further once that share
+    is known: an English layer then loads English alone. The share returned is
+    then at least *enough*, not exact; below it, every lexicon was consulted.
+    """
+    from bibr.input.consolidate_text import _max_zipf, _named_langs
+
+    texts = list(texts)
+    words = [
+        token.lower()
+        for text in texts
+        for token in _TOKEN_RE.findall(text)
+        if len(token) >= LEXICON_WORD_LETTERS and _lexicon_script(token)
+    ][:MAX_LEXICON_WORDS]
+    if len(words) < MIN_LEXICON_WORDS:
+        return None
+    counts = Counter(words)
+    unknown = set(counts)
+    known = 0
+    for lang in dict.fromkeys((*_named_langs(" ".join(texts)), "en", *_BROAD_LEXICONS)):
+        if not unknown or (enough is not None and known >= enough * len(words)):
+            break
+        found = {word for word in unknown if _max_zipf(word, (lang,)) > 0.0}
+        known += sum(counts[word] for word in found)
+        unknown -= found
+    return known / len(words)

@@ -494,9 +494,81 @@ class _ParagraphLayout:
         return [[smoke._layout_region(0, "text", box)] for _ in images_list]
 
 
-async def test_a_scan_with_an_ocr_layer_is_refused_with_a_pointer_to_the_option(
+async def test_a_scan_with_an_ocr_layer_is_read_from_it_rather_than_refused(
     tmp_path, monkeypatch, created_backends
 ):
+    # The option is off: the file would be refused as a scan, so its own OCR
+    # layer is read instead, and the export says where the text came from.
+    pipeline, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+
+    result = await _run(pipeline, _scan_with_ocr_layer(tmp_path))
+
+    body = " ".join(entry["text"] for entry in result["text"])
+    assert "reading speed of the participants" in body
+    [warning] = [
+        w for w in result["extraction"]["warnings"] if w["code"] == "TEXT_LAYER_OCR_LAYER_READ"
+    ]
+    assert "because the file would otherwise be refused as a scan" in warning["message"]
+    # The first read's verdict on the page is not reported beside it.
+    assert "TEXT_LAYER_PAGE_UNUSABLE" not in _codes(result)
+
+
+# Invented words of common letters between real function words: the page gates
+# read it as prose, but most of its words are no words of any language.
+_NONSENSE_LAYER_LINES = [
+    "the sontraine of eotrasin and the nirostae in the tesorian onstrel of the",
+    "ranitose and of senoitra in the rostaine teonarsi and the oristane netar",
+] * 3
+
+
+async def test_an_ocr_layer_that_does_not_read_as_words_is_still_refused(
+    tmp_path, monkeypatch, created_backends
+):
+    from tests.document._pdfs import PAGE_H, PAGE_W, PageSpec, build_pdf, image, text
+
+    layer = b"".join(
+        text(line, 72.0, 700.0 - 14.0 * k, mode=3) for k, line in enumerate(_NONSENSE_LAYER_LINES)
+    )
+    pdf = tmp_path / "scan-with-a-poor-ocr-layer.pdf"
+    pdf.write_bytes(build_pdf([PageSpec(image(PAGE_W, PAGE_H) + layer)]))
+    pipeline, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+
+    with pytest.raises(ProcessingError) as raised:
+        await _run(pipeline, pdf)
+
+    assert raised.value.error_code == "scan_needs_ocr"
+    message = str(raised.value)
+    assert "the text layer is invisible (an OCR layer over a scanned image)" in message
+    assert "own OCR text layer was tried in its place and does not read as words" in message
+    # The setting that reads the layer without that check is still named.
+    assert "OCR_TEXT_LAYER_READ_OCR_LAYER=true reads" in message
+
+
+async def test_an_ocr_layer_read_in_place_of_a_refusal_keeps_its_warning_from_the_cache(
+    tmp_path, monkeypatch, created_backends
+):
+    monkeypatch.setattr(Settings.cache, "ocr", True)
+    monkeypatch.setattr(Settings.cache, "ocr_dir", str(tmp_path / "cache"))
+    pdf = _scan_with_ocr_layer(tmp_path)
+    first, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+    assert "TEXT_LAYER_OCR_LAYER_READ" in _codes(await _run(first, pdf))
+    assert list((tmp_path / "cache").rglob("*.json")), "the layer read is stored"
+
+    second, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+    read = MagicMock(side_effect=AssertionError("served from the cache"))
+    monkeypatch.setattr("bibr.ocr.text_layer.read_text_layer", read)
+
+    result = await _run(second, pdf)
+
+    assert _codes(result).count("TEXT_LAYER_OCR_LAYER_READ") == 1
+    assert "reading speed of the participants" in " ".join(e["text"] for e in result["text"])
+
+
+async def test_an_explicit_false_refuses_a_scan_with_an_ocr_layer(
+    tmp_path, monkeypatch, created_backends
+):
+    # Off is not the default: the layer is not read even in place of a refusal.
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", False)
     pipeline, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
 
     with pytest.raises(ProcessingError) as raised:
@@ -504,8 +576,26 @@ async def test_a_scan_with_an_ocr_layer_is_refused_with_a_pointer_to_the_option(
 
     assert raised.value.error_code == "scan_needs_ocr"
     message = str(raised.value)
-    assert "the text layer is invisible (an OCR layer over a scanned image)" in message
-    assert "OCR_TEXT_LAYER_READ_OCR_LAYER=true" in message
+    assert "was tried in its place" not in message
+    assert "OCR_TEXT_LAYER_READ_OCR_LAYER=true reads" in message
+
+
+async def test_an_explicit_false_is_not_served_the_layer_read_from_the_cache(
+    tmp_path, monkeypatch, created_backends
+):
+    monkeypatch.setattr(Settings.cache, "ocr", True)
+    monkeypatch.setattr(Settings.cache, "ocr_dir", str(tmp_path / "cache"))
+    pdf = _scan_with_ocr_layer(tmp_path)
+    first, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+    assert "TEXT_LAYER_OCR_LAYER_READ" in _codes(await _run(first, pdf))
+
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", False)
+    second, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+
+    with pytest.raises(ProcessingError) as raised:
+        await _run(second, pdf)
+
+    assert raised.value.error_code == "scan_needs_ocr"
 
 
 async def test_a_scan_without_an_ocr_layer_gets_no_pointer(tmp_path, monkeypatch, created_backends):

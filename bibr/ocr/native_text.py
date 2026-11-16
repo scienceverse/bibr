@@ -216,6 +216,45 @@ _INNER_WHITESPACE_OVERSHOOT = 0.25
 _INNER_WHITESPACE_MAX_GAP = 0.25
 # Latin ligature presentation forms (ff, fi, fl, ffi, ffl, long st, st).
 _LIGATURE_CHARS = frozenset("\ufb00\ufb01\ufb02\ufb03\ufb04\ufb05\ufb06")
+# A page whose generated spaces pdfium put out of place: at least this many of
+# them between two glyphs of one line ...
+_MISPLACED_SPACES_MIN = 20
+# ... and at least this share of all of them there.
+_MISPLACED_SPACES_MIN_SHARE = 0.8
+
+
+def _generated_space_misplaced(
+    space: tuple[float, float, float, float],
+    before: tuple[float, float, float, float],
+    after: tuple[float, float, float, float],
+) -> bool | None:
+    """Whether a generated space between two glyphs of one line lies out of place.
+
+    None when the glyphs are not on one line in reading order. In place, the
+    space's centre lies between the left edge of the glyph *before* it and a
+    line height past the left edge of the glyph *after* it.
+    """
+    height = max(before[3] - before[1], 1.0)
+    if abs((before[1] + before[3]) - (after[1] + after[3])) / 2.0 > height:
+        return None
+    if after[0] < before[2]:
+        return None
+    centre = (space[0] + space[2]) / 2.0
+    return centre < before[0] or centre > after[0] + height
+
+
+def _generated_spaces_misplaced(misplaced: int, placed: int) -> bool:
+    """Whether a page's generated spaces are out of place as a rule, not by chance.
+
+    Some PDFs give every space pdfium generates a zero-width box far to the
+    right of its gap, often in the next word or past the end of the line. A
+    region whose edge falls in the gap then loses the space or gets one from
+    the next word, and its words run together ("plimvorstaden"). One stray
+    space is a kerned gap or a column edge; a page where most are stray
+    places them all wrongly.
+    """
+    total = misplaced + placed
+    return misplaced >= _MISPLACED_SPACES_MIN and misplaced >= _MISPLACED_SPACES_MIN_SHARE * total
 
 
 def _loose_charbox(textpage, index: int) -> tuple[float, float, float, float] | None:
@@ -658,6 +697,11 @@ def _build_page_char_records(
       "fi" with one) is dropped; keeping it split the word ("Traffi cking").
       See :func:`_is_inner_whitespace`. A ligature is a presentation-form
       char or a glyph whose box pdfium shares across the chars it maps to.
+    - pdfium's generated spaces (word gaps it inferred, with no space glyph
+      in the PDF) are normally boxed in their gap. On a page where most of
+      them lie out of place (see :func:`_generated_spaces_misplaced`), every
+      generated space is put at the right edge of the glyph before it, and the
+      page is read a second time that way.
 
     Computing this once per page (rather than once per region) avoids
     O(regions × chars) pdfium calls in :func:`_fill_page_regions_from_textpage`,
@@ -666,6 +710,21 @@ def _build_page_char_records(
     *trace*, when given, receives every pdfium code and tight box the loop
     reads and, parallel to the returned records, where each record came from
     (see :class:`PageCharTrace`). The records are the same either way.
+    """
+    records, spaces_misplaced = _page_char_records(textpage, trace, spaces_at_glyph_end=False)
+    if spaces_misplaced:
+        records, _ = _page_char_records(textpage, trace, spaces_at_glyph_end=True)
+    return records
+
+
+def _page_char_records(
+    textpage, trace: PageCharTrace | None, *, spaces_at_glyph_end: bool
+) -> tuple[list[tuple[str, float, float, bool]], bool]:
+    """The page's char records and whether its generated spaces lie out of place.
+
+    See :func:`_build_page_char_records` and :func:`_generated_spaces_misplaced`.
+    With *spaces_at_glyph_end*, each generated space after a glyph of its line
+    is boxed at that glyph's right edge instead of where pdfium put it.
     """
     import pypdfium2 as pdfium
 
@@ -698,6 +757,11 @@ def _build_page_char_records(
     generated_breaks: set[int] = set()
     # pdfium's generated spaces, for link runs and the accent merge.
     generated_spaces: set[int] = set()
+    # Generated spaces after a glyph of their line, waiting for the glyph after
+    # them: (the space's box, the box of the glyph before it). Each is counted
+    # out of place or in place once that glyph comes.
+    spaces_waiting: list[tuple[_CharBox, _CharBox]] = []
+    spaces_misplaced = spaces_placed = 0
     # The tight box of each entry of *glyphs*, for the spacing-accent merge.
     glyph_boxes: list[tuple[str, tuple[float, float, float, float]]] = []
 
@@ -751,6 +815,7 @@ def _build_page_char_records(
             if meta is not None:
                 meta.append((i, 0))
             line_glyph = None
+            spaces_waiting.clear()
             i += consumed
             continue
 
@@ -763,8 +828,20 @@ def _build_page_char_records(
         cr = max(box[2] for box in valid_boxes)
         ct = max(box[3] for box in valid_boxes)
         box = (cl, cb, cr, ct)
+        generated_space = ch == " " and pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1
+        if generated_space and line_glyph is not None:
+            spaces_waiting.append((box, line_glyph[1]))
+            if spaces_at_glyph_end:
+                cl = cr = line_glyph[1][2]
+                box = (cl, cb, cr, ct)
         center_y = (cb + ct) / 2.0
         if not ch.isspace():
+            for space_box, before_box in spaces_waiting:
+                stray = _generated_space_misplaced(space_box, before_box, box)
+                if stray is not None:
+                    spaces_misplaced += stray
+                    spaces_placed += not stray
+            spaces_waiting.clear()
             _settle(box)
             is_ligature = ch in _LIGATURE_CHARS or (line_glyph is not None and line_glyph[1] == box)
             line_glyph = (i, box, is_ligature)
@@ -785,13 +862,14 @@ def _build_page_char_records(
         if not ch.isspace():
             glyphs.append((len(records), ch, _loose_charbox(textpage, i)))
             glyph_boxes.append((ch, box))
-        if ch == " " and pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
+        if generated_space:
             generated_spaces.add(len(records))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
         if meta is not None:
             meta.append((i, REC_SURROGATE_PAIR if consumed == 2 else 0))
         i += consumed
     _settle(None)
+    misplaced = _generated_spaces_misplaced(spaces_misplaced, spaces_placed)
     accents = _spacing_accent_targets(glyph_boxes)
     if not accents:
         repaired = _repair_word_boundaries(
@@ -803,7 +881,7 @@ def _build_page_char_records(
         )
         if trace is not None and meta is not None:
             _finish_trace(trace, meta)
-        return repaired
+        return repaired, misplaced
     for accent, letter in accents.items():
         at = glyphs[letter][0]
         ch, x, y, is_newline = records[at]
@@ -817,7 +895,7 @@ def _build_page_char_records(
         records, kept, generated_breaks, blank, frozenset(generated_spaces), meta=meta
     )
     if trace is None or meta is None:
-        return [record for record in repaired if record[0]]
+        return [record for record in repaired if record[0]], misplaced
     kept_records: list[tuple[str, float, float, bool]] = []
     kept_meta: list[tuple[int, int]] = []
     for record, record_meta in zip(repaired, meta, strict=True):
@@ -825,7 +903,7 @@ def _build_page_char_records(
             kept_records.append(record)
             kept_meta.append(record_meta)
     _finish_trace(trace, kept_meta)
-    return kept_records
+    return kept_records, misplaced
 
 
 def _finish_trace(trace: PageCharTrace, meta: list[tuple[int, int]]) -> None:

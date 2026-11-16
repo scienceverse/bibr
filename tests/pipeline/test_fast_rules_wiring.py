@@ -67,10 +67,13 @@ async def test_the_parse_stage_reads_the_rules_flag_from_the_runs_settings(monke
     from bibr.front_tagger import runtime as runtime_mod
     from bibr.pipeline.stages import parse_segment
 
-    seen: dict[str, bool] = {}
+    seen: dict[str, object] = {}
 
-    def fake_tag_front_matter(tagger, regions, *, first_page_index=0, rules=False):
+    def fake_tag_front_matter(
+        tagger, regions, *, first_page_index=0, rules=False, min_confidence=None
+    ):
         seen["rules"] = rules
+        seen["min_confidence"] = min_confidence
         return None
 
     monkeypatch.setattr(runtime_mod, "tag_front_matter", fake_tag_front_matter)
@@ -82,10 +85,12 @@ async def test_the_parse_stage_reads_the_rules_flag_from_the_runs_settings(monke
     await parse_segment._tag_front_matter(
         _RM(), [], first_page_index=0, settings=GlobalSettings(FRONT_TAGGER_RULES=True)
     )
-    assert seen == {"rules": True}
+    # The bar the tagger's answer is held to also tells a fragment of an abstract.
+    floor = GlobalSettings().ml.front_tagger_min_confidence
+    assert seen == {"rules": True, "min_confidence": floor}
 
     await parse_segment._tag_front_matter(_RM(), [], first_page_index=0, settings=GlobalSettings())
-    assert seen == {"rules": False}
+    assert seen == {"rules": False, "min_confidence": floor}
 
 
 @pytest.mark.parametrize("rule_tier3", [True, False])

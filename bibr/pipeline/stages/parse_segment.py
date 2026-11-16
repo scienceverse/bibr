@@ -134,12 +134,19 @@ async def _tag_front_matter(
         # The run decides: a fast run reads the front matter with the local rules,
         # a full run leaves those readings to the LLM.
         rules = bool(getattr(settings, "FRONT_TAGGER_RULES", False))
+        min_confidence = getattr(getattr(settings, "ml", None), "front_tagger_min_confidence", None)
         from bibr.extract.front_role import build_front_regions
         from bibr.front_tagger.runtime import tag_front_matter
 
         def run():
             regions = build_front_regions(ocr_regions, first_page_index=first_page_index)
-            return tag_front_matter(tagger, regions, first_page_index=first_page_index, rules=rules)
+            return tag_front_matter(
+                tagger,
+                regions,
+                first_page_index=first_page_index,
+                rules=rules,
+                min_confidence=min_confidence,
+            )
 
         tagged = await asyncio.to_thread(run)
     except ModelOverrideError:

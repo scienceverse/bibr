@@ -19,6 +19,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   off. Ctrl-C now records every chunk in flight as `interrupted`, and a model
   override that stops the run also stops the chunk running beside it, whose
   papers are recorded `model_override_failed` and run again on resume.
+- The text-layer route reads a scan's own OCR layer (invisible text over a
+  page-sized image) in place of refusing the file as `scan_needs_ocr`, when the
+  scans are the only reason for the refusal and most of the layer's words are
+  known words. A `TEXT_LAYER_OCR_LAYER_READ` warning names the pages.
+  `OCR_TEXT_LAYER_READ_OCR_LAYER` is now unset by default; `true` still reads the
+  layer of every scanned page, and `false` never reads it and refuses the file as
+  before.
+
+### Fixed
+
+- A fast run's abstract no longer takes in a companion summary printed under
+  its own heading (such as Highlights or a Simple Summary), a version in
+  another language or script printed right after it, or its own "Abstract"
+  label. It keeps the full stop the tagger left after each paragraph, and an
+  opening sentence the tagger cut off a region the layout calls an abstract.
+  When the tagger finds no abstract, a layout abstract region that also reads
+  as one (an abstract heading, or a keywords line after it) is exported.
+- A fast run's title no longer opens with a running head, a chapter label or
+  a rubric printed above it.
+- A fast run reads the abstract from a later window when the first window
+  holds only a short abstract the tagger is unsure of, reads an abstract cut
+  by the end of its window on from the next page, and takes the longer title
+  a later page reprints when the title page's was read in part.
+- A fast run's authors no longer include the names in the paper's own
+  citation line, a person an institution is named after, a place in an
+  address, a role e-mail address's owner (such as an editorial office) or a
+  stranger an author note names. A name inverted as "Family, Given", a
+  surname printed in capitals, a given name a region break cut off, the last
+  name of a keyed list and a name only an e-mail address spells are read as
+  printed, and a name printed with its family twice keeps both parts.
+- A line-end hyphen next to a digit is kept: "COVID-19", "IL-6" and "12-month"
+  no longer lose their hyphen when the PDF marks it as a soft hyphen, and a
+  suspended one at a line end keeps its word break ("5- and 10-year").
+- Ukrainian words wrapped at a line end are joined again; Russian text keeps
+  being judged by the Russian lexicon.
+- A short text-layer line with a few unmapped accented letters (a byline) is
+  read, with U+FFFD for each, instead of being left empty.
+- A PDF whose generated word spaces pdfium boxes far from their gap no longer
+  reads with its words run together.
 
 ## [0.9.1] - 2026-11-16
 
