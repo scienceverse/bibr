@@ -15,9 +15,16 @@ import bibr.demo.local_app as local_app
 from bibr.demo.local_app import _build_status_md
 
 
+@pytest.fixture(autouse=True)
+def _no_gradio_analytics(monkeypatch):
+    """Building a Blocks would otherwise start Gradio's analytics and version-check threads."""
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
+
+
 def test_status_md_includes_refs_strategy():
     md = _build_status_md("glm-mlx", "google", "gemini-flash", refs_strategy="ner")
-    assert "ner" in md
+    assert "**Reference parsing:** the local model (`ner`)" in md
+    assert "OCR with `glm-mlx`" in md
 
 
 def _capture_pipeline_kwargs(monkeypatch):
@@ -221,20 +228,20 @@ def test_create_local_demo_an_llm_option_asks_for_full_under_auto(monkeypatch, _
 
 def test_status_md_names_the_mode_and_no_llm_for_a_fast_run():
     md = _build_status_md("glm-mlx", "google", "gemini-flash", refs_strategy="ner", mode="fast")
-    assert "**Mode** `fast`" in md
-    assert "none (fast mode)" in md
+    assert "**Mode:** fast" in md
+    assert "none in fast mode" in md
     assert "gemini-flash" not in md
     assert "google" not in md
 
 
 def test_status_md_names_the_mode_and_llm_for_a_full_run():
     md = _build_status_md("glm-mlx", "google", "gemini-flash", refs_strategy="llm", mode="full")
-    assert "**Mode** `full`" in md
+    assert "**Mode:** full" in md
     assert "`google/gemini-flash`" in md
 
 
 def test_status_md_without_a_mode_is_a_full_banner():
-    assert "**Mode** `full`" in _build_status_md("glm-mlx", "google", "gemini-flash")
+    assert "**Mode:** full" in _build_status_md("glm-mlx", "google", "gemini-flash")
 
 
 def test_effective_refs_shows_the_local_parser_for_a_fast_run():
@@ -280,9 +287,9 @@ async def test_a_preset_swap_carries_an_explicit_mode():
 
     assert captured["mode"] == "fast"
     # The banner follows the replacement's mode, and a fast run parses with the local model.
-    assert "**Mode** `fast`" in status
-    assert "none (fast mode)" in status
-    assert "**Refs** `ner`" in status
+    assert "**Mode:** fast" in status
+    assert "none in fast mode" in status
+    assert "the local model (`ner`)" in status
 
 
 async def test_a_preset_swap_in_an_automatic_demo_leaves_the_mode_to_the_settings():
@@ -320,7 +327,7 @@ async def test_a_preset_swap_in_an_automatic_demo_leaves_the_mode_to_the_setting
     )
 
     assert "mode" not in captured
-    assert "**Mode** `full`" in status
+    assert "**Mode:** full" in status
 
 
 def _demo_main(monkeypatch, argv, create):
@@ -532,7 +539,7 @@ async def test_a_preset_that_names_no_ocr_route_leaves_it_unchosen():
 
     assert captured["ocr_backend"] is None
     assert state["ocr_backend"] == "text-layer"
-    assert "**OCR** `text-layer`" in status
+    assert "the PDF text layer (`text-layer`), no OCR" in status
 
 
 async def test_restoring_the_demo_goes_back_to_an_unchosen_ocr_route():
@@ -572,4 +579,4 @@ async def test_restoring_the_demo_goes_back_to_an_unchosen_ocr_route():
     )
 
     assert captured["ocr_backend"] is None
-    assert "**OCR** `text-layer`" in status
+    assert "the PDF text layer (`text-layer`), no OCR" in status

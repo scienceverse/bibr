@@ -13,6 +13,7 @@ PUBLIC_ASSETS = frozenset(
         "robots.txt",
         "assets/logo.svg",
         "assets/readme-banner.png",
+        "assets/demo.png",
         "reference/paper.schema.json",
         "schema/bibr-export-v12.schema.json",
         "schema/bibr-export-v12-reader.schema.json",

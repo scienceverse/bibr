@@ -1,13 +1,17 @@
-"""CLI Entry Point for bibr Demo
+"""CLI entry point for the bibr web demo.
 
 Usage:
     bibr demo [OPTIONS]
 """
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
+import time
+
+logger = logging.getLogger(__name__)
 
 # With logging's own aliases, so every value that worked before still does.
 _LOG_LEVELS = ("debug", "info", "warning", "warn", "error", "critical", "fatal", "notset")
@@ -17,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the ``bibr demo`` argument parser."""
     parser = argparse.ArgumentParser(
         prog="bibr demo",
-        description="bibr demo — interactive scientific paper metadata extraction",
+        description="bibr demo: read a paper in your browser and see what bibr extracts",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=7860, help="Port to bind to")
@@ -31,7 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--log-level", type=str.lower, choices=_LOG_LEVELS, default="info", help="Log level"
+        "--log-level",
+        type=str.lower,
+        choices=_LOG_LEVELS,
+        default="warning",
+        help="Log level for the terminal (default: warning)",
     )
     parser.add_argument(
         "--ocr",
@@ -94,10 +102,11 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    level = getattr(logging, args.log_level.upper())
+    logging.basicConfig(level=level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    if level > logging.DEBUG:
+        # Gradio logs each request it makes to itself through httpx: noise here.
+        logging.getLogger("httpx").setLevel(max(level, logging.WARNING))
 
     # Gradio sends usage analytics to its maintainers unless this is off. bibr
     # keeps it off for the demo; a value already in the environment wins.
@@ -114,17 +123,17 @@ def main():
 
         ui.error(
             Console(stderr=True),
-            "Gradio is not installed.",
-            hint="Install with: [cyan]uv tool install 'bibr\\[demo]'[/cyan] "
-            "(in a source checkout: [cyan]uv sync --extra=demo[/cyan])",
+            "The web demo needs Gradio, which is not installed.",
+            hint="Add the demo extra: [cyan]uv tool install 'bibr\\[demo]'[/cyan] if bibr is "
+            "installed as a tool, or [cyan]uv add 'bibr\\[demo]'[/cyan] in a uv project.",
         )
         sys.exit(1)
 
     import gradio as gr
 
     from bibr.demo.local_app import (
-        _TABLE_SCROLL_CSS,
-        _TABLE_SCROLL_JS,
+        DEMO_CSS,
+        DEMO_JS,
         _cache_lifetime,
         _max_file_size_mb,
         create_local_demo,
@@ -174,8 +183,13 @@ def main():
         "share": args.share,
         "inbrowser": True,
         "theme": gr.themes.Soft(),
-        "css": _TABLE_SCROLL_CSS,
-        "js": _TABLE_SCROLL_JS,
+        "css": DEMO_CSS,
+        "js": DEMO_JS,
+        # bibr prints its own start-up lines (below), and waits for Ctrl-C itself.
+        "quiet": True,
+        "prevent_thread_lock": True,
+        # The demo has no API routes, so no "Use via API" link to an empty page.
+        "footer_links": ["gradio", "settings"],
         # Refuse an oversized upload while it arrives (HTTP 413) instead of
         # storing all of it before the size check in the click handler.
         "max_file_size": f"{_max_file_size_mb()}mb",
@@ -204,14 +218,83 @@ def main():
         sys.exit(2)
 
     try:
-        # Returns once Ctrl-C (or SIGTERM, routed to it) stops the server.
-        demo.launch(**launch_kwargs)
-    finally:
-        aclose_pipeline = getattr(demo, "aclose_pipeline", None)
-        if aclose_pipeline is not None:
-            import asyncio
+        try:
+            demo.launch(**launch_kwargs)
+        except OSError as e:
+            # Gradio's words for any port it could not bind.
+            if "Cannot find empty port" not in str(e):
+                raise
+            from rich.console import Console
 
-            asyncio.run(aclose_pipeline())
+            from bibr.local.cli import ui
+
+            ui.error(
+                Console(stderr=True),
+                f"Port {args.port} is already in use (is another bibr demo running?).",
+                hint=f"Stop the other one, or pick another port: bibr demo --port {args.port + 1}",
+            )
+            sys.exit(2)
+        _print_banner(demo, args, username if password else None)
+        _wait_until_stopped(demo)
+    except KeyboardInterrupt:
+        # Ctrl-C, or a SIGTERM bibr turned into one: the normal way to stop the demo.
+        print("\nStopping the demo…", file=sys.stderr)
+    finally:
+        _shut_down(demo)
+
+
+def _print_banner(demo, args, username: str | None) -> None:
+    """Where the demo is, how it reads papers, and how to stop it."""
+    from rich.console import Console
+    from rich.markup import escape
+
+    console = Console()
+    url = getattr(demo, "local_url", None) or f"http://{args.host}:{args.port}/"
+    console.print()
+    console.print(f"[bold]bibr demo[/bold] is running at [cyan]{escape(url)}[/cyan]")
+    summary = getattr(demo, "status_summary", "")
+    if summary:
+        console.print(f"  {escape(summary.replace('**', ''))}")
+    share_url = getattr(demo, "share_url", None)
+    if share_url:
+        console.print(f"  Public link: [cyan]{escape(share_url)}[/cyan]")
+    if username:
+        console.print(f"  Sign in as {escape(username)} with the GRADIO_PASSWORD you set.")
+    console.print("  Press Ctrl+C to stop.")
+
+
+def _wait_until_stopped(demo) -> None:
+    """Block until Ctrl-C (a KeyboardInterrupt) or the server stops by itself."""
+    while getattr(demo, "is_running", False):
+        time.sleep(0.2)
+
+
+def _shut_down(demo) -> None:
+    """Close the pipeline (and the managed servers it started), then the web server.
+
+    The pipeline goes first, on the event loop its runs used, while that loop
+    still runs. A second Ctrl-C, or a pipeline that does not close in time,
+    ends the wait without a traceback.
+    """
+    try:
+        close_pipeline = getattr(demo, "close_pipeline", None)
+        if close_pipeline is not None:
+            close_pipeline()
+        else:
+            aclose_pipeline = getattr(demo, "aclose_pipeline", None)
+            if aclose_pipeline is not None:
+                asyncio.run(aclose_pipeline())
+    except KeyboardInterrupt:
+        pass
+    except (Exception, asyncio.CancelledError) as e:  # noqa: BLE001 — shutting down anyway
+        logger.warning("The demo's models did not close cleanly: %r", e)
+        logger.debug("Pipeline close failed", exc_info=True)
+    close = getattr(demo, "close", None)
+    if close is not None and getattr(demo, "is_running", False):
+        try:
+            close(verbose=False)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

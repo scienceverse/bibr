@@ -1,5 +1,6 @@
 """``bibr demo`` closes its pipeline once Gradio stops, so managed servers do not outlive it."""
 
+import asyncio
 import sys
 
 import pytest
@@ -10,6 +11,12 @@ if not hasattr(gr, "Blocks"):
 
 import bibr.config
 import bibr.demo.server as server
+
+
+@pytest.fixture(autouse=True)
+def _no_gradio_analytics(monkeypatch):
+    """Building a Blocks would otherwise start Gradio's analytics and version-check threads."""
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
 
 
 @pytest.fixture
@@ -36,7 +43,7 @@ def closed(monkeypatch):
 @pytest.mark.parametrize("stopped_by", [None, KeyboardInterrupt])
 def test_bibr_demo_closes_its_pipeline_when_gradio_stops(monkeypatch, closed, stopped_by):
     def launch(self, **_kw):
-        # Gradio returns from launch() after Ctrl-C; a Ctrl-C while it starts raises.
+        # A Ctrl-C (or a SIGTERM bibr turns into one) can arrive while Gradio starts.
         if stopped_by is not None:
             raise stopped_by
 
@@ -45,10 +52,35 @@ def test_bibr_demo_closes_its_pipeline_when_gradio_stops(monkeypatch, closed, st
     monkeypatch.delenv("DEMO_CACHE_TTL_SECONDS", raising=False)
     monkeypatch.delenv("DEMO_MAX_FILE_SIZE_MB", raising=False)
 
-    if stopped_by is None:
-        server.main()
-    else:
-        with pytest.raises(stopped_by):
-            server.main()
+    server.main()  # a Ctrl-C is how the demo stops: no traceback, no exception
 
     assert closed == ["pipeline"]
+
+
+def test_a_pipeline_that_does_not_close_cleanly_ends_without_a_traceback(
+    monkeypatch, caplog, capsys
+):
+    """Ctrl-C after a paper ran used to end in an asyncio CancelledError traceback."""
+
+    class _Pipeline:
+        def __init__(self, **_kw):
+            pass
+
+        async def aclose(self) -> None:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _Pipeline)
+    monkeypatch.setattr(gr.Blocks, "launch", lambda self, **_kw: None)
+    monkeypatch.setattr(sys, "argv", ["bibr demo", "--ocr", "glm-mlx"])
+    monkeypatch.delenv("DEMO_CACHE_TTL_SECONDS", raising=False)
+    section = bibr.config.Settings.cache
+    original, was_explicit = section.ocr, "ocr" in section.model_fields_set
+    try:
+        server.main()
+    finally:
+        section.ocr = original
+        if not was_explicit:
+            section.model_fields_set.discard("ocr")
+
+    assert "Traceback" not in capsys.readouterr().err
+    assert any("did not close cleanly" in r.getMessage() for r in caplog.records)
