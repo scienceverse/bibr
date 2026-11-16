@@ -2,8 +2,8 @@
 
 The geometry reference segmenter and the front-role classifier are scikit-learn
 ``HistGradientBoostingClassifier`` models over ``DictVectorizer`` features. They
-used to ship as joblib pickles, which only a gadget-restricted unpickler
-(:mod:`bibr.utils.safe_pickle`) and scikit-learn itself could read. A
+used to ship as joblib pickles, which only a gadget-restricted unpickler (now
+``scripts/_safe_joblib.py``, for the converter) and scikit-learn could read. A
 ``bibr-gbm/1`` bundle holds the same model as data:
 
 - ``<stem>.json``, the manifest: the format name, the vectorizer's feature
@@ -26,17 +26,16 @@ added to the baseline tree by tree in training order, and the logit or softmax
 link is applied as ``sklearn._loss`` applies it. Categorical splits are not
 supported; ``scripts/export_gbm_bundle.py`` refuses a model that has them.
 
-:func:`load_gbm_bundle` resolves a model setting to a bundle: the
-``bibr-gbm/1`` manifest when the repo (at the pinned revision) or the local
-path has one, else the joblib pickle through the restricted loader, which still
-needs scikit-learn and joblib.
+:func:`load_gbm_bundle` resolves a model setting to the ``bibr-gbm/1``
+manifest of a Hub repo (at the pinned revision) or a local path. A joblib
+pickle is refused with how to convert it: bibr reads no pickles at run time,
+and needs neither scikit-learn nor joblib.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
@@ -45,8 +44,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 FORMAT = "bibr-gbm/1"
 _ARRAYS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.npz")
@@ -346,14 +343,12 @@ def _from_local_manifest(manifest_path: Path) -> tuple[str, dict[str, Any]]:
     return str(manifest_path), bundle_from_files(manifest_path, arrays_path)
 
 
-def _from_joblib(spec: str, revision: str | None) -> tuple[str, dict[str, Any]]:
-    from bibr.ner.checkpoint import resolve_checkpoint
-    from bibr.utils.safe_pickle import safe_joblib_load
-
-    path = resolve_checkpoint(spec, revision=revision)
-    # joblib.load executes code in the file, so only the gadget-restricted
-    # loader reads it; the *_MODEL_ID settings stay a trust boundary.
-    return path, safe_joblib_load(path)
+def _not_a_manifest(spec: str) -> GbmBundleError:
+    return GbmBundleError(
+        f"{spec!r} is not a {FORMAT} manifest. bibr reads its gradient-boosted models "
+        "only in that form, without pickles: convert a .joblib bundle with "
+        "scripts/export_gbm_bundle.py (it needs scikit-learn and joblib, from the dev group)."
+    )
 
 
 def load_gbm_bundle(
@@ -362,13 +357,13 @@ def load_gbm_bundle(
     """``(path, bundle)`` for a GBM model setting; ``stem`` is the bundle's file stem.
 
     - A Hub repo id (``org/name``) reads ``<stem>.json`` and its arrays at
-      ``revision``, and the joblib pickle ``<stem>.joblib`` when the revision has
-      no manifest (or it cannot be fetched).
-    - ``org/name:file`` reads that file: a ``.json`` manifest, else a pickle.
-    - A local directory reads ``<stem>.json`` in it, else ``<stem>.joblib``.
-    - A local file is a manifest when it ends in ``.json``, else a pickle.
+      ``revision``.
+    - ``org/name:file.json`` reads that manifest.
+    - A local directory reads ``<stem>.json`` in it.
+    - A local ``.json`` file is the manifest.
 
-    The path returned is the file read: the manifest, or the pickle.
+    Anything else (a ``.joblib`` pickle, say) is refused with how to convert it.
+    The path returned is the manifest read.
     """
     from bibr.utils.ml_runtime import is_hub_repo_id
 
@@ -376,30 +371,19 @@ def load_gbm_bundle(
     if ":" in spec:
         repo_id, _, filename = spec.partition(":")
         if is_hub_repo_id(repo_id, filename=filename, warn=False):
-            if filename.endswith(".json"):
-                return _from_hub_manifest(repo_id, filename, revision)
-            return _from_joblib(spec, revision)
+            if not filename.endswith(".json"):
+                raise _not_a_manifest(spec)
+            return _from_hub_manifest(repo_id, filename, revision)
     elif is_hub_repo_id(spec, warn=False):
-        try:
-            return _from_hub_manifest(spec, f"{stem}.json", revision)
-        except GbmBundleError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — a revision without the manifest reads the pickle
-            logger.debug(
-                "no %s.json in %s@%s (%s); reading the joblib bundle", stem, spec, revision, exc
-            )
-        return _from_joblib(f"{spec}:{stem}.joblib", revision)
+        return _from_hub_manifest(spec, f"{stem}.json", revision)
     local = Path(spec).expanduser()
     if local.is_dir():
-        manifest = local / f"{stem}.json"
-        if manifest.is_file():
-            return _from_local_manifest(manifest)
-        return _from_joblib(str(local / f"{stem}.joblib"), revision)
-    if local.suffix == ".json":
-        if not local.is_file():
-            raise ValueError(f"GBM bundle manifest {spec!r} is not a file")
-        return _from_local_manifest(local)
-    return _from_joblib(spec, revision)
+        local = local / f"{stem}.json"
+    if local.suffix != ".json":
+        raise _not_a_manifest(spec)
+    if not local.is_file():
+        raise ValueError(f"GBM bundle manifest {str(local)!r} is not a file")
+    return _from_local_manifest(local)
 
 
 __all__ = [

@@ -72,8 +72,8 @@ class ModelSetting:
     attr: tuple[str, ...]
     revision_attr: tuple[str, ...] | None
     # "onnx" (an onnx/ bundle; ``onnx_model`` is the manifest's ``model`` field, or None for a
-    # bundle checked otherwise), "joblib" (a GBM bundle: its bibr-gbm/1 .json manifest, a
-    # .joblib file, or the directory holding one), "geom_tagger", "text_segmenter",
+    # bundle checked otherwise), "gbm" (a bibr-gbm/1 bundle: its .json manifest, or the
+    # directory holding it), "geom_tagger", "text_segmenter",
     # "checkpoint" (a file).
     kind: str
     onnx_model: str | None = None
@@ -93,7 +93,7 @@ MODEL_SETTINGS: tuple[ModelSetting, ...] = (
         "geometry reference segmenter",
         ("REF_GEOM_SEG_MODEL_ID",),
         ("REF_GEOM_SEG_REVISION",),
-        "joblib",
+        "gbm",
     ),
     ModelSetting(
         "REF_GEOM_TAGGER_MODEL_ID",
@@ -121,7 +121,7 @@ MODEL_SETTINGS: tuple[ModelSetting, ...] = (
         "front-role classifier",
         ("ml", "front_role_model_id"),
         ("ml", "front_role_revision"),
-        "joblib",
+        "gbm",
     ),
     ModelSetting(
         "ML_FRONT_TAGGER_MODEL_ID",
@@ -667,16 +667,18 @@ def _check_local(spec: ModelSetting, value: str, settings: Any = None) -> None:
         _graph, manifest, tokenizer = segmenter_bundle_files(path)
         read_segmenter_manifest(manifest)
         Tokenizer.from_file(str(tokenizer))
-    elif spec.kind == "joblib":
+    elif spec.kind == "gbm":
         stem = "geom_segmenter" if spec.env == "REF_GEOM_SEG_MODEL_ID" else "front_role"
-        if path.is_dir():
-            if not ((path / f"{stem}.json").is_file() or (path / f"{stem}.joblib").is_file()):
-                raise ConfigurationError(
-                    f"the directory holds neither {stem}.json (with its .npz) nor {stem}.joblib"
-                )
-        elif not path.is_file():
+        manifest = path / f"{stem}.json" if path.is_dir() else path
+        if manifest.suffix == ".joblib":
             raise ConfigurationError(
-                "name the bundle: its .json manifest, its .joblib file, or the directory holding them"
+                "a .joblib bundle is no longer read: convert it with "
+                "scripts/export_gbm_bundle.py and name the .json manifest it writes"
+            )
+        if not manifest.is_file() or manifest.suffix != ".json":
+            raise ConfigurationError(
+                f"name the bundle's {stem}.json manifest (its .npz beside it), or the "
+                "directory holding them"
             )
         # The loaders check the bundle's kind and feature contract; both bundles are small.
         if spec.env == "REF_GEOM_SEG_MODEL_ID":

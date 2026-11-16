@@ -58,12 +58,12 @@ _APPROX_MODEL_SIZES: dict[str, str] = {
     # MiniLM two-head classifiers, ~22M params (bibr/config.py comment).
     "scienceverse/bibr-section-classifier": "90 MB",
     "scienceverse/bibr-paper-classifier": "90 MB",
-    # Frozen sklearn bundle (joblib), a few MB.
+    # Frozen GBM bundle (bibr-gbm/1: JSON manifest + .npz trees), a few MB.
     "scienceverse/bibr-front-role-v1": "6 MB",
     # Front-matter tagger: encoder + CRF as one ONNX file (fast mode's title,
     # author and abstract reader).
     "scienceverse/bibr-front-tagger": "0.3 GB",
-    # Frozen sklearn GBM bundle (joblib) — tabular model, negligible size.
+    # Frozen GBM bundle (bibr-gbm/1) — tabular model, negligible size.
     "scienceverse/bibr-geom-segmenter-v1": "1 MB",
     # Line-sequence tagger the geometry tier asks first (onnx/tagger.onnx).
     "scienceverse/bibr-ref-line-tagger-v1": "3 MB",

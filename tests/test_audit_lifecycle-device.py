@@ -285,16 +285,20 @@ def test_bundle_spec_ignores_a_cwd_directory(tmp_path, monkeypatch, caplog, modu
         raise FileNotFoundError(spec)
 
     monkeypatch.setattr(ckpt, "resolve_checkpoint", fake_resolve)
-    monkeypatch.setattr(gbm_bundle, "_from_joblib", lambda spec, revision: asked.append(spec))
 
-    gbm_bundle.load_gbm_bundle("org/repo", None, stem=stem)
-    # The Hub manifest first, then the Hub pickle; the cwd directory is never read.
-    assert asked == [f"org/repo:{stem}.json", f"org/repo:{stem}.joblib"]
+    with pytest.raises(FileNotFoundError):
+        gbm_bundle.load_gbm_bundle("org/repo", None, stem=stem)
+    # The Hub manifest; the cwd directory is never read.
+    assert asked == [f"org/repo:{stem}.json"]
     assert not caplog.records  # resolve_checkpoint warns, naming the file
     asked.clear()
-    gbm_bundle.load_gbm_bundle("org/repo:other.joblib", None, stem=stem)
-    gbm_bundle.load_gbm_bundle("./org/repo/b.joblib", None, stem=stem)
-    assert asked == ["org/repo:other.joblib", "./org/repo/b.joblib"]
+    with pytest.raises(FileNotFoundError):
+        gbm_bundle.load_gbm_bundle("org/repo:other.json", None, stem=stem)
+    assert asked == ["org/repo:other.json"]
+    # A local path is read as one, never from the Hub.
+    with pytest.raises(ValueError, match="not a file"):
+        gbm_bundle.load_gbm_bundle("./org/repo/b.json", None, stem=stem)
+    assert asked == ["org/repo:other.json"]
 
 
 def test_tilde_checkpoint_path_expands(tmp_path, monkeypatch):
