@@ -63,7 +63,10 @@ logger = logging.getLogger(__name__)
 # keeps its space after a dot or hyphen outside links.
 # Version 20: the link check vetoes a space only inside the link itself.
 # Version 21: a link broken inside keeps no space, and CJK punctuation takes none.
-_CACHE_FORMAT_VERSION = 21
+# Version 22: a line-end hyphen next to a digit is kept, Cyrillic wraps consult
+# the Ukrainian lexicon, a short line may carry a few unmapped glyphs, and a page
+# whose generated spaces lie out of place has them put after their glyph.
+_CACHE_FORMAT_VERSION = 22
 
 # Owner-only, as the LLM response cache: entries hold the text of papers that
 # may be unpublished. The umask can only narrow these.

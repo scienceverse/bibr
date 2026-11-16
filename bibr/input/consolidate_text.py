@@ -53,9 +53,16 @@ _STX_ALPHA_AFTER_RE = re.compile(r"[^\W\d_]+")
 # region at a time), so it is derived from the fragments' own characters.
 # Getting it wrong is safe: an unconsulted lexicon scores 0.0 for everything,
 # and a lexicon that has never seen either form now KEEPS the printed hyphen.
+# Cyrillic consults Ukrainian beside Russian unless a letter only Russian
+# writes says otherwise: most Ukrainian syllables are plain Cyrillic
+# ("систе|ми"), and Russian alone joined only 77% of 6,806 split Ukrainian
+# words. See :func:`_lang_candidates` for a plain fragment in Russian text.
+_UKRAINIAN_LETTERS_RE = re.compile(r"[\u0456\u0457\u0454\u0491]", re.IGNORECASE)
+_RUSSIAN_LETTERS_RE = re.compile(r"[\u044b\u044d\u044a\u0451]", re.IGNORECASE)
 _SCRIPT_LANG_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
-    (re.compile(r"[\u0456\u0457\u0454\u0491]", re.IGNORECASE), ("uk", "ru")),
-    (re.compile(r"[\u0400-\u052f]"), ("ru",)),
+    (_UKRAINIAN_LETTERS_RE, ("uk", "ru")),
+    (_RUSSIAN_LETTERS_RE, ("ru",)),
+    (re.compile(r"[\u0400-\u052f]"), ("uk", "ru")),
     (re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]"), ("el",)),
     (re.compile(r"[\u0590-\u05ff]"), ("he",)),
     (re.compile(r"[\u0600-\u06ff]"), ("ar",)),
@@ -131,9 +138,17 @@ def _lang_candidates(fragment: str, context_langs: tuple[str, ...] = ()) -> tupl
     scores "santé" 2.18 and "publique" 2.13, just under the word threshold,
     while French scores both above 5.0. Every lookup then returns 0.0 and the
     printed hyphen is kept.
+
+    A Cyrillic fragment with no letter only Ukrainian writes, in a region that
+    writes letters only Russian does ("ы", "э", "ъ", "ё"), is Russian: the
+    Ukrainian lexicon knows short Russian syllables as words of its own
+    ("бо", "калу") and would keep the hyphen of a wrapped Russian word.
     """
     langs = _detect_langs(fragment)
     if langs is not None:
+        plain_cyrillic = langs == ("uk", "ru") and not _UKRAINIAN_LETTERS_RE.search(fragment)
+        if plain_cyrillic and context_langs == ("ru",):
+            return context_langs
         return langs
     if context_langs:
         return tuple(dict.fromkeys((*context_langs, "en")))
@@ -151,6 +166,17 @@ def _max_zipf(word: str, langs: tuple[str, ...]) -> float:
         except (LookupError, ValueError):  # unsupported language code
             continue
     return best
+
+
+def _best_lexicons(joined: str, langs: tuple[str, ...], best: float) -> tuple[str, ...]:
+    """The lexicons of *langs* that score the rare *joined* form at *best*, its best score.
+
+    A wrapped word that is rare is judged in the language that knows it best.
+    Russian knows "методи|стов" joined, and Ukrainian, which does not (or
+    knows it less, "мотори|ку"), knows its halves as words of its own
+    ("методи", "стов") and would keep the hyphen.
+    """
+    return tuple(lang for lang in langs if _max_zipf(joined, (lang,)) == best)
 
 
 def _stx_alpha_keep_hyphen(before: str, after: str, langs: tuple[str, ...] | None = None) -> bool:
@@ -178,9 +204,12 @@ def _stx_alpha_keep_hyphen(before: str, after: str, langs: tuple[str, ...] | Non
         return True
     if langs is None:
         langs = _lang_candidates(before + after)
-    joined = _max_zipf((before + after).lower(), langs)
+    joined_word = (before + after).lower()
+    joined = _max_zipf(joined_word, langs)
     if joined >= _ZIPF_VALID_WORD:
         return False
+    if joined:
+        langs = _best_lexicons(joined_word, langs, joined)
     before_zipf = _max_zipf(before.lower(), langs)
     after_zipf = _max_zipf(after.lower(), langs)
     if (
@@ -195,6 +224,45 @@ def _stx_alpha_keep_hyphen(before: str, after: str, langs: tuple[str, ...] | Non
     return bool(_NON_ASCII_RE.search(before + after))
 
 
+# A line break right after a line-end hyphen mark, with the spaces around it.
+_STX_LINE_BREAK_RE = re.compile(r"[ \t]*\r?\n[ \t]*")
+
+# The next line after a number's hyphen mark opens with a word that stands
+# alone: the hyphen is suspended ("5-" / "and 10-year", "10-" / "to 15-min"),
+# so the word is no part of the number's compound.
+_SUSPENDED_HYPHEN_NEXT_RE = re.compile(
+    r"(?:and|or|to|und|oder|bis|zu|et|ou|à|y|o|e|i|a|ve|и|или|та|або|і|до)[ \t]"
+)
+
+
+def _stx_digit_compound_end(text: str, i: int) -> tuple[str, int] | None:
+    """The hyphen of an STX at *i* that hyphenates a number and where text resumes, or None.
+
+    A digit on either side of the mark makes the printed hyphen literal:
+    numbers are never syllable-hyphenated, so the hyphen in a code that
+    joins letters and digits ("XQ-12", "ZEB-4", "12-fold") or in a range
+    ("2010-2014") was printed. The other side must be a letter or digit; a
+    line break after the mark is skipped and dropped, as the joined token
+    holds none. Returns what replaces the mark ("-") and the index of the
+    first character after the mark and any such break. A suspended hyphen
+    after a number, a function word on the next line ("5-" / "and 10-year"),
+    keeps the word break as a space ("- ").
+    """
+    if i == 0:
+        return None
+    resume = i + 1
+    if (brk := _STX_LINE_BREAK_RE.match(text, resume)) is not None:
+        resume = brk.end()
+    before, after = text[i - 1], text[resume : resume + 1]
+    if not (before.isalnum() and after.isalnum()):
+        return None
+    if not (before.isdigit() or after.isdigit()):
+        return None
+    if brk is not None and before.isdigit() and _SUSPENDED_HYPHEN_NEXT_RE.match(text, resume):
+        return "- ", resume
+    return "-", resume
+
+
 def _resolve_stx_marks(text: str) -> str:
     """Resolve GLM-OCR STX (``\\x02``) line-end soft-hyphen marks.
 
@@ -205,7 +273,9 @@ def _resolve_stx_marks(text: str) -> str:
     ("annurev-psych\\x02113011" must become "annurev-psych-113011").  The same
     holds between digits: numbers are never syllable-hyphenated, so the
     printed hyphen in bare ORCID iDs, year ranges, and page ranges is literal
-    ("0000-0002\\x020247" must become "0000-0002-0247").  Between word
+    ("0000-0002\\x020247" must become "0000-0002-0247"), and next to one: a
+    letter-and-number code keeps it ("XQ\\x0212" must become "XQ-12"; see
+    :func:`_stx_digit_compound_end`).  Between word
     fragments, :func:`_stx_alpha_keep_hyphen` adjudicates literal compound
     hyphens ("Cross\\x02National", "approach\\x02related") against true
     hyphenation.
@@ -228,8 +298,11 @@ def _resolve_stx_marks(text: str) -> str:
             in_doi_or_url = False
         lo = max(token_start, pos)
         in_doi_or_url = in_doi_or_url or bool(DOI_URL_CONTEXT_RE.search(text, lo, i))
-        between_digits = i > 0 and text[i - 1].isdigit() and text[i + 1 : i + 2].isdigit()
-        keep = in_doi_or_url or between_digits
+        resume = i + 1
+        keep = in_doi_or_url
+        hyphen = "-"
+        if not keep and (number := _stx_digit_compound_end(text, i)) is not None:
+            keep, (hyphen, resume) = True, number
         if not keep:
             before = _STX_ALPHA_BEFORE_RE.search(text, lo, i)
             after = _STX_ALPHA_AFTER_RE.match(text, i + 1)
@@ -240,8 +313,8 @@ def _resolve_stx_marks(text: str) -> str:
                     _lang_candidates(before.group() + after.group(), context_langs),
                 )
         parts.append(text[pos:i])
-        parts.append("-" if keep else "")
-        pos = i + 1
+        parts.append(hyphen if keep else "")
+        pos = resume
     parts.append(text[pos:])
     return "".join(parts)
 
@@ -367,6 +440,8 @@ def _dehyphenate_word_linewraps(text: str) -> str:
         identifier_context = any(marker in token for marker in ("@", "/", "\\", "_"))
         langs = _lang_candidates(left + right, context_langs)
         joined_score = _max_zipf((left + right).lower(), langs)
+        if 0.0 < joined_score < _ZIPF_VALID_WORD:
+            langs = _best_lexicons((left + right).lower(), langs, joined_score)
         compound_score = _max_zipf(f"{left}-{right}".lower(), langs)
         keep_hyphen = identifier_context or compound_score >= joined_score + 0.5
         if not keep_hyphen and joined_score < _ZIPF_VALID_WORD:

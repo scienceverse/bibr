@@ -919,6 +919,51 @@ def test_many_unmapped_glyphs_still_reject_the_region(monkeypatch):
     assert "_unmapped_glyphs" not in region
 
 
+def test_a_byline_with_a_few_unmapped_accented_letters_is_read(monkeypatch):
+    # A font that maps every letter but its accented ones: two marks in a short
+    # byline, more than one per hundred characters but never side by side.
+    text = "Bria Mol\x03n Daresq, Tomo Vel\x04zquar Pirn, Ulla Sendrovik"
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "filled"
+    assert region["content"] == text.replace("\x03", "�").replace("\x04", "�")
+    assert region["_unmapped_glyphs"] == 2
+
+
+def test_unmapped_glyphs_side_by_side_still_reject_a_short_region(monkeypatch):
+    # Two marks next to each other are a run of a broken font, not single letters.
+    text = "Bria Mol\x03\x04n Daresq, Tomo Velquar Pirn, Ulla Sendrovik"
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "rejected"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_sparse_unmapped_glyphs_are_capped_at_one_per_twenty_characters(monkeypatch):
+    # Three single marks in 45 characters: more than one per twenty.
+    text = "Bria Mol\x03n Dar\x04sq, Tomo Vel\x05zquar Pirn, Ulla"
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "rejected"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_sparse_unmapped_glyphs_do_not_excuse_a_long_paragraph(monkeypatch):
+    # A body font whose one ligature is unmapped shows a single mark every few
+    # words: a short line may carry that many, a paragraph may not.
+    sentence = "the e\x0ecient trombel of the varnish was quolid by the glarven plats. "
+    text = (sentence * 4).strip()
+    assert len(text) > 200 and text.count("\x0e") > len(text) // 100
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "rejected"
+    assert "_unmapped_glyphs" not in region
+
+
 def test_marking_does_not_excuse_the_other_usability_gates(monkeypatch):
     text = "(cid:12) (cid:13) a line that a broken font left behind in the layer \x01"
 

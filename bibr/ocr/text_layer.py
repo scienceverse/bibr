@@ -64,8 +64,12 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# A text-layer region may carry one unmapped glyph, or one per this many characters.
+# A text-layer region may carry one unmapped glyph, or one per this many characters ...
 _CHARS_PER_UNMAPPED_GLYPH = 100
+# ... or, in a region of at most this many characters (a byline or a heading)
+# where no two of them stand side by side, one per this many.
+_MAX_SPARSE_UNMAPPED_GLYPH_CHARS = 200
+_CHARS_PER_SPARSE_UNMAPPED_GLYPH = 20
 _UNMAPPED_GLYPH = "\ufffd"
 
 
@@ -412,13 +416,43 @@ def _mark_unmapped_glyphs(text: str) -> tuple[str, int]:
     recovered, and dropping them changes the text without a trace ("W m-1" reads
     as "W m1"), so the mark stays in their place. No OCR follows on this route, so
     rejecting the region would lose the whole paragraph for one symbol.
+
+    A short line takes a few more, see :func:`_sparse_unmapped_glyphs`.
     """
     from bibr.ocr.native_text import _is_disallowed_control_char
 
-    count = sum(1 for ch in text if _is_disallowed_control_char(ch))
-    if not count or count > max(1, len(text) // _CHARS_PER_UNMAPPED_GLYPH):
+    unmapped = [_is_disallowed_control_char(ch) for ch in text]
+    count = sum(unmapped)
+    if not count:
         return text, 0
-    return "".join(_UNMAPPED_GLYPH if _is_disallowed_control_char(ch) else ch for ch in text), count
+    if count > max(1, len(text) // _CHARS_PER_UNMAPPED_GLYPH) and not _sparse_unmapped_glyphs(
+        unmapped
+    ):
+        return text, 0
+    marked = (_UNMAPPED_GLYPH if bad else ch for ch, bad in zip(text, unmapped, strict=True))
+    return "".join(marked), count
+
+
+def _sparse_unmapped_glyphs(unmapped: Sequence[bool]) -> bool:
+    """Whether the unmapped glyphs (*unmapped* flags each char) are a few single letters.
+
+    A byline or a heading set in a font that maps every letter but its
+    accented ones reads "Ana Mar\x03a Lo\x04pez" among its names: two marks in a
+    line of fifty characters, more than one per hundred. They are single letters of
+    otherwise whole words, never two side by side, and at most one per
+    :data:`_CHARS_PER_SPARSE_UNMAPPED_GLYPH` characters. A broken font
+    encoding turns runs of letters into control characters, which this
+    leaves rejected. Only a short line (:data:`_MAX_SPARSE_UNMAPPED_GLYPH_CHARS`
+    characters at most) takes them: a paragraph that shows a mark every few
+    words ("e\x0ecient") is body text in a font with a broken ligature, which
+    the one-per-hundred limit rejects.
+    """
+    count = sum(unmapped)
+    if len(unmapped) > _MAX_SPARSE_UNMAPPED_GLYPH_CHARS:
+        return False
+    if count > len(unmapped) // _CHARS_PER_SPARSE_UNMAPPED_GLYPH:
+        return False
+    return not any(a and b for a, b in zip(unmapped, unmapped[1:], strict=False))
 
 
 def _unmapped_glyph_warning(count: int) -> ProcessingWarning | None:

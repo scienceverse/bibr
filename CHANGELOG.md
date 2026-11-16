@@ -28,6 +28,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   surname printed in capitals, a given name a region break cut off, the last
   name of a keyed list and a name only an e-mail address spells are read as
   printed, and a name printed with its family twice keeps both parts.
+- A line-end hyphen next to a digit is kept: "COVID-19", "IL-6" and "12-month"
+  no longer lose their hyphen when the PDF marks it as a soft hyphen, and a
+  suspended one at a line end keeps its word break ("5- and 10-year").
+- Ukrainian words wrapped at a line end are joined again; Russian text keeps
+  being judged by the Russian lexicon.
+- A short text-layer line with a few unmapped accented letters (a byline) is
+  read, with U+FFFD for each, instead of being left empty.
+- A PDF whose generated word spaces pdfium boxes far from their gap no longer
+  reads with its words run together.
 
 ## [0.9.1] - 2026-11-16
 
