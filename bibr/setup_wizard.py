@@ -177,8 +177,7 @@ def _available_extras() -> dict[str, str]:
 def _ml_extra_available() -> bool:
     """Best-effort check for the heavy deps that make up the ml extra."""
     return all(
-        importlib.util.find_spec(module) is not None
-        for module in ("torch", "transformers", "cv2", "sklearn", "joblib")
+        importlib.util.find_spec(module) is not None for module in ("torch", "transformers", "cv2")
     )
 
 

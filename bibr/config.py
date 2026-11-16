@@ -2131,15 +2131,14 @@ class MlOptions(_BibrSettings):
     # admission, masthead suppression) and for non-English reference headers.
     # Null disables it; front matter then rests on the lexical heuristics alone.
     # Loaded via bibr.utils.gbm_bundle.load_gbm_bundle: front_role.json and its
-    # .npz (bibr-gbm/1, numpy only) when the revision has them, else
-    # front_role.joblib, which needs scikit-learn and joblib (core deps today).
+    # .npz (bibr-gbm/1), read with numpy alone.
     front_role_model_id: str | None = Field(
         "scienceverse/bibr-front-role-v1",
         description="HF Hub repo id (or local path) of the first-page region-role classifier "
         "bundle. Null disables the model and rests front matter on the lexical heuristics "
-        "alone. A local path names the front_role.json manifest, the .joblib bundle or a "
-        "directory holding one. TRUST BOUNDARY: a .joblib bundle is deserialized with joblib "
-        "via the gadget-restricted loader; only point it at a checkpoint you control.",
+        "alone. A local path names the front_role.json manifest (bibr-gbm/1, its .npz "
+        "beside it) or the directory holding them; scripts/export_gbm_bundle.py converts "
+        "a .joblib bundle.",
     )
     # The pinned revision holds front_role.json/.npz (bibr-gbm/1) beside the joblib bundle.
     front_role_revision: str = Field(
@@ -2931,15 +2930,12 @@ class GlobalSettings(_BibrSettings):
     )
     # Local geometry reference segmenter (REF_SEG_STRATEGY=geom). Frozen GBM
     # bundle in a public HF repo, loaded via bibr.utils.gbm_bundle.load_gbm_bundle:
-    # geom_segmenter.json and its .npz (bibr-gbm/1, numpy only) when the revision
-    # has them, else geom_segmenter.joblib (scikit-learn and joblib).
+    # geom_segmenter.json and its .npz (bibr-gbm/1), read with numpy alone.
     REF_GEOM_SEG_MODEL_ID: str = Field(
         "scienceverse/bibr-geom-segmenter-v1",
         description="HF Hub repo id for the local geometry reference segmenter (REF_SEG_STRATEGY=geom). "
-        "A local path names the geom_segmenter.json manifest, the .joblib bundle or a directory "
-        "holding one. TRUST BOUNDARY: a .joblib bundle is deserialized with joblib (executes code "
-        "on load); a local path here is loaded via the gadget-restricted loader but must still be "
-        "a checkpoint you control — never point it at an untrusted file.",
+        "A local path names the geom_segmenter.json manifest (bibr-gbm/1, its .npz beside it) "
+        "or the directory holding them; scripts/export_gbm_bundle.py converts a .joblib bundle.",
     )
     # Keep the pinned bundle compatible with geom_adjacent_features patterns.
     # The pinned revision holds geom_segmenter.json/.npz (bibr-gbm/1) beside the joblib bundle.

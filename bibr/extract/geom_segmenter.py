@@ -1,8 +1,8 @@
 """Local geometry reference segmenter (the ``geom`` strategy).
 
 Loads a frozen GBM bundle (public HF repo, via the offline-resilient
-``resolve_checkpoint``; the pickle-free ``bibr-gbm/1`` files when the pinned
-revision has them, see :mod:`bibr.utils.gbm_bundle`), labels each
+``resolve_checkpoint``, in the pickle-free ``bibr-gbm/1`` form of
+:mod:`bibr.utils.gbm_bundle`), labels each
 reference-section line B-REF/I-REF from
 its geometry+text features, and aligns the ordered line sequence onto the
 reference text (``align_line_starts`` — a monotonic cursor walk, so an
@@ -32,8 +32,8 @@ from bibr.ocr.ref_patterns import _OPEN_AUTHOR_LIST
 
 logger = logging.getLogger(__name__)
 
-# The bundle's file stem: geom_segmenter.json + .npz (bibr-gbm/1), or the
-# legacy geom_segmenter.joblib (bibr.utils.gbm_bundle.load_gbm_bundle).
+# The bundle's file stem: geom_segmenter.json + .npz (bibr-gbm/1,
+# bibr.utils.gbm_bundle.load_gbm_bundle).
 _BUNDLE_STEM = "geom_segmenter"
 MODEL_KIND_LINE_START_V1 = "line_start_v1"
 MODEL_KIND_ADJACENT_BOUNDARY_V2 = "adjacent_boundary_v2"
@@ -60,9 +60,8 @@ class GeomSegmenter:
     def __init__(self, model_spec: str, revision: str | None = None) -> None:
         from bibr.utils.gbm_bundle import load_gbm_bundle
 
-        # The pickle-free bibr-gbm/1 bundle when the revision or path has one;
-        # otherwise the joblib bundle, which only the gadget-restricted loader
-        # reads (audit M6). *_MODEL_ID settings remain a trust boundary.
+        # A pickle-free bibr-gbm/1 bundle, read with numpy: no code in the file
+        # runs on load (audit M6).
         path, bundle = load_gbm_bundle(model_spec, revision, stem=_BUNDLE_STEM)
         self.path = path
         feature_keys = list(bundle["feature_keys"])
