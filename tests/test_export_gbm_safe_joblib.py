@@ -1,4 +1,4 @@
-"""Tests for the restricted joblib loader (audit M6)."""
+"""Tests for the restricted joblib loader of scripts/export_gbm_bundle.py (audit M6)."""
 
 import pickle
 
@@ -6,7 +6,7 @@ import pytest
 
 joblib = pytest.importorskip("joblib")
 
-from bibr.utils.safe_pickle import safe_joblib_load
+from scripts._safe_joblib import safe_joblib_load
 
 
 def test_loads_a_legitimate_bundle(tmp_path):
@@ -213,7 +213,7 @@ def test_a_bundle_from_another_sklearn_release_loads_without_the_version_warning
 def test_the_sklearn_version_filter_is_scoped_to_that_one_warning():
     import warnings
 
-    from bibr.utils.safe_pickle import _quiet_sklearn_version_warnings
+    from scripts._safe_joblib import _quiet_sklearn_version_warnings
 
     with warnings.catch_warnings(record=True) as seen:
         warnings.simplefilter("always")
@@ -227,7 +227,7 @@ def test_the_sklearn_version_filter_does_not_leak_past_the_load():
 
     from sklearn.exceptions import InconsistentVersionWarning
 
-    from bibr.utils.safe_pickle import _quiet_sklearn_version_warnings
+    from scripts._safe_joblib import _quiet_sklearn_version_warnings
 
     with warnings.catch_warnings(record=True) as seen:
         warnings.simplefilter("always")

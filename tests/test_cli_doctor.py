@@ -682,8 +682,8 @@ def test_check_ref_strategies_llm_ok(monkeypatch):
     assert rec.calls == [("ok", "References: seg=llm, parse=llm", "")]
 
 
-def test_check_ref_strategies_geom_without_sklearn_fails(monkeypatch):
-    """The geom default without the ml extra reports a soft fail (cascades to LLM)."""
+def test_check_ref_strategies_geom_needs_no_sklearn(monkeypatch):
+    """The geom segmenter is read with numpy: no scikit-learn is no failure."""
     import importlib.util
 
     import bibr.config
@@ -695,9 +695,7 @@ def test_check_ref_strategies_geom_without_sklearn_fails(monkeypatch):
 
     rec = _Recorder()
     _check_ref_strategies(rec.ok, rec.fail)
-    assert rec.calls[0][0] == "fail"
-    assert "cascade to LLM" in rec.calls[0][1]
-    assert "Reinstall bibr" in rec.calls[0][2]
+    assert rec.calls == [("ok", "References: seg=geom, parse=llm", "")]
 
 
 def test_check_ref_strategies_ner_without_torch_is_ok_on_onnx(monkeypatch):

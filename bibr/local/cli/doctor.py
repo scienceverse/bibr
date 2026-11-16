@@ -588,14 +588,8 @@ def _check_ref_strategies(ok, fail) -> None:
         # fetched from the Hub on first use — nothing to verify offline here.
         ok(f"{label} (ONNX Runtime)")
         return
-    if seg_strategy == "geom" and importlib.util.find_spec("sklearn") is None:
-        # scikit-learn is a core dependency, so this only fires on a damaged
-        # environment. geom cascades to LLM seg, hence a soft failure.
-        fail(
-            f"{label}: geom segmenter unavailable, will cascade to LLM seg",
-            hint="Reinstall bibr, or set REF_SEG_STRATEGY=llm",
-        )
-        return
+    # The geom segmenter is a bibr-gbm/1 bundle read with numpy, a core
+    # dependency: nothing to check before it is fetched.
     ok(label)
 
 
