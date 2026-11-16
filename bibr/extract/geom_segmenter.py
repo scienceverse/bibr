@@ -1,7 +1,9 @@
 """Local geometry reference segmenter (the ``geom`` strategy).
 
 Loads a frozen GBM bundle (public HF repo, via the offline-resilient
-``resolve_checkpoint``), labels each reference-section line B-REF/I-REF from
+``resolve_checkpoint``; the pickle-free ``bibr-gbm/1`` files when the pinned
+revision has them, see :mod:`bibr.utils.gbm_bundle`), labels each
+reference-section line B-REF/I-REF from
 its geometry+text features, and aligns the ordered line sequence onto the
 reference text (``align_line_starts`` — a monotonic cursor walk, so an
 opening embedded in an earlier reference can never steal a boundary).
@@ -25,25 +27,16 @@ from bibr.extract.geom_adjacent_features import (
     augment_adjacent_features,
 )
 from bibr.extract.geom_features import PROD_FEATURE_KEYS, line_features
-from bibr.ner.checkpoint import resolve_checkpoint
 from bibr.ocr.ref_geometry import LineRecord, records_from_dicts
 from bibr.ocr.ref_patterns import _OPEN_AUTHOR_LIST
-from bibr.utils.ml_runtime import is_hub_repo_id
 
 logger = logging.getLogger(__name__)
 
-_BUNDLE_FILENAME = "geom_segmenter.joblib"
+# The bundle's file stem: geom_segmenter.json + .npz (bibr-gbm/1), or the
+# legacy geom_segmenter.joblib (bibr.utils.gbm_bundle.load_gbm_bundle).
+_BUNDLE_STEM = "geom_segmenter"
 MODEL_KIND_LINE_START_V1 = "line_start_v1"
 MODEL_KIND_ADJACENT_BOUNDARY_V2 = "adjacent_boundary_v2"
-
-
-def _resolve_spec(model_spec: str) -> str:
-    """A bare ``org/repo`` gets the bundle filename appended; a local path or an
-    explicit ``repo:file`` spec passes through unchanged."""
-    # resolve_checkpoint warns about a same-named cwd path, with the filename.
-    if ":" in model_spec or not is_hub_repo_id(model_spec, warn=False):
-        return model_spec
-    return f"{model_spec}:{_BUNDLE_FILENAME}"
 
 
 def _feature_rows_for_kind(lines: list[LineRecord], model_kind: str) -> list[dict]:
@@ -65,14 +58,13 @@ def _expected_feature_keys(model_kind: str) -> set[str]:
 
 class GeomSegmenter:
     def __init__(self, model_spec: str, revision: str | None = None) -> None:
-        from bibr.utils.safe_pickle import safe_joblib_load
+        from bibr.utils.gbm_bundle import load_gbm_bundle
 
-        path = resolve_checkpoint(_resolve_spec(model_spec), revision=revision)
+        # The pickle-free bibr-gbm/1 bundle when the revision or path has one;
+        # otherwise the joblib bundle, which only the gadget-restricted loader
+        # reads (audit M6). *_MODEL_ID settings remain a trust boundary.
+        path, bundle = load_gbm_bundle(model_spec, revision, stem=_BUNDLE_STEM)
         self.path = path
-        # joblib.load executes arbitrary code in the file, and REF_GEOM_SEG_MODEL_ID
-        # can point resolve_checkpoint at any local path — use the gadget-restricted
-        # loader (audit M6). *_MODEL_ID settings remain a trust boundary.
-        bundle = safe_joblib_load(path)
         feature_keys = list(bundle["feature_keys"])
         self.model_kind = str(bundle.get("model_kind", MODEL_KIND_LINE_START_V1))
         expected_keys = _expected_feature_keys(self.model_kind)

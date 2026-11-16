@@ -257,3 +257,27 @@ def test_line_after_a_complete_line_can_still_be_a_boundary(tmp_path, ending):
     labels, _ = seg._predict(lines)
 
     assert labels == ["B-REF", "I-REF", "B-REF"]
+
+
+def test_converted_bundle_gives_the_joblib_bundles_probabilities(tmp_path):
+    """The bibr-gbm/1 export of a bundle (scripts/export_gbm_bundle.py) reads
+    without scikit-learn and scores every line exactly as the pickle does."""
+    from scripts.export_gbm_bundle import main as export_main
+
+    bundle = tmp_path / "geom_segmenter.joblib"
+    keys = sorted({*PROD_FEATURE_KEYS, *ADJACENT_FEATURE_KEYS})
+    _train_tiny_bundle(bundle, feature_keys=keys, model_kind=MODEL_KIND_ADJACENT_BOUNDARY_V2)
+    out = tmp_path / "converted"
+    assert export_main([str(bundle), str(out), "--stem", "geom_segmenter"]) == 0
+    old = GeomSegmenter(str(bundle))
+    new = GeomSegmenter(str(out))  # the directory: its geom_segmenter.json
+    assert new.path.endswith("geom_segmenter.json")
+    assert new.model_kind == old.model_kind and new.feature_keys == old.feature_keys
+    lines = [
+        _ln("Aknin, L. B. (2013). A title.", 72.0, y=700),
+        _ln("Journal of X, 1, 2-3.", 108.0, y=688),
+        _ln("Carstensen, L. (2009). Another.", 72.0, y=676),
+        _ln("Journal of Y, 2, 4-5.", 108.0, y=664),
+    ]
+    dicts = [record_to_dict(x) for x in lines]
+    assert new.line_start_probabilities(dicts) == old.line_start_probabilities(dicts)
