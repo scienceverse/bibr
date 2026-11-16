@@ -41,7 +41,8 @@ build. Speculative decoding needs more and is off in these default plans (see
 When no local model fits, `bibr setup` recommends Claude Haiku 5.5
 (`LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5`). The hosted setup
 uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
-`OCR_VISION_MODEL=claude-haiku-5-5`), so one Anthropic key covers both, and
+`OCR_VISION_MODEL=claude-haiku-5-5`), so one Anthropic key covers both, it
+needs the `anthropic` extra (which `bibr setup` installs with it), and
 page images as well as text go to Anthropic (see
 [what leaves your machine](privacy.md)). The 221/252 in the table above was
 measured with bibr's local OCR; Claude's OCR has not been scored on these
@@ -170,7 +171,8 @@ for llama.cpp and MLX. On the same papers it passes 200/252, −9.1 points
 
 Run `bibr setup --advanced` to choose another model, or set `LLM_LOCAL_MODEL`
 (local) or `LLM_PROVIDER` and `LLM_MODEL` (hosted) yourself; see
-[configuration](configuration.md).
+[configuration](configuration.md). A hosted Gemini or Claude model needs the
+`google` or `anthropic` extra.
 
 ### Builds and revisions
 

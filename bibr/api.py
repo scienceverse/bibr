@@ -34,9 +34,11 @@ import logging
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, Unpack, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     import pandas as pd
 
     from bibr.config import GlobalSettings
@@ -44,6 +46,8 @@ if TYPE_CHECKING:
     from bibr.pipeline.progress import ProgressTracker
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 __all__ = [
     "ChewFailure",
@@ -897,6 +901,17 @@ class Chewer:
         progress: ProgressTracker | None = None,
     ) -> Result | list[Result | ChewFailure]:
         """Process paper(s) on the warm pipeline; semantics match :func:`chew`."""
+        return self._run_sync(
+            lambda: self.achew(path, paper_id=paper_id, batch_size=batch_size, progress=progress)
+        )
+
+    def _run_sync(self, make: Callable[[], Coroutine[Any, Any, _T]]) -> _T:
+        """Run ``make()`` on the session's private loop (what :meth:`chew` does).
+
+        ``make`` is called only once the loop is ready, so a refused call leaves
+        no coroutine unawaited. ``bibr batch`` drives its overlapped chunks
+        through here (:mod:`bibr.batch.runner`).
+        """
         if self._closed:
             raise RuntimeError("this Chewer is closed — create a new one")
         try:
@@ -922,9 +937,7 @@ class Chewer:
                 # where run_until_complete left it pending, to resume inside the
                 # teardown that close() runs on the same loop.
                 self._runner = _private_runner()
-            return self._runner.run(
-                self.achew(path, paper_id=paper_id, batch_size=batch_size, progress=progress)
-            )
+            return self._runner.run(make())
 
     def chew_file(
         self,

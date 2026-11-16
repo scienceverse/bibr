@@ -29,7 +29,8 @@ Python environment, `python -m pip install bibr` installs the same package; then
 `bibr` directly instead of `uv run bibr`.
 
 This installs core bibr: the `bibr` command, the Python library, native DOCX, JATS,
-HTML and ePub parsing, cloud LLM clients, and bibr's own trained models (layout
+HTML and ePub parsing, LLM extraction through any OpenAI-compatible endpoint (OpenAI,
+Groq, Ollama, a local model server), and bibr's own trained models (layout
 detection, sentence splitting, the section and paper classifiers, the front-matter
 and reference models). None of them needs PyTorch: the neural models run through
 **ONNX Runtime**. Core has no `torch`, no `transformers` and no OpenCV, so it installs
@@ -39,6 +40,12 @@ The models download from Hugging Face the first time a run needs them, at pinned
 revisions; there is nothing to configure. `bibr chew paper.pdf --dry-run` lists each
 one, whether it is cached, and its size. [Local model runtime](../guides/model-runtime.md)
 explains the ONNX and PyTorch runtimes.
+
+The Google and Anthropic SDKs are extras: `google` for `LLM_PROVIDER=google`
+(what a full run without a `.env` uses) and the `gemini` OCR backend, `anthropic`
+for `LLM_PROVIDER=anthropic` and the `anthropic` OCR backend. `bibr setup` installs
+the one the provider you choose needs. A run that needs a missing one stops before
+any work and names the extra, and so do `bibr doctor` and `--dry-run`.
 
 There is no setup step: with nothing configured, bibr runs in fast mode (local models,
 no LLM, no API key). `bibr setup` is optional and adds an LLM or OCR; see the
@@ -58,19 +65,22 @@ Extras add optional dependencies. In a uv project, add one with
 | `local-mlx` | `vllm-mlx` (macOS, Apple Silicon only) | Pinning the vLLM-MLX local-LLM backend directly on Apple Silicon (`local` covers this automatically on macOS). |
 | `vllm` | `vllm==0.32.0`, `openai>=2.54.0,<3` (Linux x86_64, Python <3.14) | The *managed* local vLLM server bibr starts for `--llm local` on Linux/CUDA, and the `paddle-vllm` GPU OCR backend. |
 | `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | Runs bibr's ONNX models (layout, sentence splitting, the classifiers, the reference parser) on an NVIDIA GPU. It needs one more command after installing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
+| `serve` | `fastapi`, `uvicorn[standard]`, `python-multipart` | The `bibr serve` HTTP API. Without it, `bibr serve` exits with an install hint. |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching for `bibr serve`; set `REDIS_URL` to enable it. |
 | `demo` | `gradio>=6.15.0` | The web demo, `bibr demo`. See [Web demo](../guides/demo.md). |
-| `batch` | `anthropic>=0.40.0,<1` | Offline processing via the Anthropic Message Batches API. The SDK itself is a core dependency (`LLM_PROVIDER=anthropic` needs it); this extra keeps existing installs working. |
-| `nuextract` | `numind>=0.3,<0.3.1` | The experimental `LLM_STRUCTURED_BACKEND=nuextract-native` backend for NuExtract servers. |
+| `google` | `google-genai>=1.0.0`, `jsonref>=1.1.0` | Google Gemini: `LLM_PROVIDER=google` (the provider a full run without a `.env` uses) and `OCR_BACKEND=gemini`. |
+| `anthropic` | `anthropic>=0.40.0,<1` | Anthropic Claude: `LLM_PROVIDER=anthropic` and `OCR_BACKEND=anthropic`, the hosted route `bibr setup` recommends. |
+| `batch` | `bibr[anthropic]` | Offline processing via the Anthropic Message Batches API. The same SDK as `anthropic`, under the name existing installs ask for. |
+| `nuextract` | `numind>=0.3,<0.3.1` | The experimental `LLM_STRUCTURED_BACKEND=nuextract-native` backend for NuExtract servers. bibr no longer installs numind otherwise, and that backend stops with an error naming this extra. |
 | `mcp` | `mcp>=2.2.0,<3` | The `bibr mcp` server: extraction as [Model Context Protocol tools](../guides/mcp.md) for agents. |
-| `all` | `batch` + `cache` + `demo` + `mcp` + `torch` | Everything useful regardless of hardware. Does **not** include `vllm`, `local`, `local-mlx` or `gpu`; add whichever match your hardware. |
+| `all` | `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `serve` + `torch` | Everything useful regardless of hardware. Does **not** include `vllm`, `local`, `local-mlx` or `gpu`; add whichever match your hardware. |
 
 ## Choosing serving extras
 
 Most people need no extra at all. For a local LLM or local OCR, `bibr setup` picks and
 offers to install the extras your hardware needs. To choose by hand:
 
-- **`all` is the superset to reach for.** It bundles `batch` + `cache` + `demo` + `mcp` + `torch` — everything that is useful regardless of hardware.
+- **`all` is the superset to reach for.** It bundles `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `serve` + `torch` — everything that is useful regardless of hardware.
 - Add **`vllm`** on Linux/CUDA, **`local`** or **`local-mlx`** on Apple Silicon, and
   **`gpu`** for ONNX Runtime's GPU build.
 

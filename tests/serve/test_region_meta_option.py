@@ -14,7 +14,7 @@ import hashlib
 import pytest
 
 pytest.importorskip("fastapi")
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 
 from fastapi import HTTPException  # noqa: E402
 

@@ -392,7 +392,7 @@ def _interrupt_on_termination():
 
 def main():
     """Entry point for ``bibr`` CLI command."""
-    # serve runs under LitServe and uvicorn, which install, restore and
+    # serve runs under uvicorn, which installs, restores and
     # re-raise their own SIGINT/SIGTERM handlers.
     serving = len(sys.argv) >= 2 and sys.argv[1] == "serve"
     try:

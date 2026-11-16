@@ -96,6 +96,19 @@ In fast mode the same options are refused outright:
   ✗ Invalid option: --refs llm calls an LLM, which fast mode (--fast) never does. Run in full mode to use the LLM, or drop the option.
 ```
 
+## A Gemini or Claude run stops with "needs the … extra"
+
+```text
+  ✗ LLM_PROVIDER=google needs the google-genai and jsonref packages, which the 'google' extra installs and this environment lacks. Install it with: pip install "bibr[google]" (in a uv project: uv add "bibr[google]"; in a bibr source checkout: uv sync --extra google)
+```
+
+**Why.** The Google and Anthropic SDKs are extras, not part of core bibr. A run whose
+LLM or cloud OCR needs one stops before any work.
+
+**Fix.** Install the extra the message names (`uv add 'bibr[google]'` or
+`uv add 'bibr[anthropic]'`), or pass `--fast`. `bibr setup` installs the extra for the
+provider you pick.
+
 ## `bibr.chew()` fails in Jupyter
 
 ```text

@@ -857,7 +857,8 @@ def _build_recommended_setup(
                 "LLM_PROVIDER": "anthropic",
                 "LLM_MODEL": LLM_DEFAULTS["anthropic"]["model"],
             },
-            extras=set(),
+            # The Anthropic SDK is an extra, not a core dependency.
+            extras={"anthropic"},
             preset_name="recommended-cloud",
             privacy_summary="page images and extracted text are sent to Anthropic",
             download_summary=(
@@ -1901,6 +1902,23 @@ class SetupWizard:
         else:
             self.console.print("[dim]No extras selected.[/dim]")
 
+    def _ensure_sdk_extra(self, extra: str | None, reason: str) -> None:
+        """Install the extra carrying a cloud provider's SDK when it is missing.
+
+        The Google and Anthropic SDKs are extras (``bibr.clients.sdk_extras``):
+        choosing that provider installs its extra, as choosing a local GPU route
+        installs ``ml``. Nothing happens when the SDK is already importable.
+        """
+        from bibr.clients.sdk_extras import missing_packages
+
+        if extra is None or not missing_packages(extra):
+            return
+        self.selected_extras.add(extra)
+        self._install_selected_extras(reason)
+        # The same process lists the provider's models next: let it see the
+        # packages the install just wrote.
+        importlib.invalidate_caches()
+
     def _install_selected_extras(self, reason: str = "", *, config_saved: bool = False) -> None:
         if not self.selected_extras:
             return
@@ -2037,6 +2055,12 @@ class SetupWizard:
             return
         self.env_vars["LLM_PROVIDER"] = provider
         defaults = LLM_DEFAULTS[provider]
+        from bibr.clients.sdk_extras import llm_provider_extra
+
+        # Before the model listing, which goes through the provider's SDK.
+        self._ensure_sdk_extra(
+            llm_provider_extra(provider), f"LLM_PROVIDER={provider} needs its provider SDK"
+        )
 
         # --- Collect credentials first (needed for model listing) ---
         api_key = ""
@@ -2554,6 +2578,11 @@ class SetupWizard:
                 hint=escape(rest.strip()),
             )
             self._record_failure(f"OCR route {ocr_backend} cannot start here", first)
+        from bibr.clients.sdk_extras import ocr_backend_extra
+
+        self._ensure_sdk_extra(
+            ocr_backend_extra(ocr_backend), f"OCR_BACKEND={ocr_backend} needs its provider SDK"
+        )
 
     def _step_memory_mode(self) -> None:
         """Say which memory mode bibr picks for a run with these answers.

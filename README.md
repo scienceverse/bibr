@@ -141,8 +141,8 @@ In Jupyter, or anywhere an event loop is already running, use
 Metacheck: [R and Metacheck](https://bibr.org/guides/r/).
 
 **Agents and services.** With `uv add 'bibr[mcp]'`, `bibr mcp` exposes extraction as
-[MCP tools](https://bibr.org/guides/mcp/) for agents such as Claude Code. `uv run bibr serve`
-runs an [HTTP API](https://bibr.org/guides/deployment/).
+[MCP tools](https://bibr.org/guides/mcp/) for agents such as Claude Code. With
+`uv add 'bibr[serve]'`, `uv run bibr serve` runs an [HTTP API](https://bibr.org/guides/deployment/).
 
 **Web demo.** `uv add 'bibr[demo]'`, then `uv run bibr demo` opens the web demo on your
 machine ([Web demo](https://bibr.org/guides/demo/)).
@@ -161,7 +161,8 @@ mode; press Enter to keep it. Answer no, and it proposes what fits your machine:
 - Claude Haiku 5.5 in the cloud, with your Anthropic API key. This sends page images and
   extracted text to Anthropic, and setup asks for your consent first.
 
-Setup writes a `.env` file and can run a one-page test. The
+Setup writes a `.env` file, installs the provider SDK it configures (the Anthropic
+and Google SDKs are the `anthropic` and `google` extras), and can run a one-page test. The
 [model guide](https://bibr.org/guides/extraction-models/) compares the options.
 
 With nothing configured, the content of your papers stays on your machine: fast mode
@@ -169,7 +170,8 @@ calls no LLM, and Crossref lookups happen only with `--crossref`. One thing to w
 key already in your environment counts as a configured LLM. With `GOOGLE_API_KEY` set
 (or `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL` or `LLM_BASE_URL`) and no
 `PIPELINE_MODE` in a `.env` from `bibr setup`, a run switches to full mode and calls
-that LLM; a Google key alone means Google Gemini. `--fast` keeps a run local whatever is
+that LLM; a Google key alone means Google Gemini, which needs the `google` extra
+(`uv add 'bibr[google]'`). `--fast` keeps a run local whatever is
 set, and `bibr chew paper.pdf --dry-run` shows the mode and where each stage runs.
 Details: [What leaves your machine](https://bibr.org/guides/privacy/).
 
@@ -216,7 +218,7 @@ We are grateful to the open-source projects that bibr builds on:
 - [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) (Z.ai / Tsinghua University) — explicit compatibility backend and fallback
 - [Qwen3.5](https://huggingface.co/Qwen) (Alibaba Qwen) — base of bibr's fine-tuned extraction models
 - [GROBID](https://github.com/kermitt2/grobid) — a major source of inspiration for structured scientific document parsing
-- [LitServe](https://lightning.ai/docs/litserve/home) (Lightning AI) — serving infrastructure
+- [FastAPI](https://fastapi.tiangolo.com) and [Uvicorn](https://www.uvicorn.org) — the `bibr serve` HTTP API
 - [PP-DocLayoutV3](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — document layout analysis
 - [wtpsplit](https://github.com/segment-any-text/wtpsplit) — sentence segmentation
 - [Crossref](https://www.crossref.org/) — reference metadata enrichment

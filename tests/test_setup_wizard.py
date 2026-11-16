@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import bibr.setup_wizard as _setup_wizard_module
+from bibr.clients.sdk_extras import module_installed
 from bibr.setup_wizard import (
     FAST_MODE_PROMPT,
     LLM_DEFAULTS,
@@ -178,6 +179,9 @@ def test_fetch_models_anthropic():
     assert result == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929"]
 
 
+@pytest.mark.skipif(
+    not module_installed("google.genai"), reason="needs the google extra (google-genai)"
+)
 def test_fetch_models_google():
     """_fetch_models for google returns models that support generateContent."""
     mock_model_ok = MagicMock()
@@ -2374,7 +2378,7 @@ def _drive_cloud_setup(monkeypatch, tmp_path, wizard, *, first_key, retry_key):
         return kwargs.get("default", "")
 
     def fake_confirm(prompt, *args, **kwargs):
-        if "extras now" in prompt:
+        if "recommended extras" in prompt:
             return False
         if "LLM connection" in prompt:
             return True
@@ -2433,7 +2437,7 @@ def test_cloud_retry_skipped_write_leaves_env_alone(tmp_path, monkeypatch):
         return prompts.get(prompt, kwargs.get("default", ""))
 
     def fake_confirm(prompt, *args, **kwargs):
-        if "extras now" in prompt:
+        if "recommended extras" in prompt:
             return False
         if "LLM connection" in prompt:
             return True

@@ -1754,7 +1754,7 @@ class LLMClient:
 
         The probe used to be a *synchronous* ``redis.Redis.ping()`` inside the
         ``limiter`` property, reached from a coroutine. ``bibr serve`` runs one
-        LitServe worker with ``enable_async=True``, so a single event loop
+        inference worker, so a single event loop
         serves every concurrent request: a Redis that accepts the connection
         but never answers froze the whole worker, not just the caller — every
         in-flight paper stalled together (measured at 5.1 s of total freeze

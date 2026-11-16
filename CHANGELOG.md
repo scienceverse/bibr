@@ -112,8 +112,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `validation_report.json` a batch run writes without a warning, and exit 1,
   writing nothing, when no export was read; a paper given in place of an
   export is named as one.
-- `bibr serve` shuts down on SIGTERM the way it does on Ctrl-C; the API and
-  worker processes used to keep serving.
+- `bibr serve` shuts down on SIGTERM (`kill`, `docker stop`) the way it does on
+  Ctrl-C; under LitServe the API and worker processes kept serving.
 - The web demo is rearranged around the result: a paper card (title, authors,
   journal, DOI, abstract), five tabs with empty states, a references table
   that wraps, plain wording for modes and stages, and a start-up banner with
@@ -132,6 +132,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Windows and GPU, R, Web demo, Installation and Troubleshooting pages. The
   configuration guide starts with the settings most people touch and a mode
   table, and its runtime internals moved to Local model runtime.
+- In a local `bibr batch` on the streaming path (a cloud LLM or a fast run,
+  memory mode not `aggressive`), a chunk starts once the chunk before it has
+  read its last page, instead of after that chunk's last paper is exported.
+  The page reading no longer idles at each chunk boundary while the chunk
+  before finishes its last papers (about 10 s per boundary for a fast run of
+  8-paper chunks on 8 CPU cores). At most two chunks are in flight, they
+  share the limit of two files in the later stages, and verdicts are still
+  written chunk by chunk in order. `PIPELINE_OVERLAP_CHUNKS=false` turns it
+  off. Ctrl-C now records every chunk in flight as `interrupted`, and a model
+  override that stops the run also stops the chunk running beside it, whose
+  papers are recorded `model_override_failed` and run again on resume.
+- **The Google and Anthropic SDKs are extras, not core dependencies.** `google`
+  installs `google-genai` and `jsonref` (`LLM_PROVIDER=google`, the provider a run
+  without a `.env` uses, and `OCR_BACKEND=gemini`); `anthropic` installs the
+  anthropic SDK below 1.0 (`LLM_PROVIDER=anthropic`, `OCR_BACKEND=anthropic`).
+  `batch` now means `bibr[anthropic]`, and `all` includes both. A core install
+  keeps LLM extraction through any OpenAI-compatible endpoint, since Instructor
+  stays core and brings the openai SDK.
+  - **Migration:** `pip install bibr` followed by a Gemini or Claude run now
+    stops before any work: `bibr chew`, `bibr.chew()`, `bibr doctor` and
+    `--dry-run` name the missing extra and the command that installs it (`pip
+    install "bibr[google]"`). `bibr setup` installs the extra for the provider or
+    cloud OCR backend you pick. The serve image installs both. A fast run, `--no-llm`
+    and the local model servers need neither.
+- **`bibr serve` no longer runs on LitServe.** The HTTP API is a FastAPI app
+  under uvicorn, and bibr starts and watches its one inference worker itself
+  (`bibr/serve/worker.py`). Requests, responses and status codes are unchanged:
+  a worker error keeps its status and detail, any other worker failure is a
+  generic `500`, a request that waited past `PIPELINE_TIMEOUT` for the worker is
+  a `504`, bodies over the cap are a `413`, and responses from 1000 bytes are
+  gzipped. LitServe's undocumented `GET /info` route is gone (it answers `404`,
+  or `401` without the bearer when auth is on), and `GET /` answers with the
+  paths bibr serves in place of LitServe's bare text. Also gone is LitServe's
+  `LIT_SERVER_API_KEY` and `LIGHTNING_CERT_PEM` handling, which bibr never
+  configured.
+- **The serve stack is an extra.** FastAPI, uvicorn and python-multipart move from
+  the core dependencies to the new `serve` extra, which `all` includes; litserve
+  is no longer installed. `bibr serve` without the extra exits with an install
+  hint (`uv tool install 'bibr[serve]'`). The serve image installs it.
 - Input validation no longer needs the system libmagic library, so a plain
   `pip install bibr` on macOS or Linux works without installing it first.
   Built-in content checks in `bibr/input/sniff.py` identify PDF, DOCX, JATS
@@ -197,6 +236,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   model registry (the 4B model is the default wherever one of its builds fits;
   the 2B model is offered in advanced setup and used on a Mac with too little
   memory for the 4B).
+- **A request no longer hangs when the inference worker dies under it.** Every
+  request in flight on the worker is answered at once with a `503` whose detail
+  has the code `inference_worker_stopped` (which `bibr batch --serve-url`
+  resubmits, as it does a job whose replica died), `/health` answers `503` instead of
+  `ok`, and new requests get a `503` until a worker is ready. With
+  `PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
+  status 1 for its supervisor to restart; `PIPELINE_RESTART_WORKERS=true`, an
+  unsupported opt-in under LitServe, now starts a new worker in place.
+- Ctrl+C on `bibr serve` lets the requests in flight finish (within uvicorn's
+  30-second graceful shutdown) before the worker stops: the worker no longer
+  takes the terminal's SIGINT itself, and is asked to exit rather than
+  terminated.
 - A fast run's abstract no longer takes in a companion summary printed under
   its own heading (such as Highlights or a Simple Summary), a version in
   another language or script printed right after it, or its own "Abstract"

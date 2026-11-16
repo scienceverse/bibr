@@ -12,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 
 
 def _new_api(tmp_path, *, settings=None):

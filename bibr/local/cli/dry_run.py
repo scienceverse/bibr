@@ -749,7 +749,10 @@ def _dry_run_cloud_credential_blocker() -> str | None:
             return "Groq API key required. Set LLM_API_KEY or GROQ_API_KEY environment variable."
     elif name == "openai" and not llm.api_key and not llm.base_url:
         return "OpenAI API key required. Set LLM_API_KEY environment variable."
-    return None
+    from bibr.clients.sdk_extras import missing_llm_sdk
+
+    # The adapters' next check: the provider's SDK extra is installed.
+    return missing_llm_sdk(name)
 
 
 def _dry_run_blockers(config, files: list, missing_count: int) -> list[str]:

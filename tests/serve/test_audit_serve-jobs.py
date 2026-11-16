@@ -718,10 +718,10 @@ def test_a_small_result_is_left_to_the_middleware():
         asyncio.run(client.app.state.upload_store.close())
 
 
-def test_litserves_gzip_middleware_passes_the_compressed_result_through():
+def test_the_apps_gzip_middleware_passes_the_compressed_result_through():
     payload = _large_result()
     client = _client(MemoryJobStore(), tracker=_FakeTracker(result=payload))
-    client.app.add_middleware(GZipMiddleware, minimum_size=1000)  # what LitServe installs
+    client.app.add_middleware(GZipMiddleware, minimum_size=1000)  # what build_server installs
     try:
         with client:
             job_id = _post(client).json()["job_id"]

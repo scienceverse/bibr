@@ -1,29 +1,19 @@
-"""``GET /`` points at the docs, the ready line names the URLs, SIGTERM shuts down.
-
-The SIGTERM test stands in for LitServe's run loop: the handler must turn the
-signal into the ``KeyboardInterrupt`` LitServe already shuts its workers down on,
-and put the previous handler back afterwards.
-"""
+"""``GET /`` points at the docs, the ready line names the URLs, SIGTERM shuts down."""
 
 from __future__ import annotations
 
 import os
 import signal
-import time
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
-from bibr.serve.app import (
-    INDEX_PAYLOAD,
-    _announce_when_listening,
-    _display_base_url,
-    _sigterm_stops_gracefully,
-)
+from bibr.serve.app import INDEX_PAYLOAD, _display_base_url, _ready_line
 
 
 def _client(monkeypatch, api_key):
-    pytest.importorskip("litserve")
     from bibr.config import Settings
     from bibr.serve.app import build_server
 
@@ -63,32 +53,20 @@ def test_display_base_url(host, url):
     assert _display_base_url(host, 8000) == url
 
 
-def test_ready_line_follows_the_api_server_start(capsys):
-    class _Server:
-        def _start_server(self, *args, **kwargs):
-            print("started", flush=True)
-            return {0: "worker"}
-
-    server = _Server()
-    _announce_when_listening(server, "http://127.0.0.1:8012")
-    assert server._start_server(8012) == {0: "worker"}
-    captured = capsys.readouterr()
-    assert captured.out == "started\n"
-    assert captured.err.startswith("bibr serve is ready: http://127.0.0.1:8012")
-    assert "http://127.0.0.1:8012/docs" in captured.err
+def test_ready_line_names_the_docs_and_health():
+    line = _ready_line("http://127.0.0.1:8012")
+    assert line.startswith("bibr serve is ready: http://127.0.0.1:8012")
+    assert "http://127.0.0.1:8012/docs" in line
+    assert "http://127.0.0.1:8012/health" in line
 
 
-def test_a_server_without_the_hook_is_left_alone():
-    class _Server:
-        pass
+@pytest.mark.skipif(os.name == "nt", reason="sends SIGTERM to a POSIX process")
+def test_sigterm_stops_the_server_and_the_ready_line_came_first():
+    from tests.serve.test_worker_contract import _stub_server_process
 
-    _announce_when_listening(_Server(), "http://127.0.0.1:8012")  # no error
-
-
-def test_sigterm_becomes_a_keyboard_interrupt_and_the_handler_is_restored():
-    before = signal.getsignal(signal.SIGTERM)
-    with pytest.raises(KeyboardInterrupt), _sigterm_stops_gracefully():
-        os.kill(os.getpid(), signal.SIGTERM)
-        time.sleep(5)  # the handler interrupts this
-        pytest.fail("SIGTERM was not turned into KeyboardInterrupt")
-    assert signal.getsignal(signal.SIGTERM) == before
+    with _stub_server_process() as (process, _base):
+        process.send_signal(signal.SIGTERM)
+        # uvicorn re-raises the signal once it has shut down.
+        assert process.wait(timeout=30) == -signal.SIGTERM
+        output = process.stdout.read()
+    assert "bibr serve is ready: http://127.0.0.1:" in output

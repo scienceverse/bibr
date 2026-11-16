@@ -1,7 +1,7 @@
-"""LitServe application entry point — ``bibr serve`` CLI.
+"""HTTP application entry point — ``bibr serve`` CLI.
 
-Builds a single ``litserve.LitServer`` hosting the full bibr pipeline. The
-server exposes:
+Builds a FastAPI app in this process and one spawned inference worker
+(``bibr.serve.worker``) hosting the full bibr pipeline. The server exposes:
   - ``POST /papers/extract``           — multipart upload, returns the bibr JSON schema
   - ``POST /papers/jobs``              — submit an async extraction job (202)
   - ``GET  /papers/jobs/{id}``         — poll job status
@@ -9,7 +9,7 @@ server exposes:
   - ``GET  /papers/jobs/{id}/references`` — its reference list (CSL-JSON, BibTeX, RIS)
   - ``DELETE /papers/jobs/{id}``       — cancel a job that is still queued
   - ``GET  /``                         — where the docs, probes and extract route are
-  - ``GET  /health``                   — LitServe's built-in liveness check
+  - ``GET  /health``                   — liveness: ``ok`` once the inference worker is ready
   - ``GET  /ready``                    — custom readiness probe (OCR + Redis + job store)
 
 Every response carries ``x-request-id`` (echoed from the request when a sane
@@ -19,17 +19,13 @@ the async-job API (``JOBS_ENABLED``) and metering (``METER_ENABLED``) are
 on by default and independently toggleable.
 """
 
-import contextlib
 import functools
 import json
 import logging
 import os
-import signal
 import sys
-import threading
 import time
 import uuid
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -206,28 +202,94 @@ def _check_model_overrides(settings) -> None:
 
 
 def _compose_lifespan_cleanup(app, cleanup) -> None:
-    """Run router and bibr cleanup inside LitServe's custom app lifespan."""
+    """Run bibr's cleanup after the app lifespan, router shutdown handlers included."""
     from contextlib import asynccontextmanager
 
-    litserve_lifespan = app.router.lifespan_context
+    inner = app.router.lifespan_context
 
     @asynccontextmanager
     async def _lifespan(lifespan_app):
-        async with litserve_lifespan(lifespan_app):
-            try:
-                await lifespan_app.router._startup()
+        try:
+            async with inner(lifespan_app):
                 yield
-            finally:
-                try:
-                    await lifespan_app.router._shutdown()
-                finally:
-                    await cleanup()
+        finally:
+            await cleanup()
 
     app.router.lifespan_context = _lifespan
 
 
+#: The host names ``bibr serve`` binds, as before (``validate_bind_auth`` then
+#: decides whether the bind needs an API key).
+_BINDABLE_HOSTS = ("0.0.0.0", "127.0.0.1", "::")  # noqa: S104 - choices, gated by auth
+
+
+class BibrServer:
+    """The built app and the inference worker it dispatches to."""
+
+    def __init__(self, app, worker) -> None:
+        self.app = app
+        self.worker = worker
+
+    def run(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        log_level: str = "info",
+        log_config=None,
+        ready_line: str | None = None,
+    ) -> None:
+        """Bind, start the worker, serve until a signal or a fatal worker exit.
+
+        The socket is bound before the worker loads its models, so a port in
+        use fails at once. A worker that exits with ``PIPELINE_RESTART_WORKERS``
+        off stops the server (exit status 1) after its waiters are answered.
+        *ready_line*, when given, is printed to stderr once the worker is ready.
+        """
+        import uvicorn
+
+        try:
+            port = int(port)
+        except ValueError:
+            raise ValueError(f"port must be a value from 1024 to 65535 but got {port}") from None
+        if not 1024 <= port <= 65535:
+            raise ValueError(f"port must be a value from 1024 to 65535 but got {port}")
+        if host not in _BINDABLE_HOSTS:
+            raise ValueError(f"host must be '0.0.0.0', '127.0.0.1', or '::' but got {host}")
+
+        config = uvicorn.Config(
+            app=self.app,
+            host=host,
+            port=port,
+            log_level=log_level,
+            log_config=log_config,
+            timeout_graceful_shutdown=30,
+        )
+        sock = config.bind_socket()
+        server = uvicorn.Server(config)
+
+        def _fail_stop() -> None:
+            logger.error(
+                "The inference worker died; stopping bibr serve "
+                "(PIPELINE_RESTART_WORKERS=false). Restart it with your supervisor."
+            )
+            server.should_exit = True
+
+        self.worker.on_fatal = _fail_stop
+        try:
+            self.worker.start()
+            if ready_line:
+                print(ready_line, file=sys.stderr, flush=True)
+            server.run(sockets=[sock])
+        finally:
+            self.worker.stop()
+            sock.close()
+        if self.worker.died:
+            raise SystemExit(1)
+
+
 def build_server():
-    """Construct the configured LitServer and clean partial build resources."""
+    """Construct the configured server and clean partial build resources."""
     upload_stores = []
     try:
         return _build_server(upload_stores)
@@ -241,9 +303,8 @@ def build_server():
 
 
 def _build_server(upload_stores):
-    """Construct the configured LitServer instance."""
-    import litserve as ls
-    import litserve.server as litserve_server
+    """Construct the configured app and its (not yet started) inference worker."""
+    from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
     from starlette.middleware.gzip import GZipMiddleware
 
@@ -253,25 +314,15 @@ def _build_server(upload_stores):
     from bibr.serve.deployments.pipeline import BibrPipelineAPI
     from bibr.serve.ingress import (
         GZIP_COMPRESSLEVEL,
-        INTERNAL_INFERENCE_PATH,
+        GZIP_MIN_BYTES,
+        BodySizeLimit,
         InferenceDispatchTracker,
         UploadStore,
         configure_multipart_spooling,
         register_extract_route,
-        resolve_litserve_dispatch,
     )
     from bibr.serve.paths import MCP_MOUNT_PATH
-
-    # LitServe 0.2.17 gates its own MCP connector on the official `mcp` package
-    # being importable (litserve.server._MCP_AVAILABLE) but builds that connector
-    # from the third-party `fastmcp` package: litserve/mcp.py binds `MCPServer`
-    # only when fastmcp is installed, so with bibr's `mcp` extra alone
-    # `server.run()` dies with `NameError: name 'MCPServer' is not defined`
-    # before uvicorn starts. bibr mounts its own endpoint (bibr.serve.mcp) and
-    # never wants LitServe's, so switch the detection off for this process
-    # regardless of what is installed. Must happen before the LitServer is
-    # constructed and before run(): both read the module flag.
-    litserve_server._MCP_AVAILABLE = False
+    from bibr.serve.worker import InferenceWorker
 
     # Fail fast on misconfigured production deployments (missing Redis
     # password / API key, wildcard CORS) before any model loads.
@@ -317,48 +368,41 @@ def _build_server(upload_stores):
         stale_after_seconds=max(Settings.pipeline.timeout + 60, 120),
     )
     upload_stores.append(upload_store)
-    api = BibrPipelineAPI(
-        api_path=INTERNAL_INFERENCE_PATH,
-        enable_async=True,
-        upload_root=upload_store.root,
-        settings=Settings,
-    )
-    server = ls.LitServer(
+    api = BibrPipelineAPI(upload_root=upload_store.root, settings=Settings)
+    # Exactly one inference worker, by design and not by default. One worker
+    # already serves many requests concurrently on its async loop, and the
+    # layout/segmenter GpuBatcher coalesces their GPU work into single forward
+    # passes — a second worker would duplicate the models (~1.5 GB RSS each),
+    # give each its own batcher (so batches shrink as workers rise), and
+    # parallelize only GIL-bound Python, since torch/ONNX intra-op threads
+    # already use every core from one process. Scale with
+    # PIPELINE_MAX_INFLIGHT_REQUESTS and the batch-timeout knobs instead.
+    worker = InferenceWorker(
         api,
-        accelerator="auto",
-        devices=1,
-        # Exactly one inference worker, by design and not by default. One worker
-        # already serves many requests concurrently on the async loop, and the
-        # layout/segmenter GpuBatcher coalesces their GPU work into single
-        # forward passes — a second worker would duplicate the models (~1.5 GB
-        # RSS each), give each its own batcher (so batches shrink as workers
-        # rise), and parallelize only GIL-bound Python, since torch/ONNX
-        # intra-op threads already use every core from one process. Scale with
-        # PIPELINE_MAX_INFLIGHT_REQUESTS and the batch-timeout knobs instead.
-        workers_per_device=1,
-        max_payload_size=max_payload_size,
         timeout=Settings.pipeline.timeout,
-        restart_workers=Settings.pipeline.restart_workers,
+        restart=Settings.pipeline.restart_workers,
     )
+    app = FastAPI()
+    server = BibrServer(app, worker)
+    # Innermost first: gzip (level 6 from 1000 bytes; it compresses on the
+    # event loop, where Starlette's default level 9 takes 2.5x the time), then
+    # the body cap, which also covers bodies sent without a length.
+    app.add_middleware(
+        GZipMiddleware, minimum_size=GZIP_MIN_BYTES, compresslevel=GZIP_COMPRESSLEVEL
+    )
+    app.add_middleware(BodySizeLimit, max_size=max_payload_size)
 
     configure_multipart_spooling(Settings.pipeline.upload_spool_memory_bytes)
-    inference_tracker = InferenceDispatchTracker(
-        dispatch=resolve_litserve_dispatch(server.app),
-        store=upload_store,
-    )
-    server.app.state.upload_store = upload_store
-    server.app.state.inference_tracker = inference_tracker
-    register_extract_route(server.app, upload_store, inference_tracker)
-    _register_index_route(server.app)
-    # LitServe installs GZipMiddleware at Starlette's default level 9, and it
-    # compresses on the event loop. The stack is built on the first request,
-    # so the level can still be lowered here.
-    for middleware in server.app.user_middleware:
-        if middleware.cls is GZipMiddleware:
-            middleware.kwargs["compresslevel"] = GZIP_COMPRESSLEVEL
+    inference_tracker = InferenceDispatchTracker(dispatch=worker.dispatch, store=upload_store)
+    app.state.upload_store = upload_store
+    app.state.inference_tracker = inference_tracker
+    app.state.inference_worker = worker
+    register_extract_route(app, upload_store, inference_tracker)
+    _register_health_route(app, worker)
+    _register_index_route(app)
 
-    # Gate every other route too (/info, /openapi.json, /docs, …) — LitServe
-    # and FastAPI metadata endpoints leak deployment details. Middleware so
+    # Gate every other route too (/openapi.json, /docs, …) — FastAPI's
+    # metadata endpoints leak deployment details. Middleware so
     # future routes are covered by default; only the probe paths stay public.
     # Exceptions raised in middleware bypass FastAPI's handlers, so respond
     # directly instead of raising HTTPException.
@@ -366,11 +410,11 @@ def _build_server(upload_stores):
 
     # This gate is registered before the auth middleware so auth remains
     # outside it in the request stack. Authenticated upload floods are rejected
-    # before Starlette parses multipart bodies or LitServe buffers file bytes.
+    # before Starlette parses multipart bodies.
     from bibr.serve.admission import add_upload_admission
 
     admission_gate = add_upload_admission(
-        server.app,
+        app,
         Settings.pipeline.max_active_uploads,
         # A large /mcp body holds a slot while it is received; the chew tools take
         # their own slot for the extraction (bibr.serve.mcp).
@@ -379,15 +423,13 @@ def _build_server(upload_stores):
         max_body=max_payload_size,
         max_file_size=Settings.pipeline.max_file_size,
     )
-    server.app.state.upload_admission_gate = admission_gate
+    app.state.upload_admission_gate = admission_gate
 
-    @server.app.middleware("http")
+    @app.middleware("http")
     async def _auth_gate(request, call_next):  # pyright: ignore[reportUnusedFunction]
         # Gate on the path the router dispatches, never on request.url, which
         # older Starlette rebuilds from the client's Host header.
         path = route_path(request.scope)
-        if path == INTERNAL_INFERENCE_PATH:
-            return JSONResponse({"detail": "Not Found"}, status_code=404)
         # Keyless (loopback-only) serve: refuse DNS-rebound hosts and cross-site
         # browser requests on every path, /mcp and the probes included.
         refusal = check_keyless_request(request.method, request.headers)
@@ -410,7 +452,7 @@ def _build_server(upload_stores):
 
     _configure_metering_logging(Settings)
 
-    @server.app.middleware("http")
+    @app.middleware("http")
     async def _metering(request, call_next):  # pyright: ignore[reportUnusedFunction]
         if not Settings.metering.enabled or route_path(request.scope) in ("/health", "/ready"):
             return await call_next(request)
@@ -436,7 +478,7 @@ def _build_server(upload_stores):
                     outstanding=getattr(
                         request.state,
                         "inference_outstanding",
-                        server.app.state.inference_tracker.outstanding,
+                        app.state.inference_tracker.outstanding,
                     ),
                 )
             )
@@ -454,7 +496,7 @@ def _build_server(upload_stores):
                 outstanding=getattr(
                     request.state,
                     "inference_outstanding",
-                    server.app.state.inference_tracker.outstanding,
+                    app.state.inference_tracker.outstanding,
                 ),
             )
         )
@@ -470,14 +512,14 @@ def _build_server(upload_stores):
         from bibr.serve.jobs import build_job_store, register_job_routes
 
         job_store = build_job_store(Settings)
-        server.app.state.job_store = job_store
+        app.state.job_store = job_store
         register_job_routes(
-            server.app,
+            app,
             store=job_store,
             upload_store=upload_store,
             tracker=inference_tracker,
         )
-        server.app.router.add_event_handler("shutdown", job_store.close)
+        app.router.add_event_handler("shutdown", job_store.close)
 
     # MCP endpoint (opt-in): streamable-HTTP Model Context Protocol tools at
     # /mcp, riding the same upload store and inference dispatch as
@@ -497,7 +539,7 @@ def _build_server(upload_stores):
                 ) from e
             raise
         mount_mcp(
-            server.app,
+            app,
             Settings,
             upload_store=upload_store,
             tracker=inference_tracker,
@@ -507,7 +549,7 @@ def _build_server(upload_stores):
     # CORS added last so it wraps the auth gate — 401s from it still get
     # Access-Control-Allow-Origin, and preflights short-circuit before auth.
     if Settings.cors.origins:
-        server.app.add_middleware(
+        app.add_middleware(
             CORSMiddleware,
             allow_origins=Settings.cors.origins,
             allow_credentials=_safe_cors_credentials(
@@ -519,7 +561,7 @@ def _build_server(upload_stores):
 
     # Scrub credential-shaped substrings from server logs, including SDK
     # tracebacks logged with exc_info that can embed ?key=… URLs (audit L12).
-    # main() installs the serve sink and keeps LitServe's rebuilt handler covered.
+    # main() installs the serve sink.
     from bibr.serve.logsetup import scrub_library_handlers
 
     scrub_library_handlers()
@@ -532,12 +574,12 @@ def _build_server(upload_stores):
         finally:
             await upload_store.close()
 
-    _compose_lifespan_cleanup(server.app, _close_ingress_resources)
+    _compose_lifespan_cleanup(app, _close_ingress_resources)
     return server
 
 
-#: What ``GET /`` answers: where to go next, in place of LitServe's bare
-#: "litserve running". Paths only, so it says nothing about the deployment.
+#: What ``GET /`` answers: where to go next. Paths only, so it says nothing
+#: about the deployment.
 INDEX_PAYLOAD = {
     "service": "bibr",
     "docs": "/docs",
@@ -551,33 +593,15 @@ INDEX_PAYLOAD = {
 def _register_index_route(app) -> None:
     """Answer ``GET /`` with :data:`INDEX_PAYLOAD`.
 
-    Replaces LitServe's own ``/`` route and keeps its dependencies (LitServe's
-    auth hook) and schema flag. The auth gate middleware treats ``/`` as before:
-    it is not one of the public probe paths.
+    Left out of the OpenAPI schema. The auth gate middleware treats ``/`` like
+    any other route: it is not one of the public probe paths.
     """
     from fastapi.responses import JSONResponse
-    from fastapi.routing import APIRoute
-
-    old = [
-        route
-        for route in app.router.routes
-        if isinstance(route, APIRoute) and route.path == "/" and "GET" in route.methods
-    ]
-    for route in old:
-        app.router.routes.remove(route)
-    dependencies = list(old[0].dependencies) if old else None
-    include_in_schema = old[0].include_in_schema if old else False
 
     async def index() -> JSONResponse:
         return JSONResponse(INDEX_PAYLOAD)
 
-    app.add_api_route(
-        "/",
-        index,
-        methods=["GET"],
-        dependencies=dependencies,
-        include_in_schema=include_in_schema,
-    )
+    app.add_api_route("/", index, methods=["GET"], include_in_schema=False)
 
 
 def _display_base_url(host: str, port: int) -> str:
@@ -589,70 +613,30 @@ def _display_base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def _announce_when_listening(server, base_url: str) -> None:
-    """Print one line with the URLs once the API process is up.
-
-    LitServe starts the API server only after the inference worker has loaded
-    the pipeline, so this line, unlike uvicorn's own "running on", means
-    requests are answered. It wraps LitServe's private ``_start_server``; a
-    LitServe without it just goes without the line.
-    """
-    start = getattr(server, "_start_server", None)
-    if not callable(start):
-        return
-
-    @functools.wraps(start)
-    def _start_and_announce(*args, **kwargs):
-        workers = start(*args, **kwargs)
-        print(
-            f"bibr serve is ready: {base_url}  (API docs {base_url}/docs, "
-            f"health {base_url}/health; Ctrl-C stops it)",
-            file=sys.stderr,
-            flush=True,
-        )
-        return workers
-
-    server._start_server = _start_and_announce
+def _ready_line(base_url: str) -> str:
+    """The line ``bibr serve`` prints once the inference worker is ready."""
+    return (
+        f"bibr serve is ready: {base_url}  (API docs {base_url}/docs, "
+        f"health {base_url}/health; Ctrl-C stops it)"
+    )
 
 
-@contextlib.contextmanager
-def _sigterm_stops_gracefully() -> Iterator[None]:
-    """Treat SIGTERM to ``bibr serve`` like Ctrl-C while the server runs.
+def _register_health_route(app, worker) -> None:
+    """``/health``: plain ``ok`` (200) while the inference worker is ready, else 503."""
+    from fastapi import Response
 
-    LitServe shuts its API server and inference worker down on
-    ``KeyboardInterrupt``, but installs nothing for SIGTERM: ``kill <pid>``
-    (or ``docker stop``) ended the main process at once and left both
-    children serving. The handler raises ``KeyboardInterrupt`` in the main
-    process only; a forked child that inherited it (multiprocessing's manager)
-    dies on SIGTERM as before. Further SIGTERMs are ignored while the shutdown
-    runs. The previous handler is restored afterwards.
-    """
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-    main_pid = os.getpid()
-
-    def _on_sigterm(_signum, _frame):
-        if os.getpid() != main_pid:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        logger.info("SIGTERM received; shutting down")
-        raise KeyboardInterrupt
-
-    previous = signal.signal(signal.SIGTERM, _on_sigterm)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGTERM, previous)
+    @app.get("/health")
+    async def health():  # pyright: ignore[reportUnusedFunction]
+        if worker.ready:
+            return Response(content="ok", status_code=200)
+        return Response(content="not ready", status_code=503)
 
 
 def _register_readiness_route(server, Settings) -> None:
-    """Mount a /ready probe that checks downstream services from the master.
+    """Mount a /ready probe that checks downstream services from the API process.
 
-    Layout/segmenter readiness is covered by LitServe's own worker lifecycle
-    (requests simply queue until workers are ready), so this only probes
+    The server takes connections only once the inference worker is ready
+    (``/health`` reports it), so this only probes
     external dependencies: the OCR server (unless the deployment reads the
     text layer, see ``serve_ocr_route``), Redis (when the cache is enabled),
     and the shared job store (when ``JOBS_STORE=redis``).
@@ -669,6 +653,8 @@ def _register_readiness_route(server, Settings) -> None:
     from bibr.run_mode import resolve_mode
     from bibr.serve.auth import check_bearer
     from bibr.serve.pipeline import serve_ocr_defaults, serve_ocr_route
+
+    app = server.app
 
     # A deployment on the text-layer route has no OCR server to probe, and
     # whatever OCR_BASE_URL holds there is neither validated nor contacted.
@@ -785,7 +771,7 @@ def _register_readiness_route(server, Settings) -> None:
         # The shared job store is a hard dependency of the job routes when it is
         # configured: a replica that cannot reach it answers 503 on every job call,
         # so it must not receive traffic. The memory store needs no probe.
-        job_store = getattr(server.app.state, "job_store", None)
+        job_store = getattr(app.state, "job_store", None)
         if Settings.jobs.enabled and Settings.jobs.store == "redis" and job_store is not None:
             try:
                 await asyncio.wait_for(job_store.ping(), timeout=3.0)
@@ -816,7 +802,7 @@ def _register_readiness_route(server, Settings) -> None:
         # A caller that disconnects must not cancel the round others wait on.
         return await asyncio.shield(probe)
 
-    @server.app.get("/ready")
+    @app.get("/ready")
     async def ready(request: Request):
         # Disclose per-service health + build_sha only to authenticated callers.
         # check_bearer returns None both when auth is disabled (dev, single-tenant)
@@ -870,13 +856,40 @@ def _register_readiness_route(server, Settings) -> None:
         )
 
 
+#: The import names the ``serve`` extra provides, and the packages they come from.
+_SERVE_EXTRA_MODULES = {
+    "fastapi": "fastapi",
+    "uvicorn": "uvicorn",
+    "python_multipart": "python-multipart",
+}
+
+
+def require_serve_extra() -> None:
+    """Stop with an install hint when the ``serve`` extra is not installed."""
+    import importlib.util
+
+    missing = [
+        package
+        for module, package in _SERVE_EXTRA_MODULES.items()
+        if importlib.util.find_spec(module) is None
+    ]
+    if missing:
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            f"bibr serve needs the optional 'serve' dependencies (missing: {', '.join(missing)}) "
+            "— install them with: uv tool install 'bibr[serve]' "
+            "(in a source checkout: uv sync --extra serve; with pip: pip install 'bibr[serve]')."
+        )
+
+
 def main():
     """CLI entry point for ``bibr serve``."""
     import argparse
 
     parser = argparse.ArgumentParser(
         prog="bibr serve",
-        description="bibr HTTP API — scientific paper extraction pipeline (LitServe)",
+        description="bibr HTTP API — scientific paper extraction pipeline",
     )
     parser.add_argument(
         "--host", default="127.0.0.1", help="Host to bind to (default: %(default)s)"
@@ -908,8 +921,9 @@ def main():
     )
 
     args = parser.parse_args()
+    require_serve_extra()
 
-    # The workers (a fresh interpreter each) read the mode from the environment.
+    # The worker (a fresh interpreter) reads the mode from the environment.
     chosen_mode = "fast" if args.fast else "full" if args.full else None
     if chosen_mode:
         os.environ["PIPELINE_MODE"] = chosen_mode
@@ -918,7 +932,7 @@ def main():
 
     from bibr.config import Settings
     from bibr.serve.auth import validate_bind_auth
-    from bibr.serve.logsetup import configure_serve_logging, install_litserve_logging_hook
+    from bibr.serve.logsetup import configure_serve_logging
 
     if chosen_mode:
         # Settings may have been built before the flag was parsed; the master's
@@ -931,7 +945,6 @@ def main():
     # first so every warning below (and every bibr.* record) is formatted and
     # scrubbed rather than falling through logging.lastResort.
     configure_serve_logging(Settings)
-    install_litserve_logging_hook()
 
     validate_bind_auth(args.host, Settings.auth.api_key)
 
@@ -947,18 +960,15 @@ def main():
         )
     logger.info("bibr serving on %s:%d", args.host, args.port)
 
-    # Upload-root ownership, dispatch tracking, admission, readiness state, and
-    # optional jobs are process-local. LitServe otherwise defaults this count to
-    # the inference-worker count, making API processes race over shared cleanup.
-    # log_config=None keeps uvicorn from installing its own handlers, so its
-    # records propagate to the serve sink (formatted, scrubbed) instead.
-    _announce_when_listening(server, _display_base_url(args.host, args.port))
-    with _sigterm_stops_gracefully():
-        server.run(
-            host=args.host,
-            port=args.port,
-            generate_client_file=False,
-            num_api_servers=1,
-            log_level=Settings.SERVE_LOG_LEVEL,
-            log_config=None,
-        )
+    # One API process: upload-root ownership, dispatch tracking, admission,
+    # readiness state and optional jobs are process-local. log_config=None
+    # keeps uvicorn from installing its own handlers, so its records propagate
+    # to the serve sink (formatted, scrubbed) instead. uvicorn handles SIGTERM
+    # as it does Ctrl-C, and the worker is stopped once it has shut down.
+    server.run(
+        host=args.host,
+        port=args.port,
+        log_level=Settings.SERVE_LOG_LEVEL,
+        log_config=None,
+        ready_line=_ready_line(_display_base_url(args.host, args.port)),
+    )

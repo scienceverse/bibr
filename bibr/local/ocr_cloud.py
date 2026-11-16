@@ -164,6 +164,12 @@ class CloudOcrClient:
     _REGION_MIN_TOKENS: ClassVar[int] = 2048
 
     def __init__(self, provider: str = "google", settings=None, **_kw: object):
+        from bibr.clients.sdk_extras import missing_ocr_sdk
+
+        missing = missing_ocr_sdk(provider)
+        if missing:
+            # At startup, not on the first region: the SDK is an optional extra.
+            raise ValueError(missing)
         self._settings = settings if settings is not None else snapshot_settings()
         self._provider = provider
         self._client = None  # lazy-init

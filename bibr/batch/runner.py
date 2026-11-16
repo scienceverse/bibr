@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import errno
 import hashlib
@@ -25,7 +26,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Coroutine, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -399,14 +400,50 @@ class WarmChewMany:
         self._chewer._library_wording = False
         self._stages = local.stages
 
-    def __call__(self, paths: list[Path], batch_size: int) -> list[Any]:
-        progress = None
-        if self._stages:
-            from bibr.pipeline.progress import RichProgress
+    @property
+    def overlaps(self) -> bool:
+        """Whether :meth:`run_overlapped` may start a chunk before the last one ends."""
+        return bool(self._chewer._settings.pipeline.overlap_chunks)
 
-            progress = RichProgress(stages=self._stages)
-        result = self._chewer.chew(list(paths), batch_size=batch_size, progress=progress)
+    def _progress(self) -> Any:
+        if not self._stages:
+            return None
+        from bibr.pipeline.progress import RichProgress
+
+        return RichProgress(stages=self._stages)
+
+    def __call__(self, paths: list[Path], batch_size: int) -> list[Any]:
+        result = self._chewer.chew(list(paths), batch_size=batch_size, progress=self._progress())
         return list(result) if isinstance(result, list) else [result]
+
+    def run_overlapped(self, driver: Callable[[StartChunk], Coroutine[Any, Any, str]]) -> str:
+        """Run ``driver`` on the warm pipeline's loop, with a way to start chunks on it.
+
+        ``driver`` gets ``start(paths, batch_size)``, which starts one chunk as a
+        task and returns it with an event set once the chunk renders no more pages
+        (:data:`bibr.pipeline.stages.render_ocr.FRONT_HALF_DONE`) or has ended.
+        """
+        from bibr.pipeline.stages.render_ocr import FRONT_HALF_DONE
+
+        chewer = self._chewer
+
+        async def chew(paths: list[Path], batch_size: int) -> list[Any]:
+            result = await chewer.achew(
+                list(paths), batch_size=batch_size, progress=self._progress()
+            )
+            return list(result) if isinstance(result, list) else [result]
+
+        def start(
+            paths: list[Path], batch_size: int
+        ) -> tuple[asyncio.Task[list[Any]], asyncio.Event]:
+            front_done = asyncio.Event()
+            context = contextvars.copy_context()
+            context.run(FRONT_HALF_DONE.set, front_done)
+            task = asyncio.create_task(chew(paths, batch_size), context=context)
+            task.add_done_callback(lambda _: front_done.set())
+            return task, front_done
+
+        return chewer._run_sync(lambda: driver(start))
 
     def close(self) -> None:
         self._chewer.close()
@@ -417,8 +454,34 @@ def open_chew_many(local: LocalOptions) -> WarmChewMany:
     return WarmChewMany(local)
 
 
+#: ``start(paths, batch_size)`` of :meth:`WarmChewMany.run_overlapped`.
+StartChunk = Callable[[list[Path], int], "tuple[asyncio.Task[list[Any]], asyncio.Event]"]
+
+
+@dataclass
+class _RunningChunk:
+    """A chunk started by the overlapped loop of :class:`LocalExecutor`."""
+
+    items: Sequence[BatchItem]
+    alone: bool
+    started_at: str
+    t0: float
+    task: asyncio.Task[list[Any]]
+    front_done: asyncio.Event
+    finished_at: str = ""
+    t1: float = 0.0
+
+
 class LocalExecutor:
-    """Chunked, stage-major local processing with per-chunk ledger streaming."""
+    """Chunked, stage-major local processing with per-chunk ledger streaming.
+
+    With a ``chew_many`` that can (:meth:`WarmChewMany.run_overlapped`, on unless
+    ``PIPELINE_OVERLAP_CHUNKS=false``), a chunk starts once the one before it
+    renders no more pages, so its pages are read while that chunk's last files
+    are still parsed and exported. Each chunk still gets its own verdicts, in
+    order, and at most two chunks are in flight. Only the streaming plan says
+    when its pages are done; any other plan runs its chunks one after another.
+    """
 
     def __init__(
         self,
@@ -451,17 +514,38 @@ class LocalExecutor:
 
         Papers whose ids are in *alone* (their last attempt killed the run)
         come last, each in a chunk of its own: one that kills the run again
-        takes no chunk neighbours, and no other paper's turn, with it.
+        takes no chunk neighbours, and no other paper's turn, with it. Such a
+        chunk never overlaps another.
         """
         rest = [item for item in items if item.paper_id not in alone]
         chunks = [rest[i : i + self.batch_size] for i in range(0, len(rest), self.batch_size)]
+        n_together = len(chunks)
         chunks += [[item] for item in items if item.paper_id in alone]
+        run_overlapped = getattr(self._chew_many, "run_overlapped", None)
+        if (
+            len(chunks) > 1
+            and callable(run_overlapped)
+            and getattr(self._chew_many, "overlaps", False)
+        ):
+            try:
+                return run_overlapped(
+                    lambda start: self._run_overlapped(
+                        chunks,
+                        n_together,
+                        start,
+                        on_outcome=on_outcome,
+                        deadline=deadline,
+                        stop=stop,
+                        on_chunk=on_chunk,
+                    )
+                )
+            except KeyboardInterrupt:
+                # Every chunk in flight was recorded as interrupted on the way out.
+                return "interrupted"
         total_chunks = len(chunks)
         for index, chunk in enumerate(chunks, start=1):
-            if stop is not None and stop.is_set():
-                return "stopped"
-            if deadline is not None and self._wall() >= deadline:
-                return "deadline"
+            if (reason := self._stop_reason(stop, deadline)) is not None:
+                return reason
             if on_chunk is not None:
                 on_chunk(index, total_chunks, chunk)
             started_at = utc_now_iso()
@@ -469,68 +553,244 @@ class LocalExecutor:
             try:
                 results = self._chew_many([item.path for item in chunk], len(chunk))
             except KeyboardInterrupt:
-                elapsed = self._clock() - t0
-                finished_at = utc_now_iso()
-                for item in chunk:
-                    on_outcome(
-                        item,
-                        Outcome(
-                            "failed",
-                            error_code=INTERRUPTED,
-                            error="interrupted by user",
-                            started_at=started_at,
-                            finished_at=finished_at,
-                            duration_s=elapsed,
-                        ),
-                    )
+                self._record_interrupted(chunk, started_at, t0, on_outcome)
                 return "interrupted"
             except Exception as raised:  # noqa: BLE001 — sorted below
-                exc = find_model_override_error(raised)
-                if exc is None:
-                    logger.exception("chunk %d/%d crashed", index, total_chunks)
-                    elapsed = self._clock() - t0
-                    finished_at = utc_now_iso()
-                    code = UPSTREAM_UNAVAILABLE if is_service_outage(raised) else CHUNK_ERROR
-                    for item in chunk:
-                        on_outcome(
-                            item,
-                            Outcome(
-                                "failed",
-                                error_code=code,
-                                error=f"{type(raised).__name__}: {raised}",
-                                started_at=started_at,
-                                finished_at=finished_at,
-                                duration_s=elapsed,
-                            ),
-                        )
-                    continue
-                # A model the settings name does not load, or keeps raising: every
-                # later paper would fail the same way, so the run stops; the chunk
-                # never got a verdict, and a resumed run runs it again.
-                finished_at = utc_now_iso()
-                for item in chunk:
-                    on_outcome(
-                        item,
-                        Outcome(
-                            "failed",
-                            error_code=MODEL_OVERRIDE_FAILED,
-                            error=str(exc),
-                            started_at=started_at,
-                            finished_at=finished_at,
-                            duration_s=self._clock() - t0,
-                        ),
-                    )
-                self.fatal = f"Model override problem: {exc}"
-                return "model_override_failed"
-            elapsed = self._clock() - t0
-            finished_at = utc_now_iso()
-            if len(results) != len(chunk):
-                raise RuntimeError(
-                    f"chew_many returned {len(results)} results for {len(chunk)} paths"
+                reason = self._record_raised(
+                    chunk, raised, index, total_chunks, started_at, t0, on_outcome
                 )
-            for item, result in zip(chunk, results, strict=True):
-                on_outcome(item, _local_outcome(result, started_at, finished_at, elapsed))
+                if reason is not None:
+                    return reason
+                continue
+            self._record_results(chunk, results, started_at, utc_now_iso(), t0, on_outcome)
         return "completed"
+
+    def _stop_reason(self, stop: threading.Event | None, deadline: float | None) -> str | None:
+        if stop is not None and stop.is_set():
+            return "stopped"
+        if deadline is not None and self._wall() >= deadline:
+            return "deadline"
+        return None
+
+    async def _run_overlapped(
+        self,
+        chunks: Sequence[Sequence[BatchItem]],
+        n_together: int,
+        start: StartChunk,
+        *,
+        on_outcome: Callable[[BatchItem, Outcome], None],
+        deadline: float | None,
+        stop: threading.Event | None,
+        on_chunk: Callable[[int, int, Sequence[BatchItem]], None] | None,
+    ) -> str:
+        """:meth:`run`'s loop with the next chunk started at the last one's FRONT_HALF_DONE."""
+        total_chunks = len(chunks)
+        running: list[tuple[int, _RunningChunk]] = []
+        interrupted = False
+
+        async def settle_oldest() -> str | None:
+            index, chunk = running[0]
+            await asyncio.wait({chunk.task})
+            running.pop(0)
+            return self._settle(chunk, index, total_chunks, on_outcome)
+
+        try:
+            reason = "completed"
+            for index, items in enumerate(chunks, start=1):
+                alone = index > n_together
+                if running:
+                    last = running[-1][1]
+                    if alone or last.alone:
+                        await asyncio.wait({last.task})
+                    else:
+                        await last.front_done.wait()
+                    if last.task.done() and (stopped := await settle_oldest()) is not None:
+                        return stopped
+                if (early := self._stop_reason(stop, deadline)) is not None:
+                    reason = early
+                    break
+                if on_chunk is not None:
+                    on_chunk(index, total_chunks, items)
+                started_at, t0 = utc_now_iso(), self._clock()
+                task, front_done = start([item.path for item in items], len(items))
+                chunk = _RunningChunk(items, alone, started_at, t0, task, front_done)
+                task.add_done_callback(lambda _, c=chunk: self._mark_done(c))
+                running.append((index, chunk))
+                if len(running) > 1 and (stopped := await settle_oldest()) is not None:
+                    return stopped
+            while running:
+                if (stopped := await settle_oldest()) is not None:
+                    return stopped
+            return reason
+        except asyncio.CancelledError:
+            # Ctrl-C: asyncio.Runner cancels this task and raises KeyboardInterrupt.
+            interrupted = True
+            raise
+        finally:
+            # A chunk still running here was started but will get no verdict of its
+            # own: the run is interrupted, or stops on a model override another
+            # chunk hit. Anything else that escapes leaves it, like a crash would,
+            # to the next run's resume.
+            for _, chunk in running:
+                chunk.task.cancel()
+            if running:
+                await asyncio.gather(*(c.task for _, c in running), return_exceptions=True)
+            for _, chunk in running:
+                if interrupted:
+                    self._record_interrupted(chunk.items, chunk.started_at, chunk.t0, on_outcome)
+                elif self.fatal is not None:
+                    self._record_stopped_by_override(chunk, on_outcome)
+
+    def _mark_done(self, chunk: _RunningChunk) -> None:
+        chunk.finished_at = utc_now_iso()
+        chunk.t1 = self._clock()
+
+    def _settle(
+        self,
+        chunk: _RunningChunk,
+        index: int,
+        total_chunks: int,
+        on_outcome: Callable[[BatchItem, Outcome], None],
+    ) -> str | None:
+        """Record a finished chunk; the reason the run stops, if it does."""
+        if chunk.task.cancelled():
+            self._record_interrupted(chunk.items, chunk.started_at, chunk.t0, on_outcome)
+            return "interrupted"
+        raised = chunk.task.exception()
+        if raised is None:
+            self._record_results(
+                chunk.items,
+                chunk.task.result(),
+                chunk.started_at,
+                chunk.finished_at,
+                chunk.t0,
+                on_outcome,
+                t1=chunk.t1,
+            )
+            return None
+        if not isinstance(raised, Exception):
+            raise raised
+        return self._record_raised(
+            chunk.items,
+            raised,
+            index,
+            total_chunks,
+            chunk.started_at,
+            chunk.t0,
+            on_outcome,
+            finished_at=chunk.finished_at,
+            t1=chunk.t1,
+        )
+
+    def _record_interrupted(
+        self,
+        chunk: Sequence[BatchItem],
+        started_at: str,
+        t0: float,
+        on_outcome: Callable[[BatchItem, Outcome], None],
+    ) -> None:
+        elapsed = self._clock() - t0
+        finished_at = utc_now_iso()
+        for item in chunk:
+            on_outcome(
+                item,
+                Outcome(
+                    "failed",
+                    error_code=INTERRUPTED,
+                    error="interrupted by user",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_s=elapsed,
+                ),
+            )
+
+    def _record_stopped_by_override(
+        self, chunk: _RunningChunk, on_outcome: Callable[[BatchItem, Outcome], None]
+    ) -> None:
+        # Started beside the chunk whose model override failed: the run stops,
+        # and these papers, like that chunk's, are not finished through any
+        # fault of their own; a resumed run runs them again.
+        finished_at = utc_now_iso()
+        for item in chunk.items:
+            on_outcome(
+                item,
+                Outcome(
+                    "failed",
+                    error_code=MODEL_OVERRIDE_FAILED,
+                    error=str(self.fatal),
+                    started_at=chunk.started_at,
+                    finished_at=finished_at,
+                    duration_s=self._clock() - chunk.t0,
+                ),
+            )
+
+    def _record_raised(
+        self,
+        chunk: Sequence[BatchItem],
+        raised: Exception,
+        index: int,
+        total_chunks: int,
+        started_at: str,
+        t0: float,
+        on_outcome: Callable[[BatchItem, Outcome], None],
+        *,
+        finished_at: str | None = None,
+        t1: float | None = None,
+    ) -> str | None:
+        """Record a chunk whose ``chew_many`` raised; the reason the run stops, if it does."""
+        elapsed = (t1 if t1 is not None else self._clock()) - t0
+        finished_at = finished_at or utc_now_iso()
+        exc = find_model_override_error(raised)
+        if exc is None:
+            logger.error("chunk %d/%d crashed", index, total_chunks, exc_info=raised)
+            code = UPSTREAM_UNAVAILABLE if is_service_outage(raised) else CHUNK_ERROR
+            for item in chunk:
+                on_outcome(
+                    item,
+                    Outcome(
+                        "failed",
+                        error_code=code,
+                        error=f"{type(raised).__name__}: {raised}",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        duration_s=elapsed,
+                    ),
+                )
+            return None
+        # A model the settings name does not load, or keeps raising: every
+        # later paper would fail the same way, so the run stops; the chunk
+        # never got a verdict, and a resumed run runs it again.
+        for item in chunk:
+            on_outcome(
+                item,
+                Outcome(
+                    "failed",
+                    error_code=MODEL_OVERRIDE_FAILED,
+                    error=str(exc),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_s=elapsed,
+                ),
+            )
+        self.fatal = f"Model override problem: {exc}"
+        return "model_override_failed"
+
+    def _record_results(
+        self,
+        chunk: Sequence[BatchItem],
+        results: Sequence[Any],
+        started_at: str,
+        finished_at: str,
+        t0: float,
+        on_outcome: Callable[[BatchItem, Outcome], None],
+        *,
+        t1: float | None = None,
+    ) -> None:
+        elapsed = (t1 if t1 is not None else self._clock()) - t0
+        if len(results) != len(chunk):
+            raise RuntimeError(f"chew_many returned {len(results)} results for {len(chunk)} paths")
+        for item, result in zip(chunk, results, strict=True):
+            on_outcome(item, _local_outcome(result, started_at, finished_at, elapsed))
 
 
 def _local_outcome(result: Any, started_at: str, finished_at: str, elapsed: float) -> Outcome:

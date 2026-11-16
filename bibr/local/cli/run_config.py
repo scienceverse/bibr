@@ -438,9 +438,10 @@ def _local_llm_backend_blocker(backend: str) -> str | None:
 def _ocr_candidate_unavailable_reason(backend: str) -> str | None:
     """Cheap, start-nothing check that a managed local OCR runtime can launch.
 
-    Returns ``None`` for backends this function does not vet (HTTP and cloud
-    backends validate themselves at startup) and for runtimes whose launcher
-    and hardware are present. The check itself is the library's
+    Returns ``None`` for backends this function does not vet (HTTP backends
+    validate themselves at startup; a cloud vision backend is checked only for
+    its provider SDK extra) and for runtimes whose launcher and hardware are
+    present. The check itself is the library's
     (:func:`bibr.ocr.registry.local_runtime_unavailable_reason`), which the
     text-layer fallback also asks.
     """

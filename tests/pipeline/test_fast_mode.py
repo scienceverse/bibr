@@ -1592,7 +1592,7 @@ def _export_codes(result) -> list[str]:
 async def test_a_fast_run_end_to_end(tmp_path, monkeypatch):
     from bibr.export import PaperExport
     from bibr.export.json_export import validate_export
-    from bibr.serve.deployments.pipeline import _is_final_result
+    from bibr.serve.final_results import is_final_result as _is_final_result
 
     reached = _count_llm_reaches(monkeypatch)
     result = await fast_page_run(tmp_path, monkeypatch, tagger=PageTagger())
@@ -1676,7 +1676,7 @@ class _BrokenTagger:
 async def test_a_fast_run_whose_tagger_failed_on_the_paper_says_it_did_not_answer(
     tmp_path, monkeypatch
 ):
-    from bibr.serve.deployments.pipeline import _is_final_result
+    from bibr.serve.final_results import is_final_result as _is_final_result
 
     result = await fast_page_run(tmp_path, monkeypatch, tagger=_BrokenTagger())
 
@@ -1691,7 +1691,7 @@ async def test_a_fast_run_whose_tagger_failed_on_the_paper_says_it_did_not_answe
 
 async def test_a_fast_run_whose_tagger_did_not_load_says_so(tmp_path, monkeypatch):
     from bibr.export.json_export import validate_export
-    from bibr.serve.deployments.pipeline import _is_final_result
+    from bibr.serve.final_results import is_final_result as _is_final_result
 
     reached = _count_llm_reaches(monkeypatch)
     result = await fast_page_run(tmp_path, monkeypatch, tagger=None)
@@ -1782,7 +1782,7 @@ async def test_fast_run_with_trained_classifiers_keeps_their_answers_at_the_fast
     tmp_path, monkeypatch
 ):
     from bibr.export.json_export import validate_export
-    from bibr.serve.deployments.pipeline import _is_final_result
+    from bibr.serve.final_results import is_final_result as _is_final_result
 
     reached = _count_llm_reaches(monkeypatch)
 
@@ -1810,7 +1810,7 @@ async def test_fast_run_with_trained_classifiers_keeps_their_answers_at_the_fast
 
 async def test_fast_run_whose_trained_classifiers_did_not_load_is_not_final(tmp_path, monkeypatch):
     from bibr.export.json_export import validate_export
-    from bibr.serve.deployments.pipeline import _is_final_result
+    from bibr.serve.final_results import is_final_result as _is_final_result
 
     reached = _count_llm_reaches(monkeypatch)
     outage = RuntimeError("the bundle is not there")
