@@ -1,4 +1,4 @@
-"""Private, disk-backed handoff for LitServe uploads."""
+"""Private, disk-backed handoff of uploads to the inference worker."""
 
 from __future__ import annotations
 
@@ -25,15 +25,14 @@ from starlette.responses import JSONResponse, Response
 
 from bibr.serve.admission import UploadAdmission
 
-INTERNAL_INFERENCE_PATH = "/_bibr/inference"
 PUBLIC_EXTRACT_PATH = "/papers/extract"
 _CHUNK_SIZE = 64 * 1024
 #: The gzip level for responses: Starlette's default 9 takes about 2.5x the
-#: time of 6 on JSON text for about 2% fewer bytes, and LitServe's
-#: GZipMiddleware compresses on the event loop.
+#: time of 6 on JSON text for about 2% fewer bytes, and GZipMiddleware
+#: compresses on the event loop.
 GZIP_COMPRESSLEVEL = 6
-#: Bodies from this size are gzipped (LitServe's GZipMiddleware minimum_size).
-_GZIP_MIN_BYTES = 1000
+#: Bodies from this size are gzipped (the app's GZipMiddleware minimum_size).
+GZIP_MIN_BYTES = 1000
 FORM_OPTION_MAX_BYTES = 64
 _FORM_OPTION_NAMES = (
     "start_page",
@@ -136,7 +135,7 @@ class InvalidUploadOptionError(ValueError):
 
 
 def configure_multipart_spooling(spool_memory_bytes: int) -> int:
-    """Restore bibr's upload spool bound after LitServe imports Starlette."""
+    """Set Starlette's multipart spool bound to bibr's upload spool setting."""
     from starlette.formparsers import MultiPartParser
 
     threshold = max(1, spool_memory_bytes)
@@ -481,14 +480,36 @@ async def persist_multipart_request(
         raise
 
 
-def resolve_litserve_dispatch(app) -> DispatchCallable:
-    """Return LitServe's sole private inference endpoint closure."""
-    matches = [
-        route for route in app.routes if getattr(route, "path", None) == INTERNAL_INFERENCE_PATH
-    ]
-    if len(matches) != 1 or not callable(getattr(matches[0], "endpoint", None)):
-        raise RuntimeError("LitServe private inference route contract changed")
-    return matches[0].endpoint
+class BodySizeLimit:
+    """Refuse a request whose body grows past ``max_size`` bytes with a 413.
+
+    Counted as the body arrives, so a body sent without a ``Content-Length``
+    (chunked) is capped too. The 413 is raised from the route's body read and
+    rendered by FastAPI as ``{"detail": "Payload too large"}``.
+    """
+
+    def __init__(self, app, *, max_size: int | None = None) -> None:
+        self.app = app
+        self.max_size = max_size
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or self.max_size is None:
+            await self.app(scope, receive, send)
+            return
+        from fastapi import HTTPException
+
+        max_size = self.max_size
+        total = 0
+
+        async def limited_receive():
+            nonlocal total
+            message = await receive()
+            total += len(message.get("body", b""))
+            if total > max_size:
+                raise HTTPException(413, "Payload too large")
+            return message
+
+        await self.app(scope, limited_receive, send)
 
 
 class InferenceDispatchTracker:
@@ -584,7 +605,7 @@ def render_json_response(content: object, accept_encoding: str) -> Response:
 
         response = JSONResponse(jsonable_encoder(content))
     # Starlette's own test for whether the client takes gzip.
-    if "gzip" not in accept_encoding or len(response.body) < _GZIP_MIN_BYTES:
+    if "gzip" not in accept_encoding or len(response.body) < GZIP_MIN_BYTES:
         return response
     return Response(
         gzip.compress(response.body, compresslevel=GZIP_COMPRESSLEVEL),
@@ -598,7 +619,7 @@ def register_extract_route(
     store: UploadStore,
     tracker: InferenceDispatchTracker,
 ) -> None:
-    """Mount the public multipart ingress route around private LitServe dispatch."""
+    """Mount the public multipart ingress route around private worker dispatch."""
 
     @app.post(PUBLIC_EXTRACT_PATH, openapi_extra=MULTIPART_OPENAPI_EXTRA)
     async def extract(  # pyright: ignore[reportUnusedFunction]

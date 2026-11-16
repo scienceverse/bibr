@@ -30,7 +30,7 @@ keeps models warm across calls:
 
 .. code-block:: python
 
-    with bibr.Chewer(ocr="glm-rapid-mlx") as chewer:
+    with bibr.Chewer() as chewer:
         r1 = chewer.chew("a.pdf")
         r2 = chewer.chew("b.pdf")
 
@@ -55,8 +55,17 @@ a :class:`Result` view). Imports are lazy so the pipeline stages and ML deps
 don't load at ``import bibr`` time.
 """
 
+import logging
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
+
+# A library leaves logging to its application (the Python logging HOWTO). Without a
+# handler of its own, a bibr WARNING record in a script or notebook that configured
+# no logging fell through to logging.lastResort and printed bare on stderr — such
+# as the reference-segmentation notes the export already lists in
+# extraction.warnings. The CLI, ``bibr serve`` and anything else that configures
+# logging still receive every record: they propagate to the root logger as before.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 if TYPE_CHECKING:
     from bibr.api import (
@@ -72,6 +81,15 @@ if TYPE_CHECKING:
         chew_many,
     )
     from bibr.config import GlobalSettings, Settings
+    from bibr.exceptions import (
+        BibrError,
+        ConfigurationError,
+        InputFileNotFoundError,
+        InputValidationError,
+        InvalidOptionError,
+        ProcessingError,
+        UpstreamServiceError,
+    )
     from bibr.export import PaperExport
     from bibr.export.citations import write_references
     from bibr.export.tables import write_tables
@@ -84,15 +102,22 @@ except PackageNotFoundError:
     __version__ = "0.0.0-dev"
 
 __all__ = [
+    "BibrError",
     "ChewFailure",
     "Chewer",
+    "ConfigurationError",
     "GlobalSettings",
+    "InputFileNotFoundError",
+    "InputValidationError",
+    "InvalidOptionError",
     "LocalPipeline",
     "PaperExport",
     "Pipeline",
+    "ProcessingError",
     "Records",
     "Result",
     "Settings",
+    "UpstreamServiceError",
     "__version__",
     "achew",
     "achew_file",
@@ -125,6 +150,13 @@ _LAZY = {
     "PaperExport": "bibr.export",
     "Settings": "bibr.config",
     "GlobalSettings": "bibr.config",
+    "BibrError": "bibr.exceptions",
+    "ProcessingError": "bibr.exceptions",
+    "InputValidationError": "bibr.exceptions",
+    "InputFileNotFoundError": "bibr.exceptions",
+    "InvalidOptionError": "bibr.exceptions",
+    "ConfigurationError": "bibr.exceptions",
+    "UpstreamServiceError": "bibr.exceptions",
 }
 
 
@@ -139,4 +171,5 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__))
+    # The public names only: not the helpers this module imports (Any, version, ...).
+    return sorted(__all__)

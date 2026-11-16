@@ -3,7 +3,7 @@
 anthropic 1.0 dropped ``temperature`` from ``messages.create`` and moved to
 httpx2, so every call through the adapter failed: with a ``TypeError`` when it
 carried a temperature, as an unexplained "Connection error." otherwise. The
-``batch`` extra pins the SDK below 1.0.
+``anthropic`` extra (and ``batch``, which includes it) pins the SDK below 1.0.
 """
 
 import sys
@@ -51,12 +51,17 @@ def test_sdk_below_1_0_builds_the_client(monkeypatch, version):
     assert raw.max_retries == 0
 
 
-def test_missing_sdk_is_left_to_instructor(monkeypatch):
-    """Without the SDK the check steps aside: instructor's own error names the package."""
-    raw = SimpleNamespace(max_retries=2, timeout=600.0)
+@pytest.mark.real_cloud_sdks
+def test_missing_sdk_names_the_extra_before_a_client_is_built(monkeypatch):
+    """Without the SDK the adapter names the ``anthropic`` extra, not instructor's import."""
     monkeypatch.setitem(sys.modules, "anthropic", None)  # ``import anthropic`` now fails
-    monkeypatch.setattr("instructor.from_provider", lambda *a, **k: SimpleNamespace(client=raw))
+    monkeypatch.setattr("instructor.from_provider", _never_built)
 
-    _provider().build_client()
+    with pytest.raises(
+        ValueError, match=r"LLM_PROVIDER=anthropic needs the anthropic package"
+    ) as excinfo:
+        _provider().build_client()
 
-    assert raw.max_retries == 0
+    assert 'pip install "bibr[anthropic]"' in str(excinfo.value)
+    # doctor's hint picks "install the package" over "set the key" by this word.
+    assert "key" not in str(excinfo.value).lower()

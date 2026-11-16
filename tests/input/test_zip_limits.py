@@ -69,14 +69,24 @@ def test_bzip2_member_is_refused_before_it_is_read():
 
 
 def test_bzip2_docx_is_corrupted_and_not_sniffed():
-    from bibr.input.validate import _check_docx_corruption, _sniff_zip_mime
+    from bibr.input.sniff import ZIP_MIME, detect_mime_type
+    from bibr.input.validate import _check_docx_corruption
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_BZIP2) as zf:
         zf.writestr("[Content_Types].xml", "<Types/>")
         zf.writestr("word/document.xml", "<document/>")
     assert _check_docx_corruption(buf.getvalue()) is True
-    assert _sniff_zip_mime(buf.getvalue()) == "application/zip"
+    assert detect_mime_type(buf.getvalue()) == ZIP_MIME
+
+
+def test_bzip2_epub_is_not_sniffed_as_epub():
+    from bibr.input.sniff import ZIP_MIME, detect_mime_type
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_BZIP2) as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+    assert detect_mime_type(buf.getvalue()) == ZIP_MIME
 
 
 def test_bzip2_epub_is_rejected():

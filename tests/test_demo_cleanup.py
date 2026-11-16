@@ -17,6 +17,12 @@ import bibr.demo.local_app as local_app
 import bibr.demo.server as server
 
 
+@pytest.fixture(autouse=True)
+def _no_gradio_analytics(monkeypatch):
+    """Building a Blocks would otherwise start Gradio's analytics and version-check threads."""
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
+
+
 @pytest.fixture
 def _stub_pipeline(monkeypatch):
     # LocalPipeline is imported inside create_local_demo; patch it at the source.

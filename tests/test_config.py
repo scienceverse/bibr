@@ -72,7 +72,7 @@ def test_pipeline_default_upload_limit_is_50_mib(monkeypatch):
     assert GlobalSettings().pipeline.max_file_size == 50 * 1024 * 1024
 
 
-def test_pipeline_litserve_hardening_defaults(monkeypatch):
+def test_pipeline_serve_hardening_defaults(monkeypatch):
     monkeypatch.delenv("PIPELINE_MULTIPART_OVERHEAD_BYTES", raising=False)
     monkeypatch.delenv("PIPELINE_RESTART_WORKERS", raising=False)
     from bibr.config import GlobalSettings
@@ -93,18 +93,19 @@ def test_pipeline_multipart_overhead_rejects_negative(monkeypatch):
         GlobalSettings()
 
 
-def test_litserve_dependency_is_bounded_below_03():
+def test_the_serve_stack_is_the_serve_extra():
+    """The HTTP stack installs with bibr[serve] (and bibr[all]), not with core."""
     from importlib.metadata import requires
 
     from packaging.requirements import Requirement
 
-    litserve_requirement = next(
-        Requirement(requirement)
-        for requirement in requires("bibr") or []
-        if Requirement(requirement).name == "litserve"
-    )
+    requirements = [Requirement(r) for r in requires("bibr") or []]
+    core = {r.name for r in requirements if r.marker is None or "extra" not in str(r.marker)}
+    serve = {r.name for r in requirements if r.marker and 'extra == "serve"' in str(r.marker)}
 
-    assert litserve_requirement.specifier == Requirement("litserve>=0.2.16,<0.3").specifier
+    assert {"fastapi", "uvicorn", "python-multipart"} <= serve
+    assert not {"fastapi", "uvicorn", "python-multipart", "litserve"} & core
+    assert "litserve" not in {r.name for r in requirements}
 
 
 def test_build_sha_accepts_full_lowercase_commit_and_affects_cache(monkeypatch):
@@ -437,7 +438,7 @@ def test_front_role_defaults_to_the_published_bundle(monkeypatch):
 
     s = GlobalSettings()
     assert s.ml.front_role_model_id == "scienceverse/bibr-front-role-v1"
-    assert s.ml.front_role_revision == "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b"
+    assert s.ml.front_role_revision == "a1fd66375f44a2db954fd8da66460cd527caca41"
     assert s.ml.front_role_enabled is True
     assert s.ml.front_role_min_confidence == 0.5
     assert s.ml.front_role_masthead_confidence == 0.8

@@ -148,7 +148,14 @@ class AnthropicBatchAdapter:
     @property
     def client(self):
         if self._client is None:
-            import anthropic  # lazy: optional `batch` extra
+            from bibr.clients.sdk_extras import install_hint, module_installed
+
+            if not module_installed("anthropic"):
+                raise ImportError(
+                    "Anthropic Message Batches need the anthropic package (the 'anthropic' "
+                    f"extra, also installed by 'batch'). Install it with: {install_hint('batch')}"
+                )
+            import anthropic  # lazy: optional `anthropic` / `batch` extra
 
             self._client = anthropic.Anthropic(api_key=self._settings.ANTHROPIC_API_KEY)
         return self._client

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import random
@@ -751,3 +752,213 @@ def test_an_override_that_does_not_exist_stops_the_run(corpus, tmp_path, monkeyp
     info = json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
     assert info["reason"] == "model_override_failed"
     assert info["fatal"].startswith("Model override problem: NER_PARSER_CKPT=")
+
+
+# --- overlapped chunks --------------------------------------------------------------
+
+
+class _OverlappingChewMany(_FakeChewMany):
+    """A ``chew_many`` that overlaps: each chunk reads its pages, signals, then finishes.
+
+    ``log`` records each chunk's start and end by its first stem, so the tests
+    can see whether a chunk started before the one before it ended.
+    """
+
+    overlaps = True
+
+    def __init__(self, *, interrupt_after_starts: int | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.log: list[tuple[str, str]] = []
+        self.interrupt_after_starts = interrupt_after_starts
+
+    def run_overlapped(self, driver):
+        starts = 0
+        main: asyncio.Task | None = None
+
+        def start(paths, batch_size):
+            nonlocal starts
+            starts += 1
+            front_done = asyncio.Event()
+            name = paths[0].stem
+
+            async def chew():
+                self.log.append(("start", name))
+                await asyncio.sleep(0)
+                front_done.set()
+                for _ in range(10):  # the back half drains
+                    await asyncio.sleep(0)
+                self.log.append(("end", name))
+                return self(paths, batch_size)
+
+            task = asyncio.create_task(chew())
+            task.add_done_callback(lambda _: front_done.set())
+            if self.interrupt_after_starts == starts and main is not None:
+                asyncio.get_running_loop().call_soon(main.cancel)
+            return task, front_done
+
+        async def run():
+            nonlocal main
+            main = asyncio.current_task()
+            try:
+                return await driver(start)
+            except asyncio.CancelledError:
+                raise KeyboardInterrupt from None  # what asyncio.Runner does on Ctrl-C
+
+        return asyncio.run(run())
+
+
+def _items(corpus: Path) -> list[BatchItem]:
+    return [BatchItem(path=p, paper_id=p.stem, stem=p.stem) for p in sorted(corpus.iterdir())]
+
+
+def test_overlapped_chunks_start_before_the_one_before_ends_and_report_in_order(corpus):
+    fake = _OverlappingChewMany()
+    seen = []
+
+    reason = LocalExecutor(fake, batch_size=2).run(
+        _items(corpus),
+        on_outcome=lambda item, outcome: seen.append((item.paper_id, outcome.status)),
+    )
+
+    assert reason == "completed"
+    assert fake.log == [("start", "bad1"), ("start", "good2"), ("end", "bad1"), ("end", "good2")]
+    assert seen == [("bad1", "failed"), ("good1", "ok"), ("good2", "ok"), ("good3", "ok")]
+    assert [size for _, size in fake.calls] == [2, 2]
+
+
+def test_a_chunk_run_alone_never_overlaps_a_neighbour(corpus):
+    fake = _OverlappingChewMany()
+
+    LocalExecutor(fake, batch_size=2).run(
+        _items(corpus), on_outcome=lambda *_: None, alone={"good1", "good2"}
+    )
+
+    # bad1+good3 together, then good1 and good2 each alone and after the last ended.
+    assert fake.log == [
+        ("start", "bad1"),
+        ("end", "bad1"),
+        ("start", "good1"),
+        ("end", "good1"),
+        ("start", "good2"),
+        ("end", "good2"),
+    ]
+
+
+def test_overlapped_chunks_stay_sequential_when_the_chew_many_does_not_overlap(corpus):
+    fake = _OverlappingChewMany()
+    fake.overlaps = False
+
+    reason = LocalExecutor(fake, batch_size=2).run(_items(corpus), on_outcome=lambda *_: None)
+
+    assert reason == "completed"
+    assert fake.log == []  # run_overlapped was never used
+    assert [size for _, size in fake.calls] == [2, 2]
+
+
+def test_a_model_override_failure_stops_the_run_and_the_chunk_beside_it(corpus):
+    from bibr.batch.ledger import MODEL_OVERRIDE_FAILED
+    from bibr.exceptions import ModelOverrideError
+
+    fake = _OverlappingChewMany(raise_on_call=1, exc=ModelOverrideError("no such model"))
+    seen = []
+    executor = LocalExecutor(fake, batch_size=1)
+
+    reason = executor.run(
+        _items(corpus), on_outcome=lambda item, outcome: seen.append((item.paper_id, outcome))
+    )
+
+    assert reason == "model_override_failed"
+    assert executor.fatal is not None and "no such model" in executor.fatal
+    # bad1 raised; good1 had started beside it and is stopped with it; nothing else ran.
+    assert [pid for pid, _ in seen] == ["bad1", "good1"]
+    assert {o.error_code for _, o in seen} == {MODEL_OVERRIDE_FAILED}
+    assert ("start", "good2") not in fake.log
+
+
+def test_a_crashed_overlapped_chunk_is_a_chunk_error_and_the_run_goes_on(corpus):
+    fake = _OverlappingChewMany(raise_on_call=1, exc=RuntimeError("OCR engine died"))
+    seen = []
+
+    reason = LocalExecutor(fake, batch_size=2).run(
+        _items(corpus), on_outcome=lambda item, outcome: seen.append((item.paper_id, outcome))
+    )
+
+    assert reason == "completed"
+    assert [(pid, o.error_code) for pid, o in seen] == [
+        ("bad1", "chunk_error"),
+        ("good1", "chunk_error"),
+        ("good2", None),
+        ("good3", None),
+    ]
+
+
+def test_stop_lets_the_running_chunk_finish_and_starts_no_other(corpus):
+    import threading
+
+    fake = _OverlappingChewMany()
+    stop = threading.Event()
+    seen = []
+
+    def on_chunk(index, total, chunk):
+        stop.set()  # asked to stop while the first chunk runs
+
+    reason = LocalExecutor(fake, batch_size=2).run(
+        _items(corpus),
+        on_outcome=lambda item, outcome: seen.append((item.paper_id, outcome.status)),
+        stop=stop,
+        on_chunk=on_chunk,
+    )
+
+    assert reason == "stopped"
+    assert fake.log == [("start", "bad1"), ("end", "bad1")]
+    assert seen == [("bad1", "failed"), ("good1", "ok")]
+
+
+def test_ctrl_c_records_every_chunk_in_flight_as_interrupted(corpus):
+    fake = _OverlappingChewMany(interrupt_after_starts=2)
+    seen = []
+
+    reason = LocalExecutor(fake, batch_size=2).run(
+        _items(corpus), on_outcome=lambda item, outcome: seen.append((item.paper_id, outcome))
+    )
+
+    assert reason == "interrupted"
+    assert sorted(pid for pid, _ in seen) == ["bad1", "good1", "good2", "good3"]
+    assert {o.error_code for _, o in seen} == {INTERRUPTED}
+
+
+def test_warm_chew_many_starts_a_chunk_that_can_signal_its_front_half(monkeypatch, tmp_path):
+    from bibr.batch.runner import WarmChewMany
+    from bibr.pipeline.stages.render_ocr import FRONT_HALF_DONE
+
+    class _Settings:
+        class pipeline:  # noqa: N801
+            overlap_chunks = True
+
+    class _Chewer:
+        def __init__(self, **_):
+            self._settings = _Settings()
+
+        async def achew(self, paths, *, batch_size, progress):
+            event = FRONT_HALF_DONE.get()
+            assert event is not None and not event.is_set()
+            event.set()  # what the streaming stage does after its last window
+            await asyncio.sleep(0)
+            return [_Result(_export(Path(p).stem)) for p in paths]
+
+        def _run_sync(self, make):
+            return asyncio.run(make())
+
+    monkeypatch.setattr("bibr.api.Chewer", _Chewer)
+    warm = WarmChewMany(LocalOptions())
+    assert warm.overlaps
+
+    async def driver(start):
+        task, front_done = start([tmp_path / "a.pdf"], 1)
+        await front_done.wait()
+        assert not task.done()
+        results = await task
+        assert FRONT_HALF_DONE.get() is None  # set for the chunk's task only
+        return results[0].data["paper_id"]
+
+    assert warm.run_overlapped(driver) == "a"

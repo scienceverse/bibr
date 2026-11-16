@@ -257,7 +257,7 @@ def render_main_help(version: str, commands: list[tuple[str, str]]) -> str:
         width=max(min(width, 100), 60),
     )
 
-    brand_header(console, f"bibr v{version}", subtitle="scientific paper metadata extraction")
+    brand_header(console, f"bibr v{version}", subtitle="scientific papers to structured JSON")
 
     section(console, "Usage")
     console.print(f"{INDENT}bibr <command> \\[options]")
@@ -272,13 +272,18 @@ def render_main_help(version: str, commands: list[tuple[str, str]]) -> str:
         console.print(f"{INDENT}[cyan]{name:<{name_w}}[/cyan]  {help_text}")
 
     section(console, "Quick start")
-    console.print(f"{INDENT}bibr chew paper.pdf -o result.json")
-    console.print(f"{INDENT}bibr setup")
+    quick_start = (
+        ("bibr chew paper.pdf -o result.json", "extract one paper: no setup, no API key"),
+        ("bibr inspect result.json", "see what came out"),
+        ("bibr setup", "optional: add an LLM, or OCR for scanned PDFs"),
+    )
+    command_w = max(len(command) for command, _ in quick_start)
+    for command, note in quick_start:
+        console.print(f"{INDENT}{command:<{command_w}}  [dim]{note}[/dim]")
 
     console.print()
     console.print(
-        f"[dim]bibr <command> --help shows command details {SEP} "
-        f"bibr --version prints the version[/dim]"
+        f"[dim]bibr <command> --help shows command details {SEP} docs: https://bibr.org[/dim]"
     )
     console.print()
 

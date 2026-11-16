@@ -7,9 +7,12 @@ LLM they configured), so the mode a run takes never depends on which keys happen
 to be set later.
 """
 
+import contextlib
+import dataclasses
 import importlib.metadata
 import importlib.resources as resources
 import importlib.util
+import logging
 import os
 import platform as platform_lib
 import shlex
@@ -19,7 +22,8 @@ import sys
 import tempfile
 import time
 import tomllib
-from collections.abc import Mapping
+import warnings
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -53,14 +57,30 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 EXTRAS = {
-    "ml": "Torch for the local models: GPU/MPS inference and the CRF reference segmenter (the default ONNX models run without it)",
+    "ml": "PyTorch for bibr's local models: runs them on an NVIDIA or Apple GPU and adds the torch-only reference splitter (the default ONNX models run without it)",
     "vllm": "Managed vLLM runtime for PaddleOCR-VL OCR and the local LLM on Linux/CUDA (Python 3.11-3.13)",
     "local": "In-process local OCR/LLM runtime (vllm-mlx) for Apple Silicon",
     "local-mlx": "Local OCR optimized for Apple Silicon Macs",
     "cache": "Response caching for the HTTP API (requires Redis)",
-    "gpu": "GPU ONNX Runtime for layout, sentence splitting, NER and classifiers (NVIDIA CUDA)",
+    "gpu": "GPU ONNX Runtime: runs layout, sentence splitting, reference parsing and classifiers on an NVIDIA card",
     "demo": "Interactive web demo UI",
 }
+
+#: What makes an extra a large download, for the install prompts. Only the
+#: extras whose dependencies are known to be large are listed: torch (ml, and
+#: vllm, which depends on it) and NVIDIA's CUDA and cuDNN wheels (gpu:
+#: ``onnxruntime-gpu[cuda,cudnn]`` in pyproject.toml).
+_LARGE_EXTRAS: dict[str, str] = {
+    "ml": "PyTorch",
+    "vllm": "vLLM and PyTorch",
+    "gpu": "NVIDIA CUDA and cuDNN libraries",
+}
+
+#: The private-server plan's default OCR server URL.
+_PRIVATE_OCR_URL_DEFAULT = "http://localhost:8080"
+
+#: Where to create the key the cloud plan asks for.
+_ANTHROPIC_KEY_URL = "https://platform.claude.com/settings/keys"
 
 # Prints whether the onnxruntime that imports is the GPU build: only its binary
 # registers the CUDA execution provider, with or without a GPU present.
@@ -108,6 +128,7 @@ _OCR_BACKEND_DOWNLOAD_NOTES: dict[str, str] = {
     "glm-llama": "downloads the quantized GLM-OCR weights (~1-2 GB GGUF) on first run",
     "glm-http": "uses your external GLM-OCR server — no local download, but it must "
     "already be running",
+    "text-layer": "reads the PDF's own text layer — no OCR model to download",
     "gemini": "cloud vision OCR — no local model download",
     "openai": "cloud vision OCR — no local model download",
     "anthropic": "cloud vision OCR — no local model download",
@@ -177,8 +198,7 @@ def _available_extras() -> dict[str, str]:
 def _ml_extra_available() -> bool:
     """Best-effort check for the heavy deps that make up the ml extra."""
     return all(
-        importlib.util.find_spec(module) is not None
-        for module in ("torch", "transformers", "cv2", "sklearn", "joblib")
+        importlib.util.find_spec(module) is not None for module in ("torch", "transformers", "cv2")
     )
 
 
@@ -231,6 +251,13 @@ class RecommendedSetup:
     memory_mode: str = "balanced"
     #: Printed when the LLM server test or the smoke test fails.
     fallback_hint: str = ""
+    #: What a paper costs on this plan, where the docs give a figure.
+    cost: str = ""
+    #: Why this plan cannot start on this machine (what ``bibr chew``'s preflight
+    #: would refuse), empty when it can; set by :func:``_plan_blocker``.
+    blocked: str = ""
+    #: What unblocks it: the command or URL to install the missing piece.
+    unblock: str = ""
 
 
 @dataclass(frozen=True)
@@ -417,6 +444,31 @@ def _platform_local_extra(
 _GPU_EXTRA_MIN_COMPUTE_CAPABILITY = 8.0
 
 
+#: The CUDA major version the locked ``onnxruntime-gpu`` (1.26.0) is built for:
+#: its ``cuda`` extra pulls the ``nvidia-*-cu12`` wheels (uv.lock), so the driver
+#: must support CUDA 12.
+_GPU_EXTRA_CUDA_MAJOR = 12
+
+
+def _driver_cuda_version() -> tuple[int, int] | None:
+    """The newest CUDA version the NVIDIA driver supports, or None when it cannot be read.
+
+    Asks the driver itself (``cuDriverGetVersion`` in libcuda, the number torch
+    reports as "found version 12040"); nothing is initialised or started.
+    """
+    import ctypes
+
+    name = "nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1"
+    try:
+        library = ctypes.CDLL(name)
+        version = ctypes.c_int()
+        if library.cuDriverGetVersion(ctypes.byref(version)) != 0:
+            return None
+    except (OSError, AttributeError):
+        return None
+    return version.value // 1000, (version.value % 1000) // 10
+
+
 def _recommends_gpu_extra(sys_platform_name: str, machine: str) -> bool:
     """Whether the recommended plan for an NVIDIA card installs the ``gpu`` extra.
 
@@ -432,13 +484,20 @@ def _recommends_gpu_extra(sys_platform_name: str, machine: str) -> bool:
       that follow 1.26.0 carry no kernels for cards older than Turing. An
       unreadable compute capability counts as Ampere, as in the OCR and LLM
       routing (``bibr.ocr.registry.vllm_compute_capability_blocker``).
+    - A driver that does not support CUDA 12, the CUDA the locked wheel is
+      built for: the GPU build could not load there, so the extra would be a
+      large download for nothing. A driver version ``nvidia-smi`` does not
+      report counts as one that does, as an unreadable compute capability does.
     """
     if sys_platform_name != "linux" or machine != "x86_64":
         return False
     from bibr.ocr import registry
 
     capability = registry._nvidia_compute_capability()
-    return capability is None or capability >= _GPU_EXTRA_MIN_COMPUTE_CAPABILITY
+    if capability is not None and capability < _GPU_EXTRA_MIN_COMPUTE_CAPABILITY:
+        return False
+    driver = _driver_cuda_version()
+    return driver is None or driver[0] >= _GPU_EXTRA_CUDA_MAJOR
 
 
 def _registry_short_label(hf_id: str) -> str | None:
@@ -455,6 +514,129 @@ def _registry_short_label(hf_id: str) -> str | None:
     return None
 
 
+def _local_download_summary(env: Mapping[str, str]) -> str:
+    """The first-run download of a local LLM plan, with the LLM's size from the registry."""
+    hf_id = env.get("LLM_LOCAL_MODEL", "")
+    size = next(
+        (
+            variant.approx_download_gb
+            for model in REGISTRY
+            for variant in model.variants
+            if variant.hf_id == hf_id
+        ),
+        None,
+    )
+    llm = f"the LLM (about {size:.1f} GB)" if size else "the LLM"
+    return f"downloads {llm}, the OCR weights and bibr's own models on first use, once"
+
+
+def _fast_mode_download_summary() -> str | None:
+    """What a fast run downloads on first use, counted as ``bibr chew --dry-run`` counts it.
+
+    The same model list and Hugging Face cache check as the dry run's Models
+    section, for a fast run on a PDF with no OCR route; nothing is fetched.
+    None when the cache cannot be read.
+    """
+    try:
+        from bibr.local.cli.dry_run import (
+            _download_total,
+            _dry_run_model_specs,
+            _dry_run_ref_strategies,
+            _hf_cache_status,
+        )
+        from bibr.local.cli.run_config import ResolvedRunConfig
+        from bibr.ocr.registry import TEXT_LAYER_BACKEND
+
+        config = ResolvedRunConfig(
+            ocr_backend=TEXT_LAYER_BACKEND,
+            memory_mode="balanced",
+            llm_backend="cloud",
+            mode="fast",
+            ocr_requested=False,
+        )
+        seg, parse = _dry_run_ref_strategies(config)
+        specs = _dry_run_model_specs(config, seg, parse, needs_ocr=True)
+        statuses = [_hf_cache_status(repo_id) for _label, repo_id in specs]
+    except Exception:  # noqa: BLE001 — a preview line must never stop setup
+        return None
+    pending = [status for status in statuses if status.startswith("will download")]
+    if pending:
+        return f"downloads {_download_total(pending)} on first use, once"
+    if statuses and all(status in ("cached", "available locally") for status in statuses):
+        return "bibr's models are already downloaded"
+    return None
+
+
+def _plan_blocker(env: Mapping[str, str]) -> tuple[str, str] | None:
+    """``(why, what unblocks it)`` when a local plan cannot start here, else None.
+
+    Asks what ``bibr chew``'s preflight and ``bibr doctor`` ask (the managed LLM
+    backend's launcher and hardware, then the OCR startup chain), so the plan
+    and the first run agree. A missing llama.cpp is named once, with its
+    install hint, whichever half needs it.
+    """
+    from bibr.local.cli.run_config import _local_llm_backend_blocker, _ocr_runtime_blocker
+    from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
+
+    llm_backend = env.get("LLM_BACKEND") or None
+    problems: list[str] = []
+    if llm_backend in _MANAGED_LLM_BACKENDS:
+        problem = _local_llm_backend_blocker(llm_backend)
+        if problem:
+            problems.append(problem)
+    ocr = env.get("OCR_BACKEND") or ""
+    if (
+        ocr
+        and not env.get("OCR_BASE_URL")
+        and ocr not in {TEXT_LAYER_BACKEND, *CLOUD_VISION_OCR_BACKENDS}
+        and not ocr.endswith("-http")
+    ):
+        problem = _ocr_runtime_blocker(ocr, llm_backend=llm_backend)
+        if problem:
+            problems.append(problem)
+    if not problems:
+        return None
+    from bibr.local.llama_cpp import find_llama_server, install_hint
+
+    if find_llama_server() is None and any("llama" in problem for problem in problems):
+        hint = install_hint()
+        return (
+            "llama.cpp (llama-server) is not installed, and bibr does not install it",
+            hint if hint.endswith(".") else f"{hint}.",
+        )
+    first, _, rest = problems[0].partition("\n")
+    return first, rest.strip()
+
+
+_MANAGED_LLM_BACKENDS = ("vllm", "vllm-mlx", "rapid-mlx", "llama-cpp")
+
+
+@contextlib.contextmanager
+def _quiet_internals() -> Iterator[None]:
+    """Keep bibr's and the SDKs' log lines and Python warnings out of the wizard's screen.
+
+    The connection test and the test extraction run the real pipeline, which
+    logs (a traceback for an OCR backend that cannot start, the Instructor
+    retry lines, "Reference section not found") and warns (torch about an old
+    driver). The wizard prints one line of its own for each failure instead.
+    """
+    previous = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        logging.disable(previous)
+
+
+def _ocr_server_answers(url: str) -> bool:
+    """Whether anything answers at the OCR server *url* (``bibr doctor``'s probe)."""
+    from bibr.local.cli.doctor import _probe_ocr_url
+
+    return _probe_ocr_url(url)
+
+
 def _build_recommended_setup(
     *,
     platform_key: str | None = None,
@@ -465,6 +647,7 @@ def _build_recommended_setup(
     allow_cloud: bool = False,
     llama_server: SetupLlamaServer | None = None,
     fast: bool = False,
+    skip_local: bool = False,
 ) -> RecommendedSetup:
     """Build the easy setup recommendation without touching terminal state.
 
@@ -477,6 +660,9 @@ def _build_recommended_setup(
     (``_llama_server_for_card``). When it is not given, PATH is read only when
     the hardware is probed here too (no machine argument given); otherwise
     there is none, so a recommendation for a described machine stays pure.
+
+    ``skip_local`` leaves the local plan out on a machine that could run it, for
+    the private-server and cloud plans offered after the local one is declined.
     """
     probe_machine = (
         platform_key is None
@@ -500,16 +686,23 @@ def _build_recommended_setup(
         from bibr.local.pipeline import _get_system_memory_gb
 
         system_memory_gb = _get_system_memory_gb()
-    from bibr.local.pipeline import _auto_memory_mode
+    from bibr.local.pipeline import _run_memory_mode
 
-    def memory_mode_for(llm_backend: str | None, *, card_in_use: bool = True) -> str:
-        # The runtime's rule: on a CUDA card it depends on whether the LLM
-        # server bibr manages shares the card, and a card nothing of the plan
-        # loads onto is left out (bibr.local.pipeline._cuda_card_stays_empty).
-        if not card_in_use:
-            return _auto_memory_mode(None, None, system_memory_gb)
-        return _auto_memory_mode(
-            platform_key, accelerator_memory_gb, system_memory_gb, llm_backend=llm_backend
+    def memory_mode_for(
+        llm_backend: str | None, ocr_backend: str | None, ocr_url: str | None = None
+    ) -> str:
+        # The rule each run applies (bibr.local.pipeline._run_memory_mode): on a
+        # CUDA card it depends on whether the LLM server bibr manages shares the
+        # card, and a card nothing of the run loads onto, with what is installed
+        # now, is left out (_cuda_card_stays_empty). An extra the plan only
+        # offers changes nothing until it is installed.
+        return _run_memory_mode(
+            platform_key,
+            accelerator_memory_gb,
+            system_memory_gb,
+            llm_backend=llm_backend,
+            ocr_backend=ocr_backend,
+            ocr_url=ocr_url,
         )
 
     base_env = {
@@ -525,12 +718,15 @@ def _build_recommended_setup(
         accelerator_memory_gb is None or accelerator_memory_gb >= 5
     )
     if fast:
-        # No OCR_BACKEND and no LLM settings: the OCR route stays automatic, and a
-        # fast run calls no LLM. Torch (the ml extra) is not needed either.
-        extras = {"demo"}
+        # No OCR_BACKEND and no LLM settings: a fast run reads the PDF text layer
+        # and calls no LLM. Torch (the ml extra) is not needed either; the web
+        # demo is not needed to extract (the closing screen says how to add it).
+        extras: set[str] = set()
         if platform_key == "cuda" and _recommends_gpu_extra(sys_platform_name, machine_name):
             extras.add("gpu")
         local = "a local model, " if viable_local else ""
+        from bibr.ocr.registry import TEXT_LAYER_BACKEND
+
         return RecommendedSetup(
             tier="fast",
             env=base_env,
@@ -540,24 +736,21 @@ def _build_recommended_setup(
                 "no LLM and no key; document contents stay on this machine unless you "
                 "configure a cloud OCR route"
             ),
-            download_summary=(
-                "downloads about 2-3 GB of local layout, sentence, section, reference and "
-                "front-matter models on first use"
-            ),
+            download_summary="downloads bibr's local models on first use, once",
             runtime_summary=(
-                "No LLM calls: nothing to host and no per-paper cost, on the CPU or, with "
-                "the gpu extra, on an NVIDIA card."
+                "No LLM: nothing to host and no per-paper cost. An LLM would check what "
+                "the local rules approximate (front matter, funders, affiliations, "
+                "citation links) and find sections a paper does not head."
             ),
             required_prompts=("install_extras", "smoke_test"),
             note=(
                 f"Answer no to add an LLM instead ({local}a private server or Claude in "
-                "the cloud). `bibr setup` or `bibr chew --full` switches later."
+                "the cloud); `bibr setup` switches later."
             ),
-            # A fast run reads the text layer; only the gpu extra puts bibr's
-            # models on the card.
-            memory_mode=memory_mode_for(None, card_in_use="gpu" in extras),
+            # A fast run: no LLM, the text layer.
+            memory_mode=memory_mode_for(None, TEXT_LAYER_BACKEND),
         )
-    if viable_local:
+    if viable_local and not skip_local:
         ocr_backend = "paddle"
         env = {**base_env, "OCR_BACKEND": ocr_backend}
         pair_card = _llama_pair_card(platform_key, accelerator_memory_gb, sys_platform_name)
@@ -594,7 +787,7 @@ def _build_recommended_setup(
                 ocr_backend = "glm-llama"
                 env["OCR_BACKEND"] = ocr_backend
                 ocr_on_llama_cpp = True
-        runtime = "Fully local runs can be slow and may download several GB."
+        runtime = "Fully local runs can be slow."
         note = fallback_hint = ""
         if pair_card and llama_server.rejected:
             from rich.markup import escape
@@ -609,18 +802,10 @@ def _build_recommended_setup(
                 "If llama.cpp keeps failing here, `bibr setup --advanced` sets up the 4B "
                 "W4A16 build on vLLM instead."
             )
-        elif sys_platform_name == "win32":
-            from bibr.local.llama_cpp import install_hint
-
+        elif sys_platform_name == "win32" or ocr_on_llama_cpp or llm_on_llama_cpp:
             runtime = (
-                "Uses llama.cpp (llama-server) for OCR and the LLM, which bibr does not "
-                f"install. {install_hint(platform_name='win32')}. Fully local runs can be "
-                "slow and may download several GB."
-            )
-        elif ocr_on_llama_cpp:
-            runtime = (
-                "Uses llama.cpp for OCR/LLM: install a CUDA (or Vulkan) build separately "
-                "and put llama-server on PATH."
+                "OCR and the LLM run on llama.cpp (llama-server), which bibr does not "
+                "install. Fully local runs can be slow."
             )
         elif platform_key == "mlx" and env.get("LLM_BACKEND") == "rapid-mlx":
             runtime = (
@@ -633,14 +818,11 @@ def _build_recommended_setup(
                 "extraction typically takes 15-30+ minutes. This is a known limitation, "
                 "not a hang; OCR-only stages are much faster."
             )
-        extras = {
-            "demo",
-            *_platform_local_extra(
-                sys_platform_name,
-                machine_name,
-                ocr_backend="glm-llama" if ocr_on_llama_cpp else ocr_backend,
-            ),
-        }
+        extras = _platform_local_extra(
+            sys_platform_name,
+            machine_name,
+            ocr_backend="glm-llama" if ocr_on_llama_cpp else ocr_backend,
+        )
         if platform_key == "cuda" and _recommends_gpu_extra(sys_platform_name, machine_name):
             extras.add("gpu")
         if "vllm" in extras and sys.version_info >= (3, 14):
@@ -655,12 +837,12 @@ def _build_recommended_setup(
             extras=extras,
             preset_name="recommended-local",
             privacy_summary="document contents stay on this machine",
-            download_summary="downloads several GB of local OCR, layout, reference, and LLM weights",
+            download_summary=_local_download_summary(env),
             runtime_summary=runtime,
             required_prompts=("install_extras", "smoke_test"),
             note=note,
             fallback_hint=fallback_hint,
-            memory_mode=memory_mode_for(env.get("LLM_BACKEND")),
+            memory_mode=memory_mode_for(env.get("LLM_BACKEND"), env.get("OCR_BACKEND")),
         )
 
     if allow_cloud:
@@ -675,27 +857,41 @@ def _build_recommended_setup(
                 "LLM_PROVIDER": "anthropic",
                 "LLM_MODEL": LLM_DEFAULTS["anthropic"]["model"],
             },
-            extras={"demo"},
+            # The Anthropic SDK is an extra, not a core dependency.
+            extras={"anthropic"},
             preset_name="recommended-cloud",
-            privacy_summary="document contents are sent to the approved cloud provider (Anthropic)",
+            privacy_summary="page images and extracted text are sent to Anthropic",
             download_summary=(
-                "downloads local layout/reference models; cloud OCR/LLM need no local model download"
+                "downloads bibr's local layout and reference models; OCR and the LLM run "
+                "in the cloud"
             ),
             runtime_summary="Usually faster on weak local hardware than fully local processing.",
+            # docs/guides/extraction-models.md; the OCR calls are billed on top.
+            cost=(
+                "about $0.004 a paper for the Claude Haiku 5.5 extraction, plus the page "
+                "images sent for OCR"
+            ),
             required_prompts=("install_extras", "cloud_api_key", "smoke_test"),
-            memory_mode=memory_mode_for(None, card_in_use=False),
+            memory_mode=memory_mode_for("cloud", "anthropic"),
         )
 
     return RecommendedSetup(
         tier="private_server",
         env={**base_env, "OCR_BACKEND": "glm-http"},
-        extras={"demo"},
+        extras=set(),
         preset_name="private-server",
         privacy_summary="document contents stay on your machine or your private server",
-        download_summary="downloads local layout/reference models; OCR/LLM weights live on your server",
-        runtime_summary="Best when this machine is too weak for fully local models.",
+        download_summary=(
+            "downloads bibr's local layout and reference models; the OCR and LLM weights "
+            "live on your servers"
+        ),
+        runtime_summary=(
+            "Needs a GLM-OCR server (vLLM or SGLang) and an OpenAI-compatible LLM server "
+            "that you run."
+        ),
         required_prompts=("install_extras", "private_server_url", "smoke_test"),
-        memory_mode=memory_mode_for(None, card_in_use=False),
+        # The OCR server is behind a URL the user gives next.
+        memory_mode=memory_mode_for("cloud", "glm-http", _PRIVATE_OCR_URL_DEFAULT),
     )
 
 
@@ -960,6 +1156,11 @@ def _select_model(models: list[str], default: str, console: Console) -> str | No
     return selected
 
 
+#: The line that marks a .env as written by setup (a merge only turns off
+#: what an earlier setup wrote when the file carries it).
+_SETUP_HEADER = "# Generated by bibr setup"
+
+
 def _write_env_fresh(path: Path, env_vars: dict[str, str]) -> None:
     """Write a new ``.env`` file with comment section headers."""
     sections: dict[str, list[str]] = {
@@ -1012,7 +1213,7 @@ def _write_env_fresh(path: Path, env_vars: dict[str, str]) -> None:
 
     lines: list[str] = [
         "# bibr environment configuration",
-        "# Generated by bibr setup",
+        _SETUP_HEADER,
         "",
     ]
 
@@ -1155,17 +1356,30 @@ def _reload_settings_in_place() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _global_env_file() -> Path:
+    """``~/.bibr/.env``: the user-wide file bibr reads first, wherever it runs (bibr.config)."""
+    return Path.home() / ".bibr" / ".env"
+
+
 class SetupWizard:
-    def __init__(self) -> None:
+    def __init__(self, *, global_env: bool = False) -> None:
         self.console = Console()
         self.env_vars: dict[str, str] = {}
         self.selected_extras: set[str] = set()
         self._declined_extras: set[str] = set()
         self._extras_installed = False
         self._env_written = False
-        self.env_path = _setup_env_file()
+        self._save_skipped = False
+        self.global_env = global_env
+        self.env_path = _global_env_file() if global_env else _setup_env_file()
         self._warned_env_overrides: set[str] = set()
         self._fallback_hint = ""
+        #: Each check that failed, as ``(what failed, what to do about it)``: the
+        #: closing screen reports them and ``main`` exits non-zero.
+        self.failed_checks: list[tuple[str, str]] = []
+
+    def _record_failure(self, what: str, fix: str = "") -> None:
+        self.failed_checks.append((what, fix))
 
     # ---- public -----------------------------------------------------------
 
@@ -1209,20 +1423,37 @@ class SetupWizard:
         )
 
         if setup.tier == "fully_local":
+            blocker = _plan_blocker(setup.env)
+            if blocker is not None:
+                setup = dataclasses.replace(setup, blocked=blocker[0], unblock=blocker[1])
             self._print_recommendation(setup)
-            if not Confirm.ask("Use this configuration?", default=True):
-                self._handle_decline(fast)
+            question = (
+                "Use this configuration anyway (it cannot run until that is fixed)?"
+                if setup.blocked
+                else "Use this configuration?"
+            )
+            if Confirm.ask(question, default=not setup.blocked):
+                self._finish_recommended_setup(setup)
                 return
-            self._finish_recommended_setup(setup)
-            return
-
-        # Local OCR/LLM models are not viable here, so an LLM needs a server.
-        self.console.print(
-            "\nLocal OCR and LLM models aren't a good fit for this machine's hardware."
-        )
+            # Declining the local plan leaves the other two LLM routes to offer.
+            self.console.print(
+                "\nOther ways to add an LLM: a private server or Claude in the cloud."
+            )
+            private = _build_recommended_setup(
+                platform_key=platform_key,
+                accelerator_memory_gb=accel_gb,
+                system_memory_gb=system_gb,
+                skip_local=True,
+            )
+        else:
+            # Local OCR/LLM models are not viable here, so an LLM needs a server.
+            self.console.print(
+                "\nLocal OCR and LLM models aren't a good fit for this machine's hardware."
+            )
+            private = setup
         if Confirm.ask("Do you have a private OCR/LLM server bibr can use?", default=False):
-            self._print_recommendation(setup)
-            self._finish_recommended_setup(setup)
+            self._print_recommendation(private)
+            self._finish_recommended_setup(private)
             return
 
         # No local, no private server: the only remaining LLM path is the cloud.
@@ -1240,6 +1471,7 @@ class SetupWizard:
             accelerator_memory_gb=accel_gb,
             system_memory_gb=system_gb,
             allow_cloud=True,
+            skip_local=True,
         )
         self._print_recommendation(cloud_setup)
         self._finish_recommended_setup(cloud_setup)
@@ -1263,15 +1495,16 @@ class SetupWizard:
         configuration; only a user who declines that too leaves nothing saved.
         """
         if Confirm.ask("Switch to the advanced wizard for exact control now?", default=True):
-            self.run_advanced()
+            self.run_advanced(handoff=True)
             return
         self.console.print("\nNo LLM route chosen. Fast mode needs none.")
         if Confirm.ask("Set up fast mode instead?", default=True):
             self._finish_recommended_setup(fast)
             return
         self.console.print(
-            "[dim]Nothing was saved. Run [cyan]bibr setup[/cyan] or "
-            "[cyan]bibr setup --advanced[/cyan] when you're ready.[/dim]"
+            "[dim]Nothing was saved. bibr still runs in fast mode with no setup; run "
+            "[cyan]bibr setup[/cyan] or [cyan]bibr setup --advanced[/cyan] when you're "
+            "ready.[/dim]"
         )
 
     def _finish_recommended_setup(self, setup: RecommendedSetup) -> None:
@@ -1286,66 +1519,138 @@ class SetupWizard:
 
         self._collect_required_prompts(setup)
         self._step_write_env(save_preset_name=setup.preset_name, header="Save configuration")
+        if setup.blocked:
+            self._record_failure(f"This plan cannot start here: {setup.blocked}", setup.unblock)
         self._offer_extras_install()
         self._run_validation(setup)
         if "smoke_test" in setup.required_prompts:
-            self._step_smoke_test(header="Test extraction", confirm_default=True)
+            self._step_smoke_test(header="Test extraction", confirm_default=not setup.blocked)
         self._print_done()
 
     def _collect_required_prompts(self, setup: RecommendedSetup) -> None:
         """Gather the credentials/URLs a tier needs, without installing anything."""
         if "private_server_url" in setup.required_prompts:
+            from rich.markup import escape
+
+            self.console.print(
+                "[dim]bibr needs two servers you run: a GLM-OCR server that reads page "
+                "images, for example\n  "
+                f"{escape(_OCR_HTTP_LAUNCH_HINTS['glm-http'])}\nand an OpenAI-compatible "
+                "LLM server (vLLM, SGLang and Ollama serve one).[/dim]"
+            )
             self.env_vars["OCR_BASE_URL"] = Prompt.ask(
-                "Private OCR server URL",
-                default="http://localhost:8080",
+                "GLM-OCR server URL",
+                default=_PRIVATE_OCR_URL_DEFAULT,
             )
             llm_url = Prompt.ask(
-                "Private OpenAI-compatible LLM base URL",
+                "LLM server URL (OpenAI-compatible API)",
                 default="http://localhost:8000/v1",
             )
             self.env_vars["LLM_PROVIDER"] = "openai"
             self.env_vars["LLM_BASE_URL"] = llm_url
             self.env_vars["LLM_API_KEY"] = Prompt.ask(
-                "Private LLM API key (press Enter to keep the 'local' placeholder — "
-                "for servers that require no key)",
+                "LLM server API key (Enter keeps the placeholder 'local', for a server "
+                "that needs none)",
                 password=True,
                 default="local",
             )
             self.env_vars["LLM_MODEL"] = Prompt.ask(
-                "Private LLM model name",
+                "Model name the LLM server serves (bibr's fine-tuned 4B by default)",
                 default="scienceverse/bibr-extract-qwen35-4b",
             )
 
         if "cloud_api_key" in setup.required_prompts:
-            self.env_vars["ANTHROPIC_API_KEY"] = Prompt.ask("Anthropic API key", password=True)
+            self.env_vars["ANTHROPIC_API_KEY"] = self._ask_api_key(
+                "Anthropic API key", where=f"Create one at {_ANTHROPIC_KEY_URL}"
+            )
+
+    def _ask_api_key(self, label: str, *, where: str = "") -> str:
+        """Ask for an API key until one is given: an empty key only fails the first run."""
+        quit_hint = "Press Ctrl+C to quit without saving."
+        while True:
+            key = Prompt.ask(label, password=True, default="", show_default=False).strip()
+            if key:
+                return key
+            ui.warn(
+                self.console,
+                "This route needs an API key; an empty one would fail every run.",
+                hint=f"{where}. {quit_hint}" if where else quit_hint,
+            )
+
+    def _install_command_text(self, extras: set[str]) -> str | None:
+        """The install command for *extras* in this environment, as one shell line."""
+        try:
+            cmd, _label = _install_command_for_extras(
+                extras, cwd=Path.cwd(), uv_bin=shutil.which("uv")
+            )
+        except RuntimeError:
+            return None
+        return shlex.join(cmd)
 
     def _offer_extras_install(self) -> None:
         if not self.selected_extras:
             return
-        if not Confirm.ask(
-            f"Install recommended extras now ({', '.join(sorted(self.selected_extras))})?",
-            default=True,
-        ):
-            self.console.print("[dim]Skipped — re-run `bibr setup` to install them later.[/dim]")
+        from rich.markup import escape
+
+        names = ", ".join(sorted(self.selected_extras))
+        command = self._install_command_text(self.selected_extras)
+        large = [_LARGE_EXTRAS[n] for n in sorted(self.selected_extras) if n in _LARGE_EXTRAS]
+        self.console.print(f"\nRecommended extras: [cyan]{escape(names)}[/cyan]")
+        if command:
+            self.console.print(f"[dim]Installs with:[/dim] [cyan]{escape(command)}[/cyan]")
+        if large:
+            self.console.print(f"[dim]A large download ({escape(', '.join(large))}).[/dim]")
+        if not Confirm.ask(f"Install the recommended extras ({names}) now?", default=not large):
+            later = f": [cyan]{escape(command)}[/cyan]" if command else "."
+            self.console.print(f"[dim]Skipped. Install them later with[/dim]{later}")
             return
         self._install_selected_extras("Recommended setup", config_saved=True)
 
     def _run_validation(self, setup: RecommendedSetup) -> None:
         """Offer the tier-appropriate connectivity check after config is saved."""
         backend = self.env_vars.get("LLM_BACKEND")
-        if backend in ("vllm", "vllm-mlx", "rapid-mlx", "llama-cpp"):
+        if backend in _MANAGED_LLM_BACKENDS:
+            if setup.blocked:
+                self.console.print(
+                    "[dim]Skipped the local server test: the server cannot start until "
+                    "the plan's blocker is fixed.[/dim]"
+                )
+                return
             self._offer_local_server_test()
         elif setup.tier in ("cloud_fallback", "private_server"):
             # The private-server URL, key and model were just collected; a
             # wrong one otherwise passes setup silently and fails the first chew.
             self._offer_llm_connection_test()
+            if setup.tier == "private_server":
+                self._check_ocr_server()
 
-    def run_advanced(self) -> None:
-        self._print_intro(advanced=True)
+    def _check_ocr_server(self) -> None:
+        """Say whether anything answers at the OCR server URL: a GET, no document sent."""
+        from rich.markup import escape
 
-        self._step_extras()
+        url = self.env_vars.get("OCR_BASE_URL", "")
+        if not url:
+            return
+        with self.console.status(f"Checking the OCR server at {escape(url)} …"):
+            answers = _ocr_server_answers(url)
+        if answers:
+            ui.ok(self.console, f"OCR server answers at {escape(url)}")
+            return
+        launch = _OCR_HTTP_LAUNCH_HINTS.get(self.env_vars.get("OCR_BACKEND", ""), "")
+        fix = f"Start it, for example: {launch}" if launch else "Start it, then run bibr doctor"
+        ui.fail(self.console, f"No OCR server answers at {escape(url)}", hint=escape(fix))
+        self._record_failure(f"No OCR server answers at {url}", fix)
+
+    def run_advanced(self, *, handoff: bool = False) -> None:
+        if handoff:
+            # The easy flow's banner and intro are already on the screen.
+            self.console.print("\n[bold]Advanced setup[/bold]")
+        else:
+            self._print_intro(advanced=True)
+
         self._step_llm_provider()
         self._step_test_connection()
+        self._step_extras()
         self._step_external_services()
         self._step_memory_mode()
         self._step_write_env()
@@ -1363,15 +1668,9 @@ class SetupWizard:
         )
         ui.brand_header(self.console, "bibr setup", subtitle=subtitle)
         self.console.print("[dim]press Ctrl+C at any time to quit without saving.[/dim]")
-        self.console.print()
         self.console.print(
             "[yellow]bibr is experimental, and some papers or machines may need "
             "a little tuning.[/yellow]"
-        )
-        self.console.print(
-            "[dim]Setup starts with fast mode: local models only, no LLM and no key. An "
-            "LLM is an optional upgrade; fully local LLM runs can be slow and may download "
-            "several GB.[/dim]"
         )
         self.console.print()
 
@@ -1388,47 +1687,105 @@ class SetupWizard:
         """Print the tier header plus a concrete, itemised plan preview.
 
         Rows are derived from ``setup.env`` (+ the model registry) so the user
-        confirms an explicit plan rather than an opaque label.
+        confirms an explicit plan rather than an opaque label. Two aligned
+        columns: a value that wraps keeps to its column, so the labels stay
+        readable at 80 columns.
         """
+        from rich.padding import Padding
+        from rich.table import Table
+
         tier_label = self._TIER_LABELS.get(setup.tier, setup.tier.replace("_", " "))
         self.console.print(f"\n[bold]Recommended for this machine:[/bold] {tier_label}")
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="dim", no_wrap=True)
+        grid.add_column()
         for label, value in self._plan_rows(setup):
-            self.console.print(ui.kv(label, value))
+            grid.add_row(label, value)
+        self.console.print(Padding(grid, (0, 0, 0, 2)))
         if setup.note:
             self.console.print(f"[dim]{setup.note}[/dim]")
 
     def _plan_rows(self, setup: RecommendedSetup) -> list[tuple[str, str]]:
-        extras = ", ".join(sorted(setup.extras)) or "(none)"
-        return [
+        from rich.markup import escape
+
+        rows = [
             ("OCR", self._plan_ocr_value(setup)),
             ("LLM", self._plan_llm_value(setup)),
-            ("Extras", extras),
+        ]
+        if setup.extras:
+            rows.append(("Extras", self._plan_extras_value(setup)))
+        rows += [
             ("Memory", self._plan_memory_value(setup)),
             ("Privacy", setup.privacy_summary),
-            ("First run", setup.download_summary),
-            ("Speed", setup.runtime_summary),
+            ("First run", self._plan_download_value(setup)),
         ]
+        if setup.cost:
+            rows.append(("Cost", setup.cost))
+        rows.append(("Notes", setup.runtime_summary))
+        if setup.blocked:
+            status = f"[red]blocked[/red] — {escape(setup.blocked)}"
+            if setup.unblock:
+                status += f"\n{escape(setup.unblock)}"
+            rows.append(("Status", status))
+        return rows
+
+    def _plan_extras_value(self, setup: RecommendedSetup) -> str:
+        names = ", ".join(sorted(setup.extras))
+        large = any(name in _LARGE_EXTRAS for name in setup.extras)
+        size = " (a large download)" if large else ""
+        return f"{names}: offered after saving{size}, not installed yet"
+
+    def _plan_download_value(self, setup: RecommendedSetup) -> str:
+        if setup.tier == "fast":
+            return _fast_mode_download_summary() or setup.download_summary
+        return setup.download_summary
 
     def _plan_ocr_value(self, setup: RecommendedSetup) -> str:
         backend = setup.env.get("OCR_BACKEND", "")
         if setup.tier == "fast":
-            return "automatic (bibr picks the route for this machine)"
+            return (
+                "none — reads the PDF's text layer; scanned PDFs need an OCR route "
+                "(bibr doctor lists them)"
+            )
         if setup.tier == "private_server":
-            return f"your configured OCR server ({backend})"
+            return f"your GLM-OCR server ({backend})"
         if setup.tier == "cloud_fallback":
             model = setup.env.get("OCR_VISION_MODEL", "")
             return f"{backend} / {model} (vision, cloud)"
         if backend == "paddle":
-            return "paddle (automatic Paddle-first chain; GLM fallback)"
+            return self._automatic_ocr_value(setup)
         if backend == "glm-llama":
             return "glm-llama (GLM-OCR via llama.cpp, local)"
         return f"{backend} (local OCR)"
+
+    def _automatic_ocr_value(self, setup: RecommendedSetup) -> str:
+        """The automatic chain, named by the route it starts on this machine."""
+        from bibr.config import Settings
+        from bibr.ocr.registry import resolve_backend_candidates
+
+        labels = {
+            "paddle-vllm": "PaddleOCR-VL on vLLM",
+            "glm-llama": "GLM-OCR via llama.cpp",
+            "paddle-rapid-mlx": "PaddleOCR-VL on Rapid-MLX",
+            "paddle-mlx-vlm": "PaddleOCR-VL on MLX-VLM",
+            "glm-rapid-mlx": "GLM-OCR on Rapid-MLX",
+        }
+        try:
+            candidates = resolve_backend_candidates(
+                "paddle", Settings, llm_backend=setup.env.get("LLM_BACKEND")
+            )
+        except Exception:  # noqa: BLE001 — the preview falls back to the chain's name
+            return "paddle (automatic local chain)"
+        names = [labels.get(c.backend, c.backend) for c in candidates]
+        if len(names) == 1:
+            return f"{names[0]}, local (paddle, the automatic chain)"
+        return f"{names[0]}, local; falls back to {', '.join(names[1:])}"
 
     def _plan_llm_value(self, setup: RecommendedSetup) -> str:
         if setup.tier == "fast":
             return "none (fast mode makes no LLM call)"
         if setup.tier == "private_server":
-            return "your OpenAI-compatible server"
+            return "your OpenAI-compatible LLM server"
         if setup.tier == "cloud_fallback":
             provider = setup.env.get("LLM_PROVIDER", "")
             model = setup.env.get("LLM_MODEL", "")
@@ -1439,10 +1796,9 @@ class SetupWizard:
         return f"{name} — {hf_id} via {backend}, local"
 
     def _plan_memory_value(self, setup: RecommendedSetup) -> str:
-        chosen = "chosen for each run; --memory or PIPELINE_MEMORY_MODE overrides"
         if setup.memory_mode == "aggressive":
-            return f"aggressive — models load one at a time to fit limited memory ({chosen})"
-        return f"{setup.memory_mode} ({chosen})"
+            return "aggressive — models load one at a time to fit limited memory"
+        return setup.memory_mode
 
     def _demo_available(self) -> bool:
         """Whether ``bibr demo`` can run: demo extra actually installed this run
@@ -1452,29 +1808,103 @@ class SetupWizard:
             return True
         return importlib.util.find_spec("gradio") is not None
 
-    def _print_done(self) -> None:
-        self.console.print()
-        ui.ok(self.console, "[bold]Setup complete![/bold]")
-        lines = ["\n[dim]You can now run:[/dim]"]
-        if self._demo_available():
-            lines.append("  [cyan]bibr demo[/cyan]               — open the interactive demo")
-        else:
-            lines.append(
-                "  [dim]bibr demo needs the demo extra — install it with[/dim] "
-                "[cyan]uv tool install 'bibr\\[demo]'[/cyan] "
-                "[dim](in a source checkout: uv sync --extra demo)[/dim]"
+    def _scope_line(self) -> str:
+        """Where the saved file applies: what bibr reads, and from which folder."""
+        from rich.markup import escape
+
+        from bibr.config import ENV_FILE_OVERRIDE_VAR
+
+        if os.environ.get(ENV_FILE_OVERRIDE_VAR):
+            return f"bibr reads it while {ENV_FILE_OVERRIDE_VAR} names it."
+        if self.global_env:
+            return (
+                "bibr reads it wherever you run it; a ./.env in the folder you run bibr "
+                "from overrides the settings it also sets."
             )
-        lines.append("  [cyan]bibr chew paper.pdf[/cyan]     — process a paper directly")
-        lines.append("  [cyan]bibr doctor[/cyan]             — validate your setup")
-        lines.append("  [cyan]bibr -h[/cyan]                 — see all available commands")
+        folder = escape(str(self.env_path.parent))
+        return (
+            f"It applies when you run bibr from {folder}. "
+            "[cyan]bibr setup --global[/cyan] saves to ~/.bibr/.env for every folder instead."
+        )
+
+    def _local_env_overrides(self) -> list[str]:
+        """With --global: the saved settings this folder's ./.env sets to other values."""
+        local = Path(".env").absolute()
+        if not self.global_env or not local.is_file() or local == self.env_path.absolute():
+            return []
+        from bibr.env_utils import parse_env
+
+        try:
+            here = parse_env(local)
+        except (OSError, UnicodeDecodeError):
+            return []
+        saved = _with_llm_routing(self.env_vars)
+        return sorted(key for key, value in saved.items() if key in here and here[key] != value)
+
+    def _print_done(self) -> None:
+        from rich.markup import escape
+
+        if self._env_written and (overridden := self._local_env_overrides()):
+            self._record_failure(
+                f"{Path('.env').absolute()} sets {', '.join(overridden)} differently, and "
+                "it wins when bibr runs from this folder",
+                "Remove them from that file, or run bibr setup here without --global",
+            )
+        self.console.print()
+        mode = self.env_vars.get("PIPELINE_MODE")
+        mode_text = f" ({mode} mode)" if mode in ("fast", "full") else ""
+        path = escape(str(self.env_path))
+        if self._env_written:
+            saved = f"Saved to {path}{mode_text}."
+        elif self._save_skipped:
+            saved = f"{path} was left unchanged."
+        else:
+            saved = "Nothing was saved."
+        failed = len(self.failed_checks)
+        if failed:
+            noun = "check" if failed == 1 else "checks"
+            head = "Setup saved, but" if self._env_written else "Setup finished, but"
+            ui.warn(self.console, f"[bold]{head} {failed} {noun} failed.[/bold] {saved}")
+        else:
+            ui.ok(self.console, f"[bold]Setup complete.[/bold] {saved}")
+        if self._env_written:
+            from rich.padding import Padding
+            from rich.text import Text
+
+            scope = Text.from_markup(self._scope_line(), style="dim")
+            self.console.print(Padding(scope, (0, 0, 0, 4)))
+        for what, fix in self.failed_checks:
+            ui.fail(self.console, escape(what), hint=escape(fix))
+
+        rows: list[tuple[str, str]] = []
+        if failed:
+            rows.append(("bibr doctor", "check what failed above"))
+        rows.append(("bibr chew paper.pdf -o result.json", "extract a paper to a JSON file"))
+        rows.append(("bibr chew --sample -o sample.json", "try the sample paper bibr ships"))
+        if not failed:
+            rows.append(("bibr doctor", "check this setup"))
+        if self._demo_available():
+            rows.append(("bibr demo", "open the web demo"))
+        width = max(len(command) for command, _ in rows)
+        lines = ["\n[dim]Next:[/dim]"]
+        lines += [f"  [cyan]{command:<{width}}[/cyan]  — {what}" for command, what in rows]
+        if not self._demo_available():
+            command = self._install_command_text({"demo"})
+            how = f" [cyan]{escape(command)}[/cyan]" if command else " the demo extra"
+            lines.append(f"  [dim]bibr demo, the web demo, needs the demo extra:[/dim]{how}")
         self.console.print("\n".join(lines))
 
     def _step_extras(self) -> None:
-        ui.step(self.console, 1, 6, "Optional extras")
+        ui.step(self.console, 3, 6, "Optional extras")
         self.console.print("These add functionality — skip any you don't need.\n")
 
         for key, desc in _available_extras().items():
-            if Confirm.ask(f"  [cyan]{key}[/cyan] — {desc}", default=False):
+            large = (
+                f" [dim](a large download: {_LARGE_EXTRAS[key]})[/dim]"
+                if key in _LARGE_EXTRAS
+                else ""
+            )
+            if Confirm.ask(f"  [cyan]{key}[/cyan] — {desc}{large}", default=False):
                 self.selected_extras.add(key)
             else:
                 # Remember the decline: step 4 must not install it anyway.
@@ -1484,6 +1914,23 @@ class SetupWizard:
             self._install_selected_extras()
         else:
             self.console.print("[dim]No extras selected.[/dim]")
+
+    def _ensure_sdk_extra(self, extra: str | None, reason: str) -> None:
+        """Install the extra carrying a cloud provider's SDK when it is missing.
+
+        The Google and Anthropic SDKs are extras (``bibr.clients.sdk_extras``):
+        choosing that provider installs its extra, as choosing a local GPU route
+        installs ``ml``. Nothing happens when the SDK is already importable.
+        """
+        from bibr.clients.sdk_extras import missing_packages
+
+        if extra is None or not missing_packages(extra):
+            return
+        self.selected_extras.add(extra)
+        self._install_selected_extras(reason)
+        # The same process lists the provider's models next: let it see the
+        # packages the install just wrote.
+        importlib.invalidate_caches()
 
     def _install_selected_extras(self, reason: str = "", *, config_saved: bool = False) -> None:
         if not self.selected_extras:
@@ -1597,7 +2044,7 @@ class SetupWizard:
         )
 
     def _step_llm_provider(self) -> None:
-        ui.step(self.console, 2, 6, "LLM provider")
+        ui.step(self.console, 1, 6, "LLM provider")
         self.console.print(
             "[dim]none: fast mode, local models only, no LLM and no key (the default).\n"
             "tip: bibr's extraction tasks don't need a frontier model. hosted, the\n"
@@ -1621,13 +2068,20 @@ class SetupWizard:
             return
         self.env_vars["LLM_PROVIDER"] = provider
         defaults = LLM_DEFAULTS[provider]
+        from bibr.clients.sdk_extras import llm_provider_extra
+
+        # Before the model listing, which goes through the provider's SDK.
+        self._ensure_sdk_extra(
+            llm_provider_extra(provider), f"LLM_PROVIDER={provider} needs its provider SDK"
+        )
 
         # --- Collect credentials first (needed for model listing) ---
         api_key = ""
         base_url = ""
 
         if provider in ("google", "openai", "anthropic", "groq"):
-            api_key = Prompt.ask(f"API key for {provider}", password=True)
+            where = f"Create one at {_ANTHROPIC_KEY_URL}" if provider == "anthropic" else ""
+            api_key = self._ask_api_key(f"API key for {provider}", where=where)
             self.env_vars[defaults["key_env"]] = api_key
 
         if provider == "openai":
@@ -1787,7 +2241,7 @@ class SetupWizard:
 
         Settings.llm.local_model = model
         try:
-            with self.console.status(f"Starting local server ({model}) …"):
+            with self.console.status(f"Starting local server ({model}) …"), _quiet_internals():
                 if backend == "vllm":
                     from bibr.local.vllm_llm import VllmLlmServer
 
@@ -1809,18 +2263,34 @@ class SetupWizard:
         except Exception as e:  # noqa: BLE001
             from rich.markup import escape
 
-            ui.error(self.console, f"Local server test failed: {escape(self._redact(str(e)))}")
+            message = self._redact(str(e)).strip().splitlines()
+            ui.error(
+                self.console,
+                f"Local server test failed: {escape(message[0] if message else type(e).__name__)}",
+            )
             self.console.print("[dim]Config kept — fix and retry with `bibr chew`.[/dim]")
             if self._fallback_hint:
                 self.console.print(f"[dim]{self._fallback_hint}[/dim]")
+            self._record_failure("Local LLM server test", "Run bibr doctor")
 
     def _step_test_connection(self) -> None:
-        ui.step(self.console, 3, 6, "Test connection")
+        ui.step(self.console, 2, 6, "Test connection")
 
         if self.env_vars.get("PIPELINE_MODE") == "fast":
             self.console.print("[dim]Fast mode makes no LLM call — nothing to test.[/dim]")
             return
-        if self.env_vars.get("LLM_BACKEND") in ("vllm", "vllm-mlx", "rapid-mlx", "llama-cpp"):
+        if self.env_vars.get("LLM_BACKEND") in _MANAGED_LLM_BACKENDS:
+            blocker = _plan_blocker({"LLM_BACKEND": self.env_vars["LLM_BACKEND"]})
+            if blocker is not None:
+                from rich.markup import escape
+
+                ui.fail(
+                    self.console,
+                    f"This LLM backend cannot start here: {escape(blocker[0])}",
+                    hint=escape(blocker[1]),
+                )
+                self._record_failure(f"LLM backend cannot start here: {blocker[0]}", blocker[1])
+                return
             self._offer_local_server_test()
             return
 
@@ -1837,7 +2307,12 @@ class SetupWizard:
         self._test_local_server()
 
     def _offer_llm_connection_test(self) -> None:
-        """Optionally send one round-trip to the configured cloud LLM, with retry."""
+        """Optionally send one round-trip to the configured LLM, with a retry that fits the failure.
+
+        A rejected key asks for another key; a server that does not answer, at a
+        URL the user typed (a private server, Ollama), asks for the URL again.
+        Each failure is one line plus the hint ``bibr doctor`` gives for it.
+        """
         if not Confirm.ask("Test the LLM connection now?", default=True):
             self.console.print("[dim]Skipped.[/dim]")
             return
@@ -1846,31 +2321,31 @@ class SetupWizard:
 
         from bibr.clients.llm import ping_llm
         from bibr.exceptions import ConfigurationError
+        from bibr.local.cli.doctor import _llm_connection_hint
 
         provider = self.env_vars.get("LLM_PROVIDER", "")
         key_env = LLM_DEFAULTS[provider]["key_env"] if provider in LLM_DEFAULTS else ""
-        api_key = self.env_vars.get(key_env, "") if key_env else ""
-        retried_key = False
+        url_env = (
+            "LLM_OLLAMA_BASE_URL"
+            if provider == "ollama"
+            else "LLM_BASE_URL"
+            if provider == "openai" and self.env_vars.get("LLM_BASE_URL")
+            else ""
+        )
+        changed: set[str] = set()
         self._warn_environment_overrides()
 
         while True:
+            settings = None
             try:
-                with self.console.status("Connecting to LLM …"):
+                settings = _connection_test_settings(self.env_vars)
+                with self.console.status("Connecting to LLM …"), _quiet_internals():
                     # The provider adapter extraction uses, so this sends what
                     # the first ``bibr chew`` will send.
-                    reply = ping_llm(_connection_test_settings(self.env_vars))
+                    reply = ping_llm(settings)
                 ui.ok(self.console, f"Connected — LLM responded: {escape(reply.strip())}")
-                if retried_key and key_env and self._env_written:
-                    # The key first saved to .env was rejected; persist the
-                    # corrected one so .env matches the key just tested.
-                    try:
-                        _merge_env(self.env_path, {key_env: api_key})
-                    except OSError as exc:
-                        self.console.print(
-                            f"[dim]Couldn't save the corrected key to "
-                            f"{self.env_path}: {escape(str(exc))}[/dim]"
-                        )
-                break
+                self._save_corrections(changed)
+                return
             except ConfigurationError as exc:
                 # An invalid value already in .env, ~/.bibr/.env or the
                 # environment, not in the answers: chew stops on it too.
@@ -1882,26 +2357,52 @@ class SetupWizard:
                     "this setup. `bibr chew` stops on it too until it is fixed or "
                     "overwritten; run `bibr doctor` after saving to check again.[/dim]"
                 )
-                break
-            except Exception as exc:
-                msg = self._redact(str(exc))
-                ui.error(self.console, f"Couldn't connect: {escape(msg)}")
-                if provider == "ollama":
-                    # Ollama takes no key; what the user can change is the URL.
-                    if not Confirm.ask("Retry with a different Ollama base URL?", default=True):
-                        self.console.print("[dim]Skipping connection test.[/dim]")
-                        break
-                    self.env_vars["LLM_OLLAMA_BASE_URL"] = Prompt.ask(
-                        "Ollama base URL",
-                        default=self.env_vars.get("LLM_OLLAMA_BASE_URL", "http://localhost:11434"),
-                    )
+                self._record_failure("LLM connection test: a setting is invalid", "Run bibr doctor")
+                return
+            except Exception as exc:  # noqa: BLE001 — every SDK raises its own types
+                lines = self._redact(str(exc)).strip().splitlines()
+                hint = (
+                    _llm_connection_hint(settings)
+                    if settings is not None
+                    else "Check your API key, the model name and your network connection"
+                )
+                ui.error(
+                    self.console,
+                    f"Couldn't connect: {escape(lines[0] if lines else type(exc).__name__)}",
+                    hint=escape(hint),
+                )
+                if key_env and _looks_like_auth_error(exc):
+                    if Confirm.ask("Retry with a different API key?", default=True):
+                        self.env_vars[key_env] = self._ask_api_key("API key")
+                        changed.add(key_env)
+                        continue
+                elif url_env:
+                    label = "Ollama base URL" if provider == "ollama" else "LLM server URL"
+                    if Confirm.ask(f"Retry with a different {label}?", default=True):
+                        self.env_vars[url_env] = Prompt.ask(
+                            label, default=self.env_vars.get(url_env, "")
+                        )
+                        changed.add(url_env)
+                        continue
+                elif Confirm.ask("Try the connection again?", default=False):
                     continue
-                if not key_env or not Confirm.ask("Retry with a different API key?", default=True):
-                    self.console.print("[dim]Skipping connection test.[/dim]")
-                    break
-                api_key = Prompt.ask("API key", password=True)
-                self.env_vars[key_env] = api_key
-                retried_key = True
+                self._save_corrections(changed)
+                self._record_failure("LLM connection test", hint)
+                return
+
+    def _save_corrections(self, keys: set[str]) -> None:
+        """Write the values re-entered during the connection test to the saved .env."""
+        if not keys or not self._env_written:
+            return
+        from rich.markup import escape
+
+        try:
+            _merge_env(self.env_path, {key: self.env_vars[key] for key in sorted(keys)})
+        except OSError as exc:
+            self.console.print(
+                f"[dim]Couldn't save the corrected {', '.join(sorted(keys))} to "
+                f"{escape(str(self.env_path))}: {escape(str(exc))}[/dim]"
+            )
 
     def _step_external_services(self) -> None:
         ui.step(self.console, 4, 6, "Models & external services")
@@ -1915,8 +2416,8 @@ class SetupWizard:
 
         self.console.print(
             "\n[dim]Reference enrichment: look each extracted reference up in\n"
-            "Crossref (and the optional bibr-resolver) to attach DOIs and a\n"
-            "bib_match table. Off by default — it adds network round-trips per\n"
+            "Crossref (and the optional bibr-resolver) to attach the DOI and record\n"
+            "it matches. Off by default — it adds network round-trips per\n"
             "paper. Per-run switches: `bibr chew --crossref` / `--no-crossref`.[/dim]"
         )
         if Confirm.ask("  Enable Crossref reference enrichment?", default=False):
@@ -1937,7 +2438,9 @@ class SetupWizard:
                 self.env_vars["REDIS_PASSWORD"] = redis_pw
 
         # Sentence segmentation model
-        self.console.print("\n[dim]Sentence segmentation model (wtpsplit):[/dim]")
+        self.console.print(
+            "\n[dim]Sentence splitting model (Segment any Text; larger is better but slower):[/dim]"
+        )
         for name, desc in WTPSPLIT_MODELS.items():
             self.console.print(f"  [cyan]{name}[/cyan] — {desc}")
         model = Prompt.ask(
@@ -1948,43 +2451,7 @@ class SetupWizard:
         if model != "sat-6l-sm":
             self.env_vars["WTPSPLIT_MODEL"] = model
 
-        # OCR backend selection
-        default_ocr = "paddle"
-
-        self.console.print("\n[dim]OCR backend:[/dim]")
-        self.console.print(
-            "  [cyan]paddle[/cyan]          — automatic Paddle-first local chain (recommended)\n"
-            "  [cyan]paddle-vllm[/cyan]     — managed Paddle vLLM server\n"
-            "  [cyan]paddle-rapid-mlx[/cyan] — managed Paddle Rapid-MLX (requires OCR smoke)\n"
-            "  [cyan]paddle-mlx-vlm[/cyan]  — managed Paddle MLX-VLM fallback\n"
-            "  [cyan]paddle-http[/cyan]     — external Paddle OCR server\n"
-            "  [cyan]glm-llama[/cyan]      — llama.cpp (native Windows / low VRAM)\n"
-            "  [cyan]glm-rapid-mlx[/cyan]  — Rapid-MLX (recommended for Apple Silicon)\n"
-            "  [cyan]glm-http[/cyan]       — External GLM-OCR server (vLLM, Ollama, etc.)\n"
-            "  [cyan]gemini[/cyan]         — Google Gemini vision (cloud, no local GPU needed)\n"
-            "  [cyan]openai[/cyan]         — OpenAI vision (cloud)\n"
-            "  [cyan]anthropic[/cyan]      — Anthropic vision (cloud)"
-        )
-        ocr_backend = Prompt.ask(
-            "OCR backend",
-            choices=[
-                "paddle",
-                "paddle-vllm",
-                "paddle-rapid-mlx",
-                "paddle-mlx-vlm",
-                "paddle-http",
-                "glm-llama",
-                "glm-rapid-mlx",
-                "glm-http",
-                "gemini",
-                "openai",
-                "anthropic",
-            ],
-            default=default_ocr,
-        )
-        self.env_vars["OCR_BACKEND"] = ocr_backend
-        if ocr_backend in CLOUD_OCR_MODELS:
-            self.env_vars["OCR_VISION_MODEL"] = CLOUD_OCR_MODELS[ocr_backend]
+        self._step_ocr_route()
 
         # Reference parsing strategy (mirrors the ``--refs`` chew flag)
         if self.env_vars.get("PIPELINE_MODE") == "fast":
@@ -2017,7 +2484,7 @@ class SetupWizard:
         # can reach.
         if "ml" not in self.selected_extras and not _ml_extra_available():
             if "ml" in self._declined_extras:
-                # The step-1 answer stands: a hint only, no install, no re-ask.
+                # The extras step's answer stands: a hint only, no install, no re-ask.
                 from rich.markup import escape
 
                 try:
@@ -2028,7 +2495,7 @@ class SetupWizard:
                 except RuntimeError:
                     later = ""
                 self.console.print(
-                    "[dim]Skipped the ml extra (declined in step 1): layout "
+                    "[dim]Skipped the ml extra (declined in step 3): layout "
                     "detection and reference parsing run on the ONNX runtime "
                     f"instead of torch.{later}[/dim]"
                 )
@@ -2041,6 +2508,94 @@ class SetupWizard:
                         "with the ml extra"
                     )
                 self._install_selected_extras(reason)
+
+    def _ocr_menu(self) -> list[tuple[str, str]]:
+        """The OCR routes this platform can run, as ``(name, description)``, the default first."""
+        machine = platform_lib.machine()
+        menu = [
+            (
+                "text-layer",
+                "no OCR model: reads the PDF's own text layer; scanned PDFs are not read",
+            ),
+            ("paddle", "automatic local chain: PaddleOCR-VL first, GLM-OCR as the fallback"),
+        ]
+        if sys.platform == "linux":
+            menu.append(("paddle-vllm", "PaddleOCR-VL on a vLLM server bibr starts (NVIDIA GPU)"))
+        if sys.platform == "darwin" and machine == "arm64":
+            menu += [
+                ("paddle-rapid-mlx", "PaddleOCR-VL on Rapid-MLX (Apple Silicon)"),
+                ("paddle-mlx-vlm", "PaddleOCR-VL on MLX-VLM (Apple Silicon)"),
+                ("glm-rapid-mlx", "GLM-OCR on Rapid-MLX (Apple Silicon)"),
+            ]
+        menu += [
+            ("glm-llama", "GLM-OCR on llama.cpp, which you install (Windows, small GPUs)"),
+            ("paddle-http", "your own PaddleOCR-VL server"),
+            ("glm-http", "your own GLM-OCR server (vLLM, SGLang)"),
+            ("gemini", "Google Gemini vision (cloud: page images leave this machine)"),
+            ("openai", "OpenAI vision (cloud: page images leave this machine)"),
+            ("anthropic", "Anthropic vision (cloud: page images leave this machine)"),
+        ]
+        return menu
+
+    def _ocr_route_blocker(self, backend: str) -> str | None:
+        """Why the local OCR route *backend* cannot start here (``bibr chew``'s preflight), or None."""
+        from bibr.local.cli.run_config import _ocr_runtime_blocker
+        from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
+
+        if backend in {TEXT_LAYER_BACKEND, *CLOUD_VISION_OCR_BACKENDS} or backend.endswith("-http"):
+            return None
+        llm_backend = self.env_vars.get("LLM_BACKEND") or None
+        try:
+            return _ocr_runtime_blocker(backend, llm_backend=llm_backend)
+        except Exception:  # noqa: BLE001 — an unreadable chain is reported by bibr doctor
+            return None
+
+    def _step_ocr_route(self) -> None:
+        """Pick the OCR route; the default is one that can start on this machine."""
+        from rich.markup import escape
+
+        from bibr.ocr.registry import TEXT_LAYER_BACKEND
+
+        fast = self.env_vars.get("PIPELINE_MODE") == "fast"
+        menu = self._ocr_menu()
+        blockers = {name: self._ocr_route_blocker(name) for name, _desc in menu}
+        # Fast mode reads the text layer unless a route is chosen; a full run
+        # gets the automatic local chain where it can start, else the text layer.
+        default = "paddle" if not fast and blockers.get("paddle") is None else TEXT_LAYER_BACKEND
+        width = max(len(name) for name, _desc in menu)
+        self.console.print("\n[dim]OCR route (how bibr reads PDF pages):[/dim]")
+        for name, desc in menu:
+            note = " [yellow](cannot start here)[/yellow]" if blockers[name] else ""
+            mark = " (default)" if name == default else ""
+            self.console.print(f"  [cyan]{name:<{width}}[/cyan] — {desc}{mark}{note}")
+        ocr_backend = Prompt.ask(
+            "OCR route", choices=[name for name, _desc in menu], default=default
+        )
+        if ocr_backend == TEXT_LAYER_BACKEND and fast:
+            # As the easy flow: no route chosen, so a fast run reads the text layer.
+            self.env_vars.pop("OCR_BACKEND", None)
+        else:
+            self.env_vars["OCR_BACKEND"] = ocr_backend
+        if ocr_backend in CLOUD_OCR_MODELS:
+            self.env_vars["OCR_VISION_MODEL"] = CLOUD_OCR_MODELS[ocr_backend]
+        if ocr_backend.endswith("-http"):
+            self.env_vars["OCR_BASE_URL"] = Prompt.ask(
+                "OCR server URL", default=self.env_vars.get("OCR_BASE_URL", "http://localhost:8080")
+            )
+        blocker = blockers.get(ocr_backend)
+        if blocker:
+            first, _, rest = blocker.partition("\n")
+            ui.warn(
+                self.console,
+                f"{escape(ocr_backend)} cannot start on this machine: {escape(first)}",
+                hint=escape(rest.strip()),
+            )
+            self._record_failure(f"OCR route {ocr_backend} cannot start here", first)
+        from bibr.clients.sdk_extras import ocr_backend_extra
+
+        self._ensure_sdk_extra(
+            ocr_backend_extra(ocr_backend), f"OCR_BACKEND={ocr_backend} needs its provider SDK"
+        )
 
     def _step_memory_mode(self) -> None:
         """Say which memory mode bibr picks for a run with these answers.
@@ -2088,55 +2643,150 @@ class SetupWizard:
             self.console.print("[dim]Nothing to save — no settings were collected.[/dim]")
             return
 
+        from rich.markup import escape
+
         self._announce_mode_change()
         if self.env_path.exists():
+            name = self.env_path.name
+            self.console.print(
+                f"[dim]  merge      update the settings this setup chose, keep everything else "
+                f"in the file\n"
+                f"  overwrite  replace the file with this setup's settings only (the old one "
+                f"is kept as {escape(name)}.bak)\n"
+                f"  skip       leave the file as it is and save nothing[/dim]"
+            )
             action = Prompt.ask(
-                f"{self.env_path} already exists — what should I do?",
-                choices=["overwrite", "merge", "skip"],
+                f"{escape(str(self.env_path))} already exists — what should I do?",
+                choices=["merge", "overwrite", "skip"],
                 default="merge",
             )
             if action == "skip":
-                self.console.print("[dim]Skipped — .env unchanged[/dim]")
+                self.console.print(f"[dim]Skipped — {escape(name)} unchanged[/dim]")
+                self._save_skipped = True
                 self._note_mode_not_saved()
                 return
             if action == "merge":
-                memory_pin = self._memory_pin_of_an_earlier_setup()
-                commented = _merge_env(
-                    self.env_path,
-                    _with_llm_routing(self.env_vars),
-                    comment_out=(*_earlier_ocr_route_keys(self.env_vars), *memory_pin),
-                )
-                self._env_written = True
-                ui.ok(self.console, f"Merged new settings into {self.env_path}")
-                if _MEMORY_MODE_KEY in commented:
-                    commented.remove(_MEMORY_MODE_KEY)
-                    self.console.print(
-                        f"[yellow]Commented out {_MEMORY_MODE_KEY}, written by an earlier "
-                        "setup: bibr now chooses the memory mode for each run. Uncomment the "
-                        "line to hold every run to it.[/yellow]"
-                    )
-                if commented:
-                    self.console.print(
-                        f"[yellow]Commented out {', '.join(commented)}, an OCR route from an "
-                        "earlier setup: fast mode reads the PDF's text layer, so document "
-                        "contents stay on this machine. `bibr chew --ocr <route>` picks an "
-                        "OCR route for one run.[/yellow]"
-                    )
+                self._merge_into_existing()
                 self._warn_environment_overrides()
                 if save_preset_name:
                     self._save_preset(save_preset_name)
                 else:
                     self._offer_save_preset()
                 return
+            self._back_up_before_overwrite()
 
+        self.env_path.parent.mkdir(parents=True, exist_ok=True)
         _write_env_fresh(self.env_path, _with_llm_routing(self.env_vars))
         self._env_written = True
-        ui.ok(self.console, f"Wrote {self.env_path}")
+        ui.ok(self.console, f"Wrote {escape(str(self.env_path))}")
         self._warn_environment_overrides()
         if save_preset_name:
             self._save_preset(save_preset_name)
         else:
             self._offer_save_preset()
+
+    def _written_by_setup(self) -> bool:
+        """Whether the existing .env carries the header ``_write_env_fresh`` writes."""
+        try:
+            head = self.env_path.read_text(encoding="utf-8").splitlines()[:5]
+        except (OSError, UnicodeDecodeError):
+            return False
+        return _SETUP_HEADER in head
+
+    def _merge_into_existing(self) -> None:
+        """Merge the answers into the existing .env, turning off only what setup itself wrote.
+
+        In a file setup wrote (its header is there), an earlier setup's OCR
+        route and memory pin are commented out, as fast mode and the per-run
+        memory rule need. In a hand-written file they are the user's own: an
+        OCR route is commented out only when the user says so, and a memory
+        mode stays.
+        """
+        from rich.markup import escape
+
+        from bibr.env_utils import parse_env
+        from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+
+        by_setup = self._written_by_setup()
+        route_keys = _earlier_ocr_route_keys(self.env_vars)
+        memory_pin = self._memory_pin_of_an_earlier_setup() if by_setup else ()
+        if not by_setup and _MEMORY_MODE_KEY not in self.env_vars:
+            try:
+                pinned = parse_env(self.env_path).get(_MEMORY_MODE_KEY)
+            except (OSError, UnicodeDecodeError):
+                pinned = None
+            if pinned:
+                self.console.print(
+                    f"[dim]Kept {_MEMORY_MODE_KEY}={escape(pinned)} from your .env: it holds "
+                    "every run to that memory mode.[/dim]"
+                )
+        if route_keys and not by_setup:
+            try:
+                existing = parse_env(self.env_path)
+            except (OSError, UnicodeDecodeError):
+                existing = {}
+            present = {key: existing[key] for key in route_keys if existing.get(key)}
+            if present:
+                listed = ", ".join(f"{key}={value}" for key, value in present.items())
+                cloud = present.get("OCR_BACKEND") in CLOUD_VISION_OCR_BACKENDS
+                where = " (a cloud route: page images leave this machine)" if cloud else ""
+                self.console.print(
+                    f"[yellow]Your .env sets {escape(listed)}{where}, so fast runs use that OCR "
+                    "route instead of the PDF's text layer.[/yellow]"
+                )
+                if Confirm.ask("Comment it out so fast mode reads the text layer?", default=False):
+                    route_keys = tuple(present)
+                else:
+                    route_keys = ()
+                    self.console.print(f"[dim]Kept {escape(listed)}.[/dim]")
+            else:
+                route_keys = ()
+        commented = _merge_env(
+            self.env_path,
+            _with_llm_routing(self.env_vars),
+            comment_out=(*route_keys, *memory_pin),
+        )
+        self._env_written = True
+        ui.ok(self.console, f"Merged new settings into {escape(str(self.env_path))}")
+        if _MEMORY_MODE_KEY in commented:
+            commented.remove(_MEMORY_MODE_KEY)
+            self.console.print(
+                f"[yellow]Commented out {_MEMORY_MODE_KEY}, written by an earlier "
+                "setup: bibr now chooses the memory mode for each run. Uncomment the "
+                "line to hold every run to it.[/yellow]"
+            )
+        if commented:
+            origin = "an OCR route from an earlier setup" if by_setup else "your OCR route"
+            self.console.print(
+                f"[yellow]Commented out {', '.join(commented)}, {origin}: fast mode reads "
+                "the PDF's text layer, so document contents stay on this machine. "
+                "`bibr chew --ocr <route>` picks an OCR route for one run.[/yellow]"
+            )
+
+    def _back_up_before_overwrite(self) -> None:
+        """Keep the file an overwrite replaces as ``<name>.bak`` and name what it drops."""
+        from rich.markup import escape
+
+        from bibr.env_utils import parse_env
+
+        backup = self.env_path.with_name(self.env_path.name + ".bak")
+        try:
+            old_text = self.env_path.read_text(encoding="utf-8")
+            old_keys = set(parse_env(self.env_path))
+            write_env_text(backup, old_text)
+            os.chmod(backup, 0o600)  # it holds the same keys as the .env
+        except (OSError, UnicodeDecodeError) as exc:
+            self.console.print(
+                f"[yellow]Couldn't back up the old file: {escape(str(exc))}[/yellow]"
+            )
+            return
+        dropped = sorted(old_keys - set(_with_llm_routing(self.env_vars)))
+        self.console.print(f"[dim]Kept the old file as {escape(str(backup))}.[/dim]")
+        if dropped:
+            self.console.print(
+                f"[yellow]Overwriting drops {escape(', '.join(dropped))} (still in "
+                f"{escape(backup.name)}).[/yellow]"
+            )
 
     def _memory_pin_of_an_earlier_setup(self) -> tuple[str, ...]:
         """``PIPELINE_MEMORY_MODE`` when the ``.env`` being merged into holds setup's own value.
@@ -2180,6 +2830,21 @@ class SetupWizard:
         from bibr.config import snapshot_settings
         from bibr.run_mode import resolve_mode
 
+        exported = os.environ.get("PIPELINE_MODE", "").strip().lower()
+        if exported and exported != new:
+            # The shell's value beats .env, so saving switches nothing: say which wins.
+            self._warned_env_overrides.add("PIPELINE_MODE")
+            ui.warn(
+                self.console,
+                f"Your shell exports PIPELINE_MODE={exported}, which overrides .env: bibr keeps "
+                f"running in {exported} mode until you unset it, whatever this setup saves.",
+            )
+            self._record_failure(
+                f"Your shell exports PIPELINE_MODE={exported}, so the {new} mode saved here "
+                "does not apply",
+                "Run: unset PIPELINE_MODE",
+            )
+            return
         try:
             today = resolve_mode(snapshot_settings())
         except Exception:  # noqa: BLE001 — a bad setting is reported where it is used
@@ -2227,6 +2892,7 @@ class SetupWizard:
             name = next((n.upper() for n in names if n.upper() in exported), None)
             if name and exported[name] != value and name not in self._warned_env_overrides:
                 shadowed.add(name)
+        self._warn_exported_ocr_route()
         if not shadowed:
             return
         self._warned_env_overrides.update(shadowed)
@@ -2236,6 +2902,45 @@ class SetupWizard:
             hint="Environment variables override .env, so bibr keeps using the exported "
             "values. Unset or update them before running bibr.",
         )
+
+    def _warn_exported_ocr_route(self) -> None:
+        """In fast mode, name an OCR route the shell exports: it replaces the text layer.
+
+        A fast setup chooses no OCR route, so nothing it writes is shadowed, yet an
+        exported ``OCR_BACKEND`` (or model or profile) still picks the route a fast
+        run takes, a cloud one included.
+        """
+        if self.env_vars.get("PIPELINE_MODE") != "fast" or any(
+            key in self.env_vars for key in _OCR_ROUTE_KEYS
+        ):
+            return
+        from rich.markup import escape
+
+        from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+
+        exported = {
+            key: os.environ[key]
+            for key in _OCR_ROUTE_KEYS
+            if os.environ.get(key, "").strip() and key not in self._warned_env_overrides
+        }
+        if not exported:
+            return
+        self._warned_env_overrides.update(exported)
+        listed = ", ".join(f"{key}={value}" for key, value in exported.items())
+        cloud = exported.get("OCR_BACKEND", "").strip().lower() in CLOUD_VISION_OCR_BACKENDS
+        ui.warn(
+            self.console,
+            f"Your shell exports {escape(listed)}, so fast runs use that OCR route instead "
+            "of the PDF's text layer" + (": page images go to the cloud." if cloud else "."),
+            hint="Unset it to keep document contents on this machine, as this plan says."
+            if cloud
+            else "Unset it for fast mode to read the text layer.",
+        )
+        if cloud:
+            self._record_failure(
+                f"Your shell exports {listed}: fast runs send page images to the cloud",
+                f"Run: unset {' '.join(exported)}",
+            )
 
     def _offer_save_preset(self) -> None:
         if not self.env_vars:
@@ -2281,13 +2986,12 @@ class SetupWizard:
             self.console.print(f"[yellow]! Couldn't save preset:[/yellow] {escape(str(exc))}")
 
     def _smoke_test_note(self) -> str:
-        """Honest first-run download note for what the smoke test runs."""
+        """Honest first-run download note for what the test extraction runs."""
         if self.env_vars.get("PIPELINE_MODE") == "fast":
+            downloads = _fast_mode_download_summary() or "downloads bibr's local models, once"
             return (
-                "[dim]Runs page 1 of the sample paper shipped with bibr in fast mode, the "
-                "pipeline a plain `bibr chew` runs. The layout, sentence, section, reference "
-                "and front-matter models download on first run (about 2-3 GB, once), and any "
-                "OCR route you configured reads pages that need one.[/dim]"
+                "[dim]Reads the sample paper shipped with bibr in fast mode, the pipeline a "
+                f"plain `bibr chew` runs. It {downloads}.[/dim]"
             )
         from bibr.ocr.registry import resolve_backend_name
 
@@ -2295,20 +2999,21 @@ class SetupWizard:
         resolved = resolve_backend_name(backend)
         note = _OCR_BACKEND_DOWNLOAD_NOTES.get(resolved, "may download model weights on first run")
         return (
-            "[dim]Uses page 1 of the sample paper shipped with bibr, skips "
-            f"LLM/reference extraction for speed, and {note}. Layout and sentence "
-            "models may also download on first run.[/dim]"
+            "[dim]Reads page 1 of the sample paper shipped with bibr, skips the LLM and "
+            f"the references for speed, and {note}. Layout and sentence models may also "
+            "download on first run.[/dim]"
         )
 
     def _smoke_test_options(self) -> dict[str, Any]:
-        """The ``chew`` options of the smoke test.
+        """The ``chew`` options of the test extraction.
 
-        A fast setup runs the real fast pipeline, so the test verifies what a plain
-        ``bibr chew`` will run. The LLM tiers keep the structure-only check: a full
-        run would start the LLM server, which ``_run_validation`` tests on its own.
+        A fast setup runs the real fast pipeline on the whole sample, so the test
+        verifies what a plain ``bibr chew`` will run (references included). The LLM
+        tiers keep the structure-only check on page 1: a full run would start the
+        LLM server, which ``_run_validation`` tests on its own.
         """
         if self.env_vars.get("PIPELINE_MODE") == "fast":
-            return {"pages": "1", "mode": "fast"}
+            return {"mode": "fast"}
         return {"pages": "1", "no_llm": True, "refs": "off"}
 
     def _ocr_unreachable_hint(self) -> str:
@@ -2336,14 +3041,12 @@ class SetupWizard:
         return LLM_DEFAULTS.get(provider, {}).get("key_env") or None
 
     def _smoke_failure_hint(self, exc: Exception) -> str:
-        """Map a chew() failure to an actionable one-line hint.
+        """Map a chew() failure to what to do about it, under the one-line error.
 
-        Always ends with a pointer to ``bibr doctor`` — the wizard's config is
-        already written to disk by this point, so every branch here just
-        informs, it never re-raises.
+        Never repeats the error (the line above it carries it). Always ends with
+        a pointer to ``bibr doctor`` — the wizard's config is already written to
+        disk by this point, so every branch here just informs, it never re-raises.
         """
-        from rich.markup import escape
-
         from bibr.exceptions import UpstreamServiceError
 
         doctor_line = "[dim]Run `bibr doctor` for a full check.[/dim]"
@@ -2351,14 +3054,12 @@ class SetupWizard:
 
         if isinstance(exc, ImportError):
             # ml_import_error() (bibr/utils/ml_extra.py) already bakes the
-            # exact `uv sync --extra ...` line into the message.
-            return f"[dim]{escape(self._redact(str(exc)))}[/dim]\n{doctor_line}"
+            # exact `uv sync --extra ...` line into the message above.
+            return doctor_line
 
         if _caused_by_configuration_error(exc):
-            # _step_smoke_test already printed the message in full; say once
-            # what to do about it instead of labelling it unexpected. chew()
-            # reports a bad setting wrapped (a ProcessingError whose cause is
-            # the ConfigurationError), so walk the chain, not just the top.
+            # chew() reports a bad setting wrapped (a ProcessingError whose
+            # cause is the ConfigurationError), so walk the chain, not just the top.
             return (
                 "[dim]Fix the configuration value above in your .env, then "
                 f"rerun the test.[/dim]\n{doctor_line}"
@@ -2380,12 +3081,9 @@ class SetupWizard:
                         "[dim]The LLM provider rejected the request — check your "
                         f"local LLM server logs.[/dim]\n{doctor_line}"
                     )
-            return f"[dim]{escape(self._redact(str(exc)))}[/dim]\n{doctor_line}"
+            return doctor_line
 
-        return (
-            f"[dim]Unexpected error — your configuration is already saved: "
-            f"{escape(self._redact(str(exc)))}[/dim]\n{doctor_line}"
-        )
+        return f"[dim]Your configuration is already saved.[/dim]\n{doctor_line}"
 
     def _step_smoke_test(
         self,
@@ -2396,8 +3094,8 @@ class SetupWizard:
 
         ui.phase(self.console, header or ui.step_label(6, 6, "Test extraction"))
         self.console.print(
-            "Run a quick pipeline smoke test on a synthetic sample paper shipped "
-            "with bibr, using the configuration just saved."
+            "Run a test extraction on the sample paper shipped with bibr, using the "
+            "configuration just saved."
         )
         self.console.print(self._smoke_test_note())
 
@@ -2424,22 +3122,27 @@ class SetupWizard:
 
         from bibr.api import chew
 
+        options = self._smoke_test_options()
         with tempfile.TemporaryDirectory() as tmpdir:
             sample_path = Path(tmpdir) / "sample_paper.pdf"
             sample_path.write_bytes(resource.read_bytes())
 
             t0 = time.monotonic()
             try:
-                with self.console.status(
-                    "Running test extraction (first run may download models) …"
+                with (
+                    self.console.status(
+                        "Running test extraction (first run may download models) …"
+                    ),
+                    _quiet_internals(),
                 ):
-                    result = chew(sample_path, **self._smoke_test_options())
+                    result = chew(sample_path, **options)
             except Exception as exc:  # noqa: BLE001 — must never crash the wizard
-                msg = self._redact(str(exc))
+                msg = self._redact(str(exc)).strip() or type(exc).__name__
                 ui.error(self.console, f"Test extraction failed: {escape(msg)}")
                 self.console.print(self._smoke_failure_hint(exc))
                 if self._fallback_hint:
                     self.console.print(f"[dim]{self._fallback_hint}[/dim]")
+                self._record_failure("Test extraction failed", "Run bibr doctor")
                 return
 
         elapsed = time.monotonic() - t0
@@ -2448,12 +3151,11 @@ class SetupWizard:
         title = metadata.get("title") or "(no title extracted)"
         n_authors = len(data.get("author") or [])
         n_refs = len(data.get("bib") or [])
-        ui.ok(self.console, f"Pipeline smoke test succeeded ({elapsed:.1f}s)")
-        self.console.print(
-            f"  [dim]Title:[/dim] {escape(title)}\n"
-            f"  [dim]Authors:[/dim] {n_authors}\n"
-            f"  [dim]References:[/dim] {n_refs}"
-        )
+        ui.ok(self.console, f"Test extraction succeeded ({elapsed:.1f}s)")
+        lines = [f"  [dim]Title:[/dim] {escape(title)}", f"  [dim]Authors:[/dim] {n_authors}"]
+        if options.get("refs") != "off":
+            lines.append(f"  [dim]References:[/dim] {n_refs}")
+        self.console.print("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -2462,49 +3164,40 @@ class SetupWizard:
 
 
 _HELP_TEXT = """\
-usage: bibr setup [-h] [--advanced]
+usage: bibr setup [--advanced] [--global]
 
-Interactive setup wizard for bibr.
+Configure bibr for this machine in a few questions.
 
-By default this runs the short recommended flow:
+bibr works without any setup: with nothing configured it runs in fast mode,
+where bibr's local models read born-digital PDFs with no LLM, no API key and
+nothing sent off this machine. Setup recommends fast mode. Answer "no" to add
+an LLM instead: a local model, your own server, or Claude Haiku 5.5 in the
+cloud (you are asked before any document content leaves this machine).
 
-  1. Detect your hardware (Apple Silicon / NVIDIA GPU / neither).
-  2. Offer fast mode, the default: local models only, with no LLM and no API
-     key, on any machine. Yes writes PIPELINE_MODE=fast.
-  3. Answer no to add an LLM instead. Setup then shows a concrete plan preview
-     (OCR + LLM backends, extras, memory mode, privacy, first-run download,
-     speed) for a local model where this machine can run one, a private
-     OCR/LLM server, or Claude Haiku 5.5 in the cloud (with an informed consent
-     question). These write PIPELINE_MODE=full. Declining every LLM route offers
-     --advanced, then fast mode, rather than dead-ending.
-  4. Write .env (and save a preset), then optionally install extras and run
-     validation: a connection test for cloud, a local server health check for
-     managed local LLMs, and a smoke-test extraction on a bundled sample PDF
-     (the real fast pipeline when you chose fast mode).
-
-Use --advanced for step-by-step control over extras, LLM provider + API key
-(or none, for fast mode), connection test, OCR backend, memory mode, and
-writing .env.
-
-Re-running is safe: the wizard does not take its answers from your existing
-.env and writes .env only at the save step. If one is present then, it asks
-whether to overwrite, merge, or skip (merge is the default, so hand-edited
-values are preserved). Every run writes PIPELINE_MODE (fast or full), so a key
-added or removed later cannot change the mode; a .env from an earlier version
-has no entry and stays on auto until you run setup again. Choosing an LLM
-provider also writes LLM_BACKEND=cloud, and a blank LLM_API_KEY or LLM_BASE_URL
-where you entered none, so that an older key or server cannot override the one
-you entered. Press Ctrl+C at any time to quit without saving.
-
-The wizard writes ./.env, or the last file BIBR_ENV_FILE lists. It does not
-run while BIBR_DISABLE_DOTENV or an empty BIBR_ENV_FILE turns .env loading
-off, and it warns when your shell exports a setting it writes with another
-value, since exported variables override .env.
+Your answers are saved to ./.env, which applies when you run bibr from this
+folder; --global saves them to ~/.bibr/.env, which bibr reads from every
+folder (a folder's own ./.env still wins for the settings it sets). Nothing is
+written before the "Save configuration" step; if the file exists you choose
+to merge (the default), overwrite (the old file is kept as .env.bak) or skip.
+Exported environment variables override .env; BIBR_ENV_FILE picks another
+file.
 
 options:
-  -h, --help   show this help message and exit
-  --advanced   run the detailed provider/backend picker
+  --advanced   choose every setting yourself (provider, OCR, models)
+  --global     save to ~/.bibr/.env instead of ./.env
+  -h, --help   show this help and exit
+
+Afterwards: bibr doctor checks the setup; bibr chew paper.pdf -o result.json
 """
+
+#: Printed instead of the interview when stdin is not a terminal.
+_NOT_A_TERMINAL = (
+    "bibr setup asks questions, so it needs a terminal (stdin is not one).\n"
+    "bibr already works without setup: with nothing configured it runs in fast mode "
+    "(local models, no LLM, no API key).\n"
+    "To configure bibr without a terminal: bibr config set KEY VALUE, or "
+    "bibr config example > .env and edit the file."
+)
 
 
 def main() -> None:
@@ -2513,11 +3206,17 @@ def main() -> None:
         print(_HELP_TEXT, end="")
         return
     advanced = "--advanced" in args
-    unknown = [a for a in args if a != "--advanced"]
+    global_env = "--global" in args
+    unknown = [a for a in args if a not in ("--advanced", "--global")]
     if unknown:
-        Console().print(f"[red]Unknown option:[/red] {unknown[0]}")
+        from rich.markup import escape
+
+        Console().print(
+            f"[red]Unknown option:[/red] {escape(unknown[0])}. Run [cyan]bibr setup --help[/cyan] "
+            "for the options."
+        )
         raise SystemExit(2)
-    from bibr.config import dotenv_disabled_by, dotenv_enable_hint
+    from bibr.config import ENV_FILE_OVERRIDE_VAR, dotenv_disabled_by, dotenv_enable_hint
 
     if variable := dotenv_disabled_by():
         # The wizard's only output is a .env file; bibr would not read it.
@@ -2528,8 +3227,18 @@ def main() -> None:
             hint=f"{dotenv_enable_hint(variable)}, then run bibr setup again.",
         )
         raise SystemExit(2)
-    env_file = _setup_env_file()
-    if not env_file.parent.is_dir():
+    if global_env and os.environ.get(ENV_FILE_OVERRIDE_VAR) is not None:
+        # BIBR_ENV_FILE replaces the chain ~/.bibr/.env is part of.
+        ui.error(
+            Console(),
+            f"--global saves to ~/.bibr/.env, which bibr does not read while "
+            f"{ENV_FILE_OVERRIDE_VAR} is set.",
+            hint=f"Unset {ENV_FILE_OVERRIDE_VAR}, or run bibr setup without --global to "
+            "write the file it names.",
+        )
+        raise SystemExit(2)
+    env_file = _global_env_file() if global_env else _setup_env_file()
+    if not global_env and not env_file.parent.is_dir():
         from rich.markup import escape
 
         # Only a BIBR_ENV_FILE path can lack its folder; say so before the
@@ -2541,12 +3250,31 @@ def main() -> None:
             hint="Create the folder, or point BIBR_ENV_FILE at a file in an existing one.",
         )
         raise SystemExit(2)
+    if not _stdin_is_a_terminal():
+        print(_NOT_A_TERMINAL, file=sys.stderr)
+        raise SystemExit(2)
+    wizard: SetupWizard | None = None
     try:
-        wizard = SetupWizard()
+        wizard = SetupWizard(global_env=global_env)
         if advanced:
             wizard.run_advanced()
         else:
             wizard.run()
     except (KeyboardInterrupt, EOFError) as exc:
-        Console().print("\n[dim]Aborted.[/dim]")
+        from rich.markup import escape
+
+        if wizard is not None and wizard._env_written:
+            message = f"Aborted — settings already saved to {escape(str(wizard.env_path))}."
+        else:
+            message = "Aborted — nothing was saved."
+        Console().print(f"\n[dim]{message}[/dim]")
         raise SystemExit(1) from exc
+    if wizard.failed_checks:
+        raise SystemExit(1)
+
+
+def _stdin_is_a_terminal() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):  # a closed or replaced stdin
+        return False

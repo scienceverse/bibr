@@ -943,6 +943,7 @@ def write_references(
     format: str | None = None,
     prefer: Prefer = "printed",
     check_note: bool = True,
+    require_exports: bool = False,
 ) -> ReferencesReport:
     """Write the references of *sources* to *path* as CSL-JSON, BibTeX or RIS.
 
@@ -953,9 +954,11 @@ def write_references(
     ``"ris"``; left out, the extension of *path* decides (.json, .bib, .ris).
     Cite keys are unique across the file. *prefer* and *check_note* are as
     for :func:`to_csl_json`. The file is replaced whole, or left as it was
-    when writing fails.
+    when writing fails. With ``require_exports=True``, sources that hold no
+    export at all raise :class:`~bibr.export.tables.NoExportsError` and
+    nothing is written.
     """
-    from bibr.export.tables import _payloads
+    from bibr.export.tables import NoExportsError, _payloads
 
     target = Path(path)
     fmt = normalize_format(format) if format else format_for_path(target)
@@ -972,6 +975,8 @@ def write_references(
             skipped.append((label, reason or "skipped"))
         else:
             exports.append(payload)
+    if require_exports and not exports:
+        raise NoExportsError(tuple(skipped))
     text, count = render_references(exports, fmt, prefer=prefer, check_note=check_note)
     target.parent.mkdir(parents=True, exist_ok=True)
     # Created like any new file (mode 0o666 less the umask), then moved over the target.

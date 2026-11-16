@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from pydantic import BaseModel
 
 from bibr.config import snapshot_settings
+from bibr.ocr.profiles import cloud_vision_model
 from bibr.ocr.registry import register
 
 if TYPE_CHECKING:
@@ -163,6 +164,12 @@ class CloudOcrClient:
     _REGION_MIN_TOKENS: ClassVar[int] = 2048
 
     def __init__(self, provider: str = "google", settings=None, **_kw: object):
+        from bibr.clients.sdk_extras import missing_ocr_sdk
+
+        missing = missing_ocr_sdk(provider)
+        if missing:
+            # At startup, not on the first region: the SDK is an optional extra.
+            raise ValueError(missing)
         self._settings = settings if settings is not None else snapshot_settings()
         self._provider = provider
         self._client = None  # lazy-init
@@ -206,7 +213,7 @@ class CloudOcrClient:
             settings = self._effective_settings
             cfg = settings.ocr_vision
             instructor_provider = _PROVIDER_STRINGS.get(self._provider, self._provider)
-            model_string = f"{instructor_provider}/{cfg.model}"
+            model_string = f"{instructor_provider}/{cloud_vision_model(self._provider, settings)}"
 
             kwargs: dict[str, Any] = {"async_client": True}
             api_key = _api_key_for_provider(self._provider, settings)
@@ -397,7 +404,7 @@ class CloudOcrClient:
     def _quota_error(self, original_error: BaseException | None = None) -> UpstreamServiceError:
         from bibr.exceptions import UpstreamServiceError
 
-        model = self._effective_settings.ocr_vision.model
+        model = cloud_vision_model(self._provider, self._effective_settings)
         return UpstreamServiceError(
             f"ocr_vision/{self._provider}",
             f"rate limited (429) on {self._RATE_LIMIT_TRIP_REGIONS} regions in a row with "

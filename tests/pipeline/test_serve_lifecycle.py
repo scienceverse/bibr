@@ -105,7 +105,7 @@ def test_release_llm_server_helper_is_safe_when_no_server():
     """The finalize callback must not raise when no LLM server was started."""
     import pytest
 
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
 
     from bibr.serve.deployments.pipeline import _release_llm_server
 
@@ -118,7 +118,7 @@ def test_release_llm_server_helper_swallows_errors():
     """Finalize callbacks must never propagate exceptions."""
     import pytest
 
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
 
     from bibr.serve.deployments.pipeline import _release_llm_server
 
@@ -163,7 +163,7 @@ def test_finalizer_calls_release_on_gc():
 
     import pytest
 
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
 
     from bibr.serve.deployments.pipeline import BibrPipelineAPI, _release_llm_server
 

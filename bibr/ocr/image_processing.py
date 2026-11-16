@@ -1,7 +1,7 @@
 """Image processing utilities for OCR pipeline.
 
 Extracted from bibr._vendor.glmocr.utils.image_utils — only the functions
-actually used by the LitServe pipeline.
+actually used by the serve pipeline.
 """
 
 import base64

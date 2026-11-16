@@ -130,7 +130,7 @@ def test_network_bind_rejects_weak_key():
 
 
 def test_papers_extract_requires_auth_when_configured(monkeypatch):
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
 
     from bibr.config import Settings
 
@@ -150,7 +150,7 @@ def test_papers_extract_requires_auth_when_configured(monkeypatch):
 
 
 def test_private_inference_route_is_never_http_accessible(monkeypatch):
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
 
     import asyncio
 
@@ -160,7 +160,11 @@ def test_private_inference_route_is_never_http_accessible(monkeypatch):
     monkeypatch.setattr(Settings.auth, "api_key", None)
     server = build_server()
     try:
-        response = TestClient(server.app, raise_server_exceptions=False).post(
+        # The old private dispatch path is no route at all now; a keyless
+        # server answers loopback Hosts only, hence the base URL.
+        response = TestClient(
+            server.app, base_url="http://127.0.0.1:8000", raise_server_exceptions=False
+        ).post(
             "/_bibr/inference",
             json={"upload_id": "0" * 32},
         )
@@ -171,47 +175,7 @@ def test_private_inference_route_is_never_http_accessible(monkeypatch):
         asyncio.run(server.app.state.upload_store.close())
 
 
-def test_build_server_raises_if_private_route_missing(monkeypatch, tmp_path):
-    pytest.importorskip("litserve")
-
-    from bibr.serve import app as app_mod
-    from bibr.serve import ingress as ingress_mod
-
-    class _FakeRoute:
-        path = "/something-else"
-
-    class _FakeState:
-        pass
-
-    class _FakeApp:
-        routes = [_FakeRoute()]
-        state = _FakeState()
-
-    class _FakeServer:
-        def __init__(self):
-            self.app = _FakeApp()
-
-    class _FakeUploadStore:
-        root = tmp_path
-
-        @classmethod
-        def create(cls, **_kwargs):
-            return cls()
-
-        def close_sync(self):
-            return None
-
-    def fake_litserver(*_, **__):
-        return _FakeServer()
-
-    monkeypatch.setattr("litserve.LitServer", fake_litserver)
-    monkeypatch.setattr(ingress_mod, "UploadStore", _FakeUploadStore)
-
-    with pytest.raises(RuntimeError, match="LitServe private inference route"):
-        app_mod.build_server()
-
-
-@pytest.mark.parametrize("failure_point", ["api", "server", "resolver", "metering"])
+@pytest.mark.parametrize("failure_point", ["api", "worker", "metering"])
 def test_build_server_construction_failure_removes_owned_upload_root(
     monkeypatch,
     failure_point,
@@ -219,10 +183,9 @@ def test_build_server_construction_failure_removes_owned_upload_root(
     """Catches startup retries leaking a private temporary root each time."""
     import asyncio
 
-    import litserve
-
     from bibr.serve import app as app_mod
     from bibr.serve import ingress as ingress_mod
+    from bibr.serve import worker as worker_mod
     from bibr.serve.deployments import pipeline as pipeline_mod
 
     stores = []
@@ -239,10 +202,8 @@ def test_build_server_construction_failure_removes_owned_upload_root(
     monkeypatch.setattr(ingress_mod.UploadStore, "create", create_store)
     if failure_point == "api":
         monkeypatch.setattr(pipeline_mod, "BibrPipelineAPI", fail)
-    elif failure_point == "server":
-        monkeypatch.setattr(litserve, "LitServer", fail)
-    elif failure_point == "resolver":
-        monkeypatch.setattr(ingress_mod, "resolve_litserve_dispatch", fail)
+    elif failure_point == "worker":
+        monkeypatch.setattr(worker_mod, "InferenceWorker", fail)
     else:
         monkeypatch.setattr(app_mod, "_configure_metering_logging", fail)
 
@@ -258,26 +219,22 @@ def test_build_server_construction_failure_removes_owned_upload_root(
                 asyncio.run(store.close())
 
 
+def _body_cap(app) -> int:
+    from bibr.serve.ingress import BodySizeLimit
+
+    (layer,) = [m for m in app.user_middleware if m.cls is BodySizeLimit]
+    return layer.kwargs["max_size"]
+
+
 def test_build_server_raises_the_body_cap_to_fit_base64_uploads_when_mcp_is_on(monkeypatch):
-    pytest.importorskip("litserve")
     pytest.importorskip("mcp")
 
     import asyncio
-
-    import litserve
 
     from bibr.config import Settings
     from bibr.serve.admission import base64_envelope
     from bibr.serve.app import build_server
 
-    captured = {}
-    real_litserver = litserve.LitServer
-
-    def spy_litserver(*args, **kwargs):
-        captured.update(kwargs)
-        return real_litserver(*args, **kwargs)
-
-    monkeypatch.setattr(litserve, "LitServer", spy_litserver)
     monkeypatch.setattr(Settings.mcp, "enabled", True)
     server = build_server()
     try:
@@ -285,7 +242,7 @@ def test_build_server_raises_the_body_cap_to_fit_base64_uploads_when_mcp_is_on(m
             base64_envelope(Settings.pipeline.max_file_size)
             + Settings.pipeline.multipart_overhead_bytes
         )
-        assert captured["max_payload_size"] == expected
+        assert _body_cap(server.app) == expected
         assert expected > Settings.pipeline.max_file_size * 4 // 3
         assert server.app.state.upload_admission_gate.limit == Settings.pipeline.max_active_uploads
     finally:
@@ -293,38 +250,27 @@ def test_build_server_raises_the_body_cap_to_fit_base64_uploads_when_mcp_is_on(m
 
 
 def test_build_server_preserves_payload_and_worker_runtime_options(monkeypatch):
-    pytest.importorskip("litserve")
-
     import asyncio
-
-    import litserve
 
     from bibr.config import Settings
     from bibr.serve.app import build_server
 
-    captured = {}
-    real_litserver = litserve.LitServer
-
-    def spy_litserver(*args, **kwargs):
-        captured.update(kwargs)
-        return real_litserver(*args, **kwargs)
-
-    monkeypatch.setattr(litserve, "LitServer", spy_litserver)
+    monkeypatch.setattr(Settings.pipeline, "restart_workers", True)
     server = build_server()
     try:
-        assert captured["max_payload_size"] == (
+        assert _body_cap(server.app) == (
             Settings.pipeline.max_file_size + Settings.pipeline.multipart_overhead_bytes
         )
-        assert captured["restart_workers"] is Settings.pipeline.restart_workers
-        assert captured.get("track_requests", False) is False
+        assert server.worker._restart is True
+        assert server.worker._timeout == Settings.pipeline.timeout
     finally:
         asyncio.run(server.app.state.inference_tracker.close())
         asyncio.run(server.app.state.upload_store.close())
 
 
 @pytest.mark.parametrize("jobs_enabled", [False, True])
-def test_main_always_pins_one_api_server(monkeypatch, jobs_enabled):
-    """Catches multiple API processes sharing one destructively owned upload root."""
+def test_main_runs_one_api_server_with_uvicorn_logging_off(monkeypatch, jobs_enabled):
+    """Catches main handing uvicorn its own log config (records would skip the scrubber)."""
     import sys
 
     from bibr.config import Settings
@@ -344,16 +290,20 @@ def test_main_always_pins_one_api_server(monkeypatch, jobs_enabled):
 
     app_mod.main()
 
-    assert captured["num_api_servers"] == 1
+    assert captured == {
+        "host": "127.0.0.1",
+        "port": 8123,
+        "log_level": Settings.SERVE_LOG_LEVEL,
+        "log_config": None,
+        "ready_line": app_mod._ready_line("http://127.0.0.1:8123"),
+    }
 
 
 def test_build_server_asgi_lifespan_runs_all_cleanup_in_order(monkeypatch):
-    """Catches router shutdown handlers being bypassed by LitServe's lifespan."""
+    """Catches router shutdown handlers being bypassed by bibr's lifespan wrapper."""
     import asyncio
     import io
-    from contextlib import asynccontextmanager
 
-    import litserve
     from starlette.datastructures import UploadFile
 
     from bibr.config import Settings
@@ -362,20 +312,11 @@ def test_build_server_asgi_lifespan_runs_all_cleanup_in_order(monkeypatch):
 
     events = []
 
-    @asynccontextmanager
-    async def fake_litserve_lifespan(_server, _app):
-        events.append("litserve_start")
-        try:
-            yield
-        finally:
-            events.append("litserve_stop")
-
     class FakeJobDispatcher:
         async def close(self):
             events.append("job_dispatcher")
 
     monkeypatch.setattr(Settings.jobs, "enabled", True)
-    monkeypatch.setattr(litserve.LitServer, "lifespan", fake_litserve_lifespan)
     monkeypatch.setattr(jobs_mod, "JobDispatcher", FakeJobDispatcher)
 
     server = build_server()
@@ -410,32 +351,29 @@ def test_build_server_asgi_lifespan_runs_all_cleanup_in_order(monkeypatch):
             asyncio.run(upload_store.close())
 
     assert observed_events == [
-        "litserve_start",
         "serving",
         "job_dispatcher",
         "tracker",
         "store",
-        "litserve_stop",
     ]
     assert root_exists is False
 
 
 class TestNonInferenceRoutesGated:
-    """/openapi.json, /docs and LitServe's /info leak deployment details —
-    they must be gated by the same bearer token as the inference route."""
+    """/openapi.json and /docs leak deployment details — they must be gated by
+    the same bearer token as the inference route."""
 
     @staticmethod
     def _server_client(monkeypatch, api_key):
-        pytest.importorskip("litserve")
+        pytest.importorskip("fastapi")
         from bibr.config import Settings
 
         monkeypatch.setattr(Settings.auth, "api_key", api_key)
         from bibr.serve.app import build_server
 
-        # raise_server_exceptions=False: endpoints touching LitServe worker
-        # state (/health, /info) raise before launch; these tests only care
-        # about the auth gate in front of them. The loopback base URL is what
-        # a keyless (loopback-only) server's clients send as Host.
+        # raise_server_exceptions=False: these tests only care about the auth
+        # gate in front of each route. The loopback base URL is what a keyless
+        # (loopback-only) server's clients send as Host.
         return TestClient(
             build_server().app, base_url="http://127.0.0.1:8000", raise_server_exceptions=False
         )
@@ -448,12 +386,10 @@ class TestNonInferenceRoutesGated:
         client = self._server_client(monkeypatch, "sk_int")
         assert client.get("/docs").status_code == 401
 
-    def test_info_requires_auth_when_configured(self, monkeypatch):
+    def test_unknown_routes_are_gated_too(self, monkeypatch):
         client = self._server_client(monkeypatch, "sk_int")
-        resp = client.get("/info")
-        # LitServe may or may not mount /info depending on version; when it
-        # exists it must be gated (401), never served (200).
-        assert resp.status_code in (401, 404)
+        # LitServe's old /info route is gone; any path but the probes is gated.
+        assert client.get("/info").status_code == 401
 
     def test_openapi_with_token_ok(self, monkeypatch):
         client = self._server_client(monkeypatch, "sk_int")
@@ -477,7 +413,7 @@ class TestAuth401CorsHeaders:
 
     @staticmethod
     def _server_client(monkeypatch, origins, allow_credentials=False):
-        pytest.importorskip("litserve")
+        pytest.importorskip("fastapi")
         from bibr.config import Settings
 
         monkeypatch.setattr(Settings.auth, "api_key", "sk_int")
@@ -552,7 +488,7 @@ class TestKeylessLoopbackGate:
 
     @pytest.fixture
     def server(self, monkeypatch):
-        pytest.importorskip("litserve")
+        pytest.importorskip("fastapi")
         import asyncio
 
         from bibr.config import Settings

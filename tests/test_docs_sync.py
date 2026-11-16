@@ -198,7 +198,8 @@ def test_install_doc_version_pins_match_pyproject():
         "vllm": "vllm==0.32.0",
         "cache": "redis>=5.0.0",
         "demo": "gradio>=6.15.0",
-        "batch": "anthropic>=0.40.0,<1",
+        "anthropic": "anthropic>=0.40.0,<1",
+        "google": "google-genai>=1.0.0",
     }
     for extra, token in cited.items():
         bases = {_base_req(r) for r in opt[extra]}
@@ -250,3 +251,28 @@ def test_section_titles_cover_every_config_prefix():
     prefixes = {d.section for d in iter_setting_docs()}
     missing = sorted(p for p in prefixes if p not in docs_ref_core._SECTION_TITLES)
     assert not missing, f"_SECTION_TITLES missing entries for: {missing}"
+
+
+# --------------------------------------------------------------------------
+# 7. .env.example starts with the template `bibr config example` prints
+# --------------------------------------------------------------------------
+
+
+def test_env_example_starts_with_the_config_example_template():
+    """The repository's .env.example is the starter `bibr config example` prints (every
+    setting commented out, safe to copy unchanged), followed by a separate block for
+    serve and shared deployments. Regenerate the head with
+    `bibr config example` when the template changes."""
+    from bibr.config_cli import render_env_example
+
+    text = _read(".env.example")
+    starter = render_env_example()
+    assert text.startswith(starter), (
+        ".env.example no longer starts with `bibr config example` output; "
+        "replace its head with that output"
+    )
+    tail = text[len(starter) :]
+    assert "bibr serve" in tail.strip().split("\n\n", 1)[0]  # the deployment block is labelled
+    # Nothing is active: every assignment in the whole file is commented out.
+    for line in text.splitlines():
+        assert not re.match(r"^[A-Z][A-Z0-9_]*=", line), f"active setting in .env.example: {line}"

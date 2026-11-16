@@ -1431,7 +1431,7 @@ class TestJobRoutesAuth:
         Settings.auth.api_key = original
 
     def test_jobs_route_requires_auth_when_configured(self, monkeypatch):
-        pytest.importorskip("litserve")
+        pytest.importorskip("fastapi")
         from bibr.config import Settings
 
         monkeypatch.setattr(Settings.auth, "api_key", "sk_int")

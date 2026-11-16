@@ -15,6 +15,13 @@ bibr batch report results/                            # summarise the ledger
 ```
 
 Re-running the **same command** continues where the previous run stopped.
+When nothing is left to do, it says so (`nothing to do: N papers already ok
+in the ledger`) instead of printing an empty report; `bibr batch report <out>`
+summarises the whole ledger.
+
+While it runs, `bibr batch` prints the progress of each chunk, one line per
+finished paper and any warnings. `-v` adds bibr's log (stage decisions, model
+loads, fallbacks), and `-vv` debug detail.
 
 ## Inputs
 
@@ -114,13 +121,15 @@ run on the same `--out` — an overlapping cron job, say — stops at once with
 "another bibr batch run is using `<out>`" and exit code 2. `--dry-run` and
 `bibr batch report` do not take the lock.
 
-Ctrl-C is graceful in both executors: the local executor records the chunk
-that was running as `interrupted`; the remote executor stops submitting,
+Ctrl-C is graceful in both executors: the local executor records the chunks
+that were running as `interrupted`; the remote executor stops submitting,
 waits up to 30 s for in-flight jobs, cancels the ones still queued on the
 serve and records the rest as `interrupted`.
 A second Ctrl-C exits immediately. SIGTERM and SIGHUP (`kill`, `docker stop`,
 a closed SSH session) are handled the same way, so managed local servers are
-shut down rather than left holding GPU memory. The process exits 130 when
+shut down rather than left holding GPU memory. The end-of-run table counts
+those papers as `interrupted`, apart from `failed`, and the run ends with how
+many are left and "re-run the same command to continue". The process exits 130 when
 interrupted (by Ctrl-C, SIGTERM or SIGHUP alike), 1 when any paper failed, 0
 otherwise.
 
@@ -136,6 +145,18 @@ pipeline flags apply: `--ocr`, `--ocr-url`, `--llm`, `--refs`, `--ref-seg`,
 `--consolidate`, `--no-crossref`, `--no-llm`, `--pages`, `--memory`,
 `--device`, `--figure-images`, `--include-regions`, `--preset`, …
 
+On the streaming path (a cloud LLM or a fast run, memory mode not
+`aggressive`), a chunk starts as soon as the chunk before it has read its last
+page, so its pages are read while the last papers of the chunk before are
+parsed and exported. Without that, the reading of pages, the slowest part of a
+fast run, waited for each chunk's last paper. At most two chunks are in flight;
+they share the limit of two files in the later stages at once, and
+each chunk's verdict lines are still written in order as it finishes. A paper
+run in a chunk of its own after a crash never overlaps another chunk.
+`PIPELINE_OVERLAP_CHUNKS=false` runs each chunk after the one before has
+ended, as before. The other plans, a managed local LLM or `aggressive` memory,
+always run their chunks one after another.
+
 After each chunk the local executor returns the memory the chunk freed to the
 system (`malloc_trim`, Linux with glibc only). Without that, freed page images
 stay in the allocator and a long run keeps every chunk's high-water mark.
@@ -150,7 +171,8 @@ environment wins. Both run only on Linux with glibc.
 
 **Remote** (`--serve-url URL`) submits papers to a
 [`bibr serve`](deployment.md) async job API (`POST /papers/jobs`, poll
-`GET /papers/jobs/{id}`, fetch `…/result`). The bearer token comes from
+`GET /papers/jobs/{id}`, fetch `…/result`); the client needs only core bibr, the
+server the `serve` extra. The bearer token comes from
 `--token`, else `AUTH_API_KEY` / `BIBR_SERVE_TOKEN` in the environment, else
 `AUTH_API_KEY` in bibr's `.env`. The token rides every request, so a plain
 `http://` serve URL is accepted only for a loopback or private-network host
@@ -235,7 +257,9 @@ tables with a warning; `--force` re-runs every paper under the current schema.
 For a reference manager, `bibr references <out>/ -o refs.bib` writes the
 reference lists of every export in `<out>` to one BibTeX file, with cite keys
 unique across it; a `.ris` name writes RIS and a `.json` name CSL-JSON.
-`run_info.json` is not an export, so it is skipped with a warning. The
+`bibr references` and `bibr tables` skip `run_info.json` without a warning, as
+it is bibr's own file, not an export. Given only files that are not exports (a
+PDF instead of its export, say), they write nothing and exit 1. The
 [Python guide](library.md#reference-lists) describes which values are written.
 
 `run_info.json` carries the `run_id` that stamps this run's ledger lines,
@@ -334,8 +358,8 @@ are importable: `bibr.export.compare.diff_exports` for two exports and
 ## Reading the report
 
 `bibr batch report <out>` (or `--report`, and `--json` for the same as JSON)
-prints one compact table; every run ends with the same table for its own
-lines:
+prints one compact table; every run that processed papers ends with the same
+table for its own lines:
 
 ```
 bibr batch report · results/
@@ -347,26 +371,32 @@ bibr batch report · results/
   llm tokens   41,220,118 total · 100,049 / paper
   references   19,870 refs · 17,102 matched (86%) · 48.2 / paper
   failures     poll_timeout ×5 · http_413 ×3 · OCR_EMPTY ×1 | stage: ocr ×1
-  warnings     140 papers · OCR_REGION_FAILED ×212 · STATEMENT_LEXICAL_FALLBACK ×31
+  warnings     140 papers · OCR region failed ×212 · STATEMENT_LEXICAL_FALLBACK ×31
 ```
 
 - **papers** counts the *latest* attempt per paper; **attempts** is the
   number of verdict lines (a resumed run's earlier failures are history, not
-  state; `started` lines are not counted).
+  state; `started` lines are not counted). Papers last left `interrupted` are
+  counted as such, not as failed (`papers.interrupted` in the JSON).
 - **throughput** is successful papers over the window from the earliest
   `started_at` to the latest `finished_at` — for a directory that holds
   several runs, that window spans all of them.
 - **latency** percentiles are over successful attempts' `duration_s`.
 - **stage share** is each stage's share of the *summed* stage time across
   successful attempts — where the pipeline spends its time, not a per-paper
-  mean.
+  mean. Stages under half a percent (`ocr` on the text-layer route) are left
+  out of the table, not of the JSON.
 - **references** is the corpus match rate (`n_matched / n_refs`).
 - **failures** groups the latest-failed papers by `error_code` and, when the
   export reported it, by `failed_stage`.
-- **warnings** lists the ten most frequent warning codes
-  (`extraction.warnings[].code`). An export older than 12.0 has prose warnings,
-  counted by the text before the first colon (`VALIDATION:<severity>:<CODE>`
-  for validation findings).
+- **warnings** counts the papers with a warning and lists the ten most
+  frequent ones (`extraction.warnings[].code`), the common codes as short
+  phrases ("OCR region failed" for `OCR_REGION_FAILED`) and any other as its
+  code. The JSON keeps the codes. `LLM_SKIPPED`, which every fast-mode paper
+  carries (it lists what an LLM would have added), is not counted: the JSON
+  has it under `warnings.expected`. An export older than 12.0 has prose
+  warnings, counted by the text before the first colon
+  (`VALIDATION:<severity>:<CODE>` for validation findings).
 
 The ledger is plain JSONL, so anything else is one `pandas.read_json(...,
 lines=True)` away.

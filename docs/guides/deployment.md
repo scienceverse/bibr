@@ -1,21 +1,35 @@
 # Production deployment
 
-`bibr chew` processes files and directories locally. For production use, batch
-processing, or team-shared infrastructure, `bibr serve` runs the same
-pipeline behind an HTTP API — with an external OCR server and optional
-Redis caching. This guide covers running it: the API itself, its
-concurrency model, authentication, the OCR server it depends on, the
-bundled Docker stack, reference extraction at scale, and hardware sizing.
+`bibr serve` runs the pipeline that `bibr chew` runs behind an HTTP API, for
+other programs, a team or a web front end. It needs no other infrastructure:
+with nothing configured it serves in fast mode (local models only, no LLM and
+no API key) and reads each PDF from its own text layer, on a CPU. An OCR
+server (for scanned PDFs), an LLM and Redis caching are optional additions.
+This guide covers running it: the API itself, its concurrency model,
+authentication, the OCR server, the bundled Docker stack, reference
+extraction at scale, and hardware sizing.
 
 ## One-machine API
 
 ```bash
-bibr serve
+bibr serve                                                  # wait for "bibr serve is ready"
+curl http://127.0.0.1:8000/health                           # ok
+curl -X POST http://127.0.0.1:8000/papers/extract -F "file=@paper.pdf" -o paper.json
 ```
 
-This starts a [LitServe](https://lightning.ai/docs/litserve/home)
-application exposing the full extraction pipeline over HTTP, bound by
-default to loopback at `127.0.0.1:8000`. Two flags control the bind address:
+The interactive API docs are at <http://127.0.0.1:8000/docs>, and `GET /`
+lists the main paths. The server loads its models before it answers: the line
+`bibr serve is ready: http://127.0.0.1:8000  (API docs …)` comes once the
+inference worker is ready and requests are answered. Stop it with Ctrl-C, or
+SIGTERM (`kill <pid>`, `docker stop`): either lets the requests in flight
+finish, then stops the API and the inference worker.
+
+This starts a FastAPI application, served by uvicorn, exposing the full
+extraction pipeline over HTTP, bound by default to loopback at
+`127.0.0.1:8000`. It needs the `serve` extra (`uv tool install 'bibr[serve]'`,
+or `uv sync --extra serve` in a source checkout); without it `bibr serve` exits
+with that hint. `--host` and `--port` set the bind address; the other flags
+choose the run mode and the OCR route:
 
 | Flag | Description | Default |
 |---|---|---|
@@ -52,11 +66,12 @@ no credentials, cannot multiply requests to those services.
 
 ## Upload ingress and worker handoff
 
-`POST /papers/extract` is the public `multipart/form-data` ingress. LitServe's
-underlying `POST /_bibr/inference` route is private descriptor dispatch, not a
-second upload API; direct HTTP requests to it always receive `404`.
+`POST /papers/extract` is the public `multipart/form-data` ingress. It hands
+each upload to the inference worker as a private descriptor; there is no second
+upload API, and the old private dispatch path `POST /_bibr/inference` answers
+`404` like any other unknown path.
 
-The API process accepts exactly one `file` part and the nine documented option
+The API process accepts exactly one `file` part and the ten documented option
 fields, each at most once; text fields it does not know are ignored, up to 25
 text parts in all. A duplicate field, a second file, more text parts or any
 option value over 64 bytes is rejected with `400` before descriptor creation.
@@ -76,7 +91,7 @@ increase the accepted file size. With `MCP_ENABLED=true` the envelope grows to
 fit a 50 MiB file in base64 form (about 68 MiB), because `chew_paper` carries
 its upload inside a JSON-RPC body; the file limit is unchanged.
 
-Only an opaque descriptor crosses LitServe's multiprocessing queue: the
+Only an opaque descriptor crosses the pipe to the inference worker: the
 canonical UUID, filename, byte size, SHA-256, and extraction options. Neither
 file content nor a filesystem path is queued. The worker derives the owned
 path from the UUID, opens only a regular non-symlink file, reads and verifies
@@ -88,20 +103,23 @@ shutdown release ownership. The original Starlette spool is closed immediately
 after private persistence, before long-running inference begins. Graceful
 application shutdown removes remaining entries and the temporary root.
 
-`PIPELINE_RESTART_WORKERS=false` is the safe default. On LitServe 0.2.17, a
-replacement worker cannot reliably notify the API process whose in-flight
-request belonged to the dead worker, so transparent replacement can strand that
-request. The default therefore fail-stops the API and inference processes; use
-an external supervisor to restart the service. Setting the variable to `true`
-is an unsupported opt-in until the locked real-process compatibility gate
-proves reliable death-path completion notification. It does not provide durable
-request replay: uploads and dispatch remain process-local. Redis-backed job
-status/results can survive an instance restart, but do not replay a lost upload.
+The API process binds the port, starts the worker and waits for its models to
+load before it takes connections; a worker whose setup fails stops the start.
+When the worker dies, every request in flight on it is answered at once with a
+`503` whose detail has the code `inference_worker_stopped` (so `bibr batch
+--serve-url` resubmits it, a bounded number of times, as it does a job whose
+replica died), `/health` answers `503`, and new requests get a `503` until a
+worker is ready again. With
+`PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
+status 1, for an external supervisor to restart; with `true` a new worker is
+started in place. Neither replays a lost request: uploads and dispatch are
+process-local. Redis-backed job status/results can survive an instance restart,
+but do not replay a lost upload.
 
-The private manager/worker startup and fail-stop death contracts are covered by
-real spawned-process compatibility tests. Keep LitServe constrained to `<0.3`;
-deliberately migrate those tests together with the private startup helpers
-before allowing 0.3 or newer.
+The worker boundary (status and detail of a worker error, the generic `500`,
+the `504` for a request that waited past `PIPELINE_TIMEOUT` for the worker, the
+death and restart paths) is covered by real spawned-process tests
+(`tests/serve/test_worker_contract.py`).
 
 ## Concurrency model
 
@@ -123,7 +141,7 @@ Scale concurrency with these settings:
 |---|---|---|
 | `PIPELINE_MAX_ACTIVE_UPLOADS` | `8` | Fail-fast API-server admission cap applied before multipart parsing; excess uploads receive `429`. Also covers the MCP chew tools: a large `/mcp` body holds a slot while it is received, and the tool holds one during extraction. |
 | `PIPELINE_MAX_INFLIGHT_REQUESTS` | `8` | Max requests running the pipeline concurrently per worker (`0` = unlimited). Bounds peak host RAM (page images) under an upload flood. |
-| `PIPELINE_RESTART_WORKERS` | `false` | Fail-stop on worker death. `true` is an unsupported opt-in until the locked death-path gate proves reliable completion notification. |
+| `PIPELINE_RESTART_WORKERS` | `false` | On worker death, stop the server for a supervisor to restart (`false`) or start a new worker in place (`true`). The requests in flight on the dead worker get a `503` either way. |
 | `PIPELINE_MAX_PAGES` | `200` | Hard per-file processing cap for compact many-page PDF protection. |
 | `LAYOUT_MAX_RENDER_PIXELS` | `25000000` | Pixel budget for one rasterized PDF page. A page over it (or over `LAYOUT_MAX_RENDER_DIMENSION` on a side) at the configured DPI renders at the largest DPI that fits, down to 24, with a `PAGE_DPI_REDUCED` warning; a page that does not fit even at 24 DPI is rejected before rasterization. |
 | `LAYOUT_MAX_RENDER_DIMENSION` | `10000` | Largest rasterized width or height for one PDF page, handled like `LAYOUT_MAX_RENDER_PIXELS`. |
@@ -252,8 +270,8 @@ queue and the upload hand-off are the missing pieces.
 `bibr serve` configures one log sink per process: the API process and the
 spawned inference worker each write formatted lines (`time level logger:
 message`) to stderr, where Docker and systemd collect them. `SERVE_LOG_LEVEL`
-(default `info`) sets the level for bibr's own loggers and is handed to uvicorn
-and LitServe; HTTP client libraries are held at `warning` so request URLs are
+(default `info`) sets the level for bibr's own loggers and is handed to
+uvicorn; HTTP client libraries are held at `warning` so request URLs are
 not logged. Every sink carries the secret scrubber, so bearer tokens, API-key
 headers, URL credentials, `?key=`-style query strings and URL signatures,
 quoted `"api_key": "…"` entries (any key ending in `api_key`, `token`,
@@ -428,7 +446,7 @@ cd bibr
 |---|---|---|---|
 | `redis` | `redis:7-alpine` | Response caching | Always (no profile) |
 | `bibr-ocr` | `Dockerfile.ocr` | SGLang server for GLM-OCR | `--profile ocr` |
-| `bibr-serve` | `Dockerfile.serve` | LitServe API + pipeline orchestrator + GPU models (layout, segmenter) | `--profile serve` |
+| `bibr-serve` | `Dockerfile.serve` | HTTP API + pipeline orchestrator + GPU models (layout, segmenter) | `--profile serve` |
 
 Redis has no profile, so it always starts; `bibr-serve` and `bibr-ocr` are
 opt-in via profile flags. Plain `docker compose up` therefore only starts
@@ -502,9 +520,27 @@ declares a GPU device reservation for `bibr-ocr` — add one to `bibr-serve` too
 `nvidia` as the Docker default runtime) if you want its models on GPU as
 well. Without a GPU, `bibr-serve` starts and its layout detector and
 segmenter fall back to CPU (see `LAYOUT_USE_GPU` / `SEGMENTER_USE_GPU`
-below), but it can only process PDFs when an OCR server is reachable: the
-bundled `bibr-ocr` needs a GPU, so a CPU-only host needs an external
-`OCR_BASE_URL` (see the split deployment above).
+below). Compose always gives `bibr-serve` an `OCR_BASE_URL` (its private
+`bibr-ocr` service unless you set another), so on a host without a GPU,
+where `bibr-ocr` cannot run, choose one of two routes:
+
+- **No OCR server (CPU only).** Read each PDF from its own text layer, as
+  `bibr serve --ocr text-layer` does. Born-digital PDFs only; a scanned PDF is
+  answered with `422` and `error_code: scan_needs_ocr`. In `.env`:
+
+    ```bash
+    OCR_BACKEND=text-layer     # takes precedence over OCR_BASE_URL: no OCR server is contacted
+    REDIS_PASSWORD=...         # Compose runs with ENVIRONMENT=production,
+    AUTH_API_KEY=...           # which requires both (the key: 32+ characters)
+    ```
+
+    ```bash
+    docker compose --profile serve up -d --build    # no --profile ocr
+    curl http://localhost:8000/ready                # "ready"; checks.ocr: not_used (text layer) with the token
+    ```
+
+- **An OCR server on another host**, set as `OCR_BASE_URL` (see the split
+  deployment above).
 
 The image builds on the PyTorch stack by default. `--build-arg ML_STACK=onnx` builds
 it without PyTorch or the `ml` extra: every model, layout included, runs on ONNX

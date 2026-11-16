@@ -59,7 +59,7 @@ uses the lookup-only path.
 
 Some sections have no printed heading: an abstract or introduction found by its
 position, a section named after a layout region, and the acknowledgment and
-author-contribution sections the opt-in statement tagger adds. Their
+author-contribution sections the statement tagger adds. Their
 `section[].header` is bibr's own wording ("Abstract", "Introduction",
 "Acknowledgments", "Author contributions"), and their row in
 `extraction.diagnostics.section_classification` carries `header_supplied: true`.
@@ -137,7 +137,7 @@ When the PP-DocLayoutV3 layout model tags a region with a semantic label (abstra
 
 **Module:** `bibr/extract/front_role.py` (bundle loading, scoring), `bibr/extract/front_role_features.py` (the feature contract shared with the trainer), consumed by `bibr/extract/front_matter.py` and `bibr/extract/ref_locator.py`
 
-An optional gradient-boosted model scores every OCR text region with a distribution over
+A gradient-boosted model, on by default, scores every OCR text region with a distribution over
 eleven roles: `title`, `byline`, `affiliation`, `abstract`, `keywords`, `doi_line`,
 `masthead`, `heading`, `ref_header`, `body`, `other`. Its features are the region's
 geometry in a page-relative frame, its font relative to the largest type on the page, and
@@ -160,8 +160,8 @@ keeps its lexical heuristics and adds the model's roles on top:
   (`ML_FRONT_ROLE_RECORD_ROOT_CONFIDENCE`, default `0.9`) keeps the title role and loses
   only the right to root a *second* record. `Correspondence`, `A R T I C L E I N F O`,
   `CITATION` and `Key Features` all score `heading` at 1.00 and all sit above an abstract,
-  which is anatomy enough to develop a record — so admitting a correct byline above them
-  used to cut the real title away from its own abstract. Layout's `doc_title` and a match
+  which is anatomy enough to develop a record, so without the veto a correct byline
+  admitted above them would cut the real title away from its own abstract. Layout's `doc_title` and a match
   against the reference parser's detected title both outrank the veto, and `1.0` disables
   it.
 
@@ -172,9 +172,11 @@ header, which covers the non-English headings (`Literaturverzeichnis`, `Bibliogr
 `ML_FRONT_ROLE_MODEL_ID` defaults to `scienceverse/bibr-front-role-v1`, pinned to a commit
 by `ML_FRONT_ROLE_REVISION` so a hub push cannot change front-matter output. Set the id to
 null to fall back to the lexical heuristics alone, or `ML_FRONT_ROLE_ENABLED=false` to keep
-a configured bundle unloaded. The bundle is a joblib **pickle**, read through the
-gadget-restricted loader — only point the setting at a checkpoint you control. scikit-learn
-and joblib are core dependencies, so the model runs on a torch-free install.
+a configured bundle unloaded. The bundle is a pickle-free `bibr-gbm/1` bundle
+(`front_role.json` and the trees in `front_role.npz`), read with numpy alone, so the model
+runs on a core install with neither torch nor scikit-learn. `scripts/export_gbm_bundle.py`
+converts a trainer's joblib bundle into this form and checks that it scores rows exactly as
+scikit-learn does.
 Loading is soft: an unavailable bundle logs one warning and the pipeline runs on the
 heuristics alone. Resolutions influenced by the model carry the `front_role_model` reason
 flag, and every candidate records the roles the model contributed (`model_roles`) with its

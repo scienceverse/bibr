@@ -20,6 +20,8 @@ import difflib
 import os
 import re
 import shutil
+import sys
+import textwrap
 from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
@@ -31,16 +33,23 @@ from bibr.env_utils import read_dotenv
 from bibr.local.cli import ui
 from bibr.utils.redact import redact_url_secrets
 
-# The 4 settings a new user actually has to touch to get bibr running:
-# an LLM provider (defaults to Google/Gemini), an LLM key, an OCR backend,
-# and a Crossref contact email (unlocks the "polite pool" rate limit for
-# reference enrichment).
+# The settings a new user is most likely to touch: the run mode, an LLM
+# provider and its key (full mode), an OCR backend (scanned PDFs), and a
+# Crossref contact email (the "polite pool" rate limit for reference
+# enrichment). bibr runs with none of them set, so the template writes every
+# one commented out: saving it as .env unchanged changes nothing.
 _MINIMAL_EXAMPLE_KEYS: tuple[str, ...] = (
+    "PIPELINE_MODE",
     "LLM_PROVIDER",
     "GOOGLE_API_KEY",
-    "CROSSREF_API_EMAIL",
+    "ANTHROPIC_API_KEY",
+    "LLM_API_KEY",
     "OCR_BACKEND",
+    "CROSSREF_API_EMAIL",
 )
+
+_EXAMPLE_COMMENT_WIDTH = 88
+_SETTING_ASSIGNMENT = re.compile(r"[A-Z][A-Z0-9_]*=")
 
 
 class Provenance(NamedTuple):
@@ -273,31 +282,60 @@ def _locate_doc_field(doc: SettingDoc) -> tuple[str | None, str]:
     return None, doc.field_name
 
 
-def render_env_example(full: bool = False) -> str:
-    """Render a ``.env`` template.
+def _comment_lines(text: str) -> list[str]:
+    """*text* as ``#`` comment lines, wrapped so no line needs a terminal to fold it.
 
-    ``full=False`` (default): the 4 settings a new user actually needs to
-    touch (see ``_MINIMAL_EXAMPLE_KEYS``), uncommented, with descriptions.
-    ``full=True``: every known setting, grouped by section, commented out as
-    ``# ENV_NAME=<default>`` with its description above — secret fields
-    always default to ``None`` and render bare (``# LLM_API_KEY=``), never a
-    fake placeholder value.
+    Every line starts with ``#``: a description that wrapped (or carried a
+    newline) without one left bare prose in the file, which python-dotenv
+    reports as a parse error on every later command.
+    """
+    lines: list[str] = []
+    for paragraph in text.splitlines():
+        wrapped = textwrap.wrap(
+            paragraph,
+            width=_EXAMPLE_COMMENT_WIDTH - 2,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        # A continuation that begins ``NAME=value`` would read as a setting line
+        # (``# NAME=value``); carry the previous line's last word down to it.
+        for index in range(1, len(wrapped)):
+            if _SETTING_ASSIGNMENT.match(wrapped[index]) and " " in wrapped[index - 1]:
+                head, _, last = wrapped[index - 1].rpartition(" ")
+                wrapped[index - 1] = head
+                wrapped[index] = f"{last} {wrapped[index]}"
+        lines.extend(f"# {line}" for line in wrapped or [""])
+    return [line.rstrip() for line in lines]
+
+
+def render_env_example(full: bool = False) -> str:
+    """Render a ``.env`` template that is safe to save unchanged.
+
+    ``full=False`` (default): the settings a new user is most likely to touch
+    (see ``_MINIMAL_EXAMPLE_KEYS``), with descriptions. ``full=True``: every
+    known setting, grouped by section. Either way each setting is commented
+    out as ``# ENV_NAME=<default>`` with its description above, so the file
+    changes nothing until a line is uncommented — secret fields always
+    default to ``None`` and render bare (``# LLM_API_KEY=``), never a fake
+    placeholder value.
     """
     docs = iter_setting_docs()
     if not full:
         by_name = {d.env_name: d for d in docs}
         lines = [
-            "# bibr .env — minimal settings to get started.",
-            "# Run `bibr config example --full` to see every setting.",
+            "# bibr .env — the settings most people touch.",
+            "# Everything is commented out: with nothing set, bibr runs in fast mode",
+            "# (local models only, no LLM and no API key). Uncomment what you need,",
+            "# or let `bibr setup` write this file for you.",
+            "# `bibr config example --full` lists every setting.",
             "",
         ]
         for name in _MINIMAL_EXAMPLE_KEYS:
             doc = by_name.get(name)
             if doc is None:
                 continue
-            if doc.description:
-                lines.append(f"# {doc.description}")
-            lines.append(f"{name}={_default_display(doc)}")
+            lines.extend(_comment_lines(doc.description or ""))
+            lines.append(f"# {name}={_default_display(doc)}")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
@@ -315,8 +353,7 @@ def render_env_example(full: bool = False) -> str:
         lines.append(f"# ==== {title} ====")
         lines.append("")
         for doc in by_section[section]:
-            if doc.description:
-                lines.append(f"# {doc.description}")
+            lines.extend(_comment_lines(doc.description or ""))
             default = _default_display(doc)
             if default == "" and doc.default_repr == "None":
                 # Spell the null explicitly: uncommenting ``KEY=`` would also
@@ -452,7 +489,10 @@ def _cmd_set(args: argparse.Namespace, console) -> int:
 
 def _cmd_example(args: argparse.Namespace, console) -> int:
     full = getattr(args, "full", False)
-    console.print(render_env_example(full=full), markup=False, highlight=False)
+    # Written as it is, not through the console: Rich folds long lines at the
+    # terminal width, and ``bibr config example > .env`` must stay a valid file.
+    del console
+    sys.stdout.write(render_env_example(full=full))
     return 0
 
 

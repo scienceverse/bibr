@@ -10,6 +10,7 @@ import instructor
 
 from bibr.clients.providers import register
 from bibr.clients.providers.base import bound_sdk_client
+from bibr.clients.sdk_extras import missing_llm_sdk
 from bibr.config import snapshot_settings
 
 if TYPE_CHECKING:
@@ -67,12 +68,14 @@ def _check_sdk_version() -> None:
     anthropic 1.0 dropped ``temperature`` and ``top_p`` from ``messages.create``
     and moved to httpx2, whose clients fail on the ``httpx.Timeout`` that
     ``bound_sdk_client`` sets. Every call failed: with a ``TypeError`` when it
-    carried a temperature, as "Connection error." otherwise. The ``batch``
-    extra pins the SDK below 1.0.
+    carried a temperature, as "Connection error." otherwise. The ``anthropic``
+    extra (and ``batch``, which includes it) pins the SDK below 1.0, but an
+    environment can still hold a newer one (another package's requirement, or
+    a hand install), so the version is checked here too.
     """
     try:
         import anthropic
-    except ImportError:  # instructor names the missing package itself
+    except ImportError:  # build_client reports the missing extra first
         return
     version = str(getattr(anthropic, "__version__", ""))
     major = version.split(".", 1)[0]
@@ -133,6 +136,11 @@ class AnthropicProvider:
                 "Anthropic API key required. "
                 "Set LLM_API_KEY or ANTHROPIC_API_KEY environment variable."
             )
+        missing = missing_llm_sdk(self.name)
+        if missing:
+            # The SDK is the ``anthropic`` extra: say so before Instructor's own
+            # ImportError, which names neither the extra nor the setting.
+            raise ValueError(missing)
         _check_sdk_version()
         client = instructor.from_provider(
             f"anthropic/{self._settings.llm.model}", async_client=True, api_key=api_key

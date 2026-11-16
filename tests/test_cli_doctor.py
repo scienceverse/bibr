@@ -682,8 +682,8 @@ def test_check_ref_strategies_llm_ok(monkeypatch):
     assert rec.calls == [("ok", "References: seg=llm, parse=llm", "")]
 
 
-def test_check_ref_strategies_geom_without_sklearn_fails(monkeypatch):
-    """The geom default without the ml extra reports a soft fail (cascades to LLM)."""
+def test_check_ref_strategies_geom_needs_no_sklearn(monkeypatch):
+    """The geom segmenter is read with numpy: no scikit-learn is no failure."""
     import importlib.util
 
     import bibr.config
@@ -695,9 +695,7 @@ def test_check_ref_strategies_geom_without_sklearn_fails(monkeypatch):
 
     rec = _Recorder()
     _check_ref_strategies(rec.ok, rec.fail)
-    assert rec.calls[0][0] == "fail"
-    assert "cascade to LLM" in rec.calls[0][1]
-    assert "Reinstall bibr" in rec.calls[0][2]
+    assert rec.calls == [("ok", "References: seg=geom, parse=llm", "")]
 
 
 def test_check_ref_strategies_ner_without_torch_is_ok_on_onnx(monkeypatch):
@@ -1143,14 +1141,84 @@ def test_doctor_names_the_home_env_file(monkeypatch, tmp_path):
     assert code == 0
 
 
-def test_doctor_without_env_file_warns_and_passes(monkeypatch):
-    """Configuration from the environment alone is legitimate (containers, CI)."""
+def test_doctor_without_env_file_is_ok_not_a_warning(monkeypatch):
+    """Configuration from the environment alone is legitimate (containers, CI):
+    bibr runs on its defaults, so a missing .env is not something to fix."""
     monkeypatch.setenv("BIBR_ENV_FILE", "")
 
     lines, code, _fake = _run_doctor_lines(monkeypatch)
 
-    assert "! No .env file found; settings come from the environment and defaults" in lines
+    assert (
+        "✓ No .env file: settings come from the environment and bibr's defaults "
+        "(bibr setup writes one)"
+    ) in lines
+    assert not any("No .env" in line and line.startswith("!") for line in lines)
     assert code == 0
+
+
+def test_doctor_unconfigured_redis_is_ok_not_a_warning(monkeypatch):
+    """Only the bibr serve cache uses Redis; not having it is the normal setup."""
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.redis, "url", "")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert "✓ Redis: not configured (only the bibr serve cache uses it)" in lines
+    assert not any(line.startswith("!") and "Redis" in line for line in lines)
+    assert code == 0
+
+
+def test_doctor_redis_without_a_password_still_warns(monkeypatch):
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.redis, "url", "redis://localhost:6379")
+    monkeypatch.setattr(bibr.config.Settings.redis, "password", "")
+
+    lines, _code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert "! Redis: configured (no password)" in lines
+
+
+def test_provider_message_extracts_the_sentence_from_a_quoted_error_body():
+    from bibr.local.cli.doctor import _provider_message
+
+    raw = (
+        "400 INVALID_ARGUMENT. {'error': {'code': 400, "
+        "'message': 'API key not valid. Please pass a valid API key.', 'status': 'INVALID_ARGUMENT'}}"
+    )
+
+    assert (
+        _provider_message(raw)
+        == "400 INVALID_ARGUMENT: API key not valid. Please pass a valid API key."
+    )
+    # Anything that does not quote a body is returned as it is.
+    assert _provider_message("Connection refused") == "Connection refused"
+
+
+def test_llm_ping_runs_with_the_instructor_retry_logger_silenced_then_restores_it(monkeypatch):
+    """The client's retry logger repeats the provider's raw error body for every
+    attempt; doctor prints one line instead, and puts the logger back after."""
+    import logging
+
+    logger = logging.getLogger("instructor")
+    monkeypatch.setattr(logger, "level", logging.WARNING)
+    seen: list[int] = []
+
+    def ping(settings=None):
+        seen.append(logger.level)
+        raise RuntimeError(
+            "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'API key not valid.'}}"
+        )
+
+    rec = _Recorder()
+    _run_check_llm_connection(rec, monkeypatch, api_key="not-a-real-key-value", ping=ping)
+
+    assert seen == [logging.CRITICAL]
+    assert logger.level == logging.WARNING
+    (status, msg, _hint) = rec.calls[0]
+    assert status == "fail"
+    assert msg == "LLM connection failed: 400 INVALID_ARGUMENT: API key not valid."
 
 
 def test_doctor_without_uv_warns_and_passes(monkeypatch):
@@ -1518,23 +1586,6 @@ def test_doctor_passes_a_full_runs_llm_backend_to_the_ocr_check(monkeypatch):
     assert _ocr_calls(monkeypatch, key="test-key") == [
         {"llm_backend": "cloud", "text_layer": False}
     ]
-
-
-def test_doctor_warns_but_does_not_fail_when_libmagic_is_missing(monkeypatch):
-    """bibr falls back to its own signature sniff, so a missing libmagic is advice, not an error."""
-    from bibr.input import validate
-
-    _mode_settings(monkeypatch)
-    monkeypatch.setattr(validate, "magic", None)
-    monkeypatch.setattr(validate, "_MAGIC_IMPORT_ERROR", ImportError("failed to find libmagic"))
-
-    lines, code, _fake = _run_doctor_lines(monkeypatch)
-
-    assert any(
-        line.startswith("! libmagic not found; bibr checks file types itself") for line in lines
-    ), lines
-    assert not [line for line in lines if line.startswith("✗ libmagic")]
-    assert code == 0
 
 
 def test_check_ref_strategies_crf_place_taken_by_the_text_segmenter_needs_no_torch(monkeypatch):

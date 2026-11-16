@@ -96,9 +96,53 @@ def test_explicit_paddle_vllm_without_a_gpu_names_the_blocker(monkeypatch, linux
     assert "paddle-vllm" in message and "no NVIDIA GPU" in message
 
 
-@pytest.mark.parametrize("backend", ["gemini", "openai", "anthropic", "glm-http"])
-def test_cloud_and_http_backends_are_not_vetted_here(backend):
+def test_an_http_backend_is_not_vetted_here():
     from bibr.local.cli import run_config
+
+    assert run_config._preflight_ocr_runtime(_cfg("glm-http")) is None
+
+
+_CLOUD_OCR_KEY_SETTINGS = {
+    "gemini": "GOOGLE_API_KEY",
+    "openai": "LLM_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+@pytest.fixture
+def no_cloud_keys(monkeypatch):
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.llm, "api_key", None)
+    monkeypatch.setattr(Settings.llm, "provider", "google")
+    monkeypatch.setattr(Settings.llm, "base_url", None)
+    monkeypatch.setattr(Settings, "GOOGLE_API_KEY", None)
+    monkeypatch.setattr(Settings, "ANTHROPIC_API_KEY", None)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    return Settings
+
+
+@pytest.mark.parametrize("backend", ["gemini", "openai", "anthropic"])
+def test_a_cloud_ocr_backend_with_no_key_is_stopped_before_any_model_loads(backend, no_cloud_keys):
+    """Without the key every region's request failed on its own, after the layout
+    model had loaded, and the run ended in a wall of SDK retry errors."""
+    from bibr.local.cli import run_config
+
+    message = run_config._preflight_ocr_runtime(_cfg(backend))
+
+    assert message is not None
+    assert f"The {backend} OCR backend" in message
+    assert _CLOUD_OCR_KEY_SETTINGS[backend] in message
+
+
+@pytest.mark.parametrize("backend", ["gemini", "openai", "anthropic"])
+def test_a_cloud_ocr_backend_with_its_key_passes(backend, no_cloud_keys, monkeypatch):
+    from bibr.local.cli import run_config
+
+    if backend == "openai":
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+    else:
+        monkeypatch.setattr(no_cloud_keys, _CLOUD_OCR_KEY_SETTINGS[backend], "test-not-a-real-key")
 
     assert run_config._preflight_ocr_runtime(_cfg(backend)) is None
 

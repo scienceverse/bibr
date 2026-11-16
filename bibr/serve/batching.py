@@ -1,7 +1,7 @@
 """GpuBatcher — async micro-batching broker for shared GPU models.
 
 A single worker process holds one copy of each GPU model (layout, segmenter)
-and serves many concurrent requests via the LitServe async loop. Without
+and serves many concurrent requests on its async loop. Without
 coordination, those concurrent requests would each fire their own forward
 pass into the GPU at once — unbounded peak VRAM and an OOM on small cards.
 

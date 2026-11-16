@@ -36,7 +36,7 @@ def _compute_code_hash() -> str:
     Returns a deterministic hash that changes only when Python source files
     change, so container restarts without code changes preserve the cache.
 
-    Memoized after first call — under LitServe each worker imports
+    Memoized after first call — every serve process imports
     ``bibr.config`` independently, so eager evaluation at import time used
     to walk every ``*.py`` under the package per worker startup. Most
     callers never read ``CacheOptions.version``, so deferring keeps the
@@ -1315,7 +1315,11 @@ class OcrVisionOptions(_BibrSettings):
         "google",
         description='Vision LLM provider for OCR: "google" (default), "openai", "anthropic".',
     )
-    model: str = Field("gemini-3-flash-preview", description="Vision LLM model for OCR.")
+    model: str = Field(
+        "gemini-3-flash-preview",
+        description="Vision LLM model for OCR. Unset, the anthropic OCR backend uses "
+        "claude-haiku-5-5 instead of this Gemini default; set it for the openai backend.",
+    )
     base_url: str | None = Field(None, description="Vision LLM base URL override.")
     rate_limit_rpm: int = Field(
         30, ge=1, description="Vision LLM rate limit in requests per minute."
@@ -1482,9 +1486,8 @@ class LayoutOptions(_BibrSettings):
     )
     torch_compile: bool = Field(False, description="Enable torch.compile for the layout model.")
     # Run the serve layout model on GPU. None = auto-detect (cuda→mps→cpu in the
-    # worker). LitServe's accelerator="auto" can't be trusted here — it resolves
-    # to CPU whenever torch isn't pre-imported in the master process, which bibr
-    # never does — so the serve layer auto-detects independently. PP-DocLayout
+    # worker). The API process never imports torch, so it cannot tell the
+    # device; the worker auto-detects it. PP-DocLayout
     # on CPU is dramatically slower; force CPU with LAYOUT_USE_GPU=false only on
     # VRAM-tight boxes that co-locate OCR (mirrors SEGMENTER_USE_GPU).
     use_gpu: bool | None = Field(
@@ -2130,18 +2133,19 @@ class MlOptions(_BibrSettings):
     # evidence for front-matter ownership (title/byline/affiliation/abstract
     # admission, masthead suppression) and for non-English reference headers.
     # Null disables it; front matter then rests on the lexical heuristics alone.
-    # Loaded via bibr.ner.checkpoint.resolve_checkpoint (bare repo id gets
-    # ":front_role.joblib" appended). scikit-learn and joblib are core deps, so
-    # this runs on a torch-free install like every other default-path model.
+    # Loaded via bibr.utils.gbm_bundle.load_gbm_bundle: front_role.json and its
+    # .npz (bibr-gbm/1), read with numpy alone.
     front_role_model_id: str | None = Field(
         "scienceverse/bibr-front-role-v1",
         description="HF Hub repo id (or local path) of the first-page region-role classifier "
         "bundle. Null disables the model and rests front matter on the lexical heuristics "
-        "alone. TRUST BOUNDARY: deserialized with joblib via the gadget-restricted loader; "
-        "only point it at a checkpoint you control.",
+        "alone. A local path names the front_role.json manifest (bibr-gbm/1, its .npz "
+        "beside it) or the directory holding them; scripts/export_gbm_bundle.py converts "
+        "a .joblib bundle.",
     )
+    # The pinned revision holds front_role.json/.npz (bibr-gbm/1) beside the joblib bundle.
     front_role_revision: str = Field(
-        "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b",
+        "a1fd66375f44a2db954fd8da66460cd527caca41",
         description="Pinned revision for the front-role classifier bundle. Pinned so a hub push "
         "cannot change front-matter output; 'main' tracks the repo head.",
     )
@@ -2391,7 +2395,7 @@ class PipelineOptions(_BibrSettings):
     )
     # There is deliberately no workers-per-device setting: bibr serve pins one
     # inference worker (see bibr/serve/app.py). Concurrency comes from the
-    # LitServe async loop and the layout/segmenter GpuBatcher; a second worker
+    # worker's async loop and the layout/segmenter GpuBatcher; a second worker
     # would duplicate the models (~1.5 GB RSS each), split the batcher, and
     # parallelize only GIL-bound Python, since the heavy stages already use
     # every core from one process.
@@ -2404,9 +2408,9 @@ class PipelineOptions(_BibrSettings):
     )
     restart_workers: bool = Field(
         False,
-        description="Opt in to LitServe worker replacement after a critical worker-loop failure. "
-        "The safe default is fail-stop because LitServe 0.2.x cannot reliably notify an API "
-        "process whose in-flight request belonged to the dead worker.",
+        description="Start a new inference worker when it dies, instead of stopping bibr serve. "
+        "Either way the requests in flight on the dead worker are answered with a 503 at once; "
+        "the default (false) stops the server so a supervisor restarts it.",
     )
     upload_spool_memory_bytes: int = Field(
         1024 * 1024,
@@ -2434,6 +2438,17 @@ class PipelineOptions(_BibrSettings):
         "mode not aggressive); managed local LLM backends keep the stage barrier. Escape hatch "
         "for debugging.",
     )
+    # bibr batch only, and only with stream_backhalf: the next chunk starts once
+    # this chunk's pages are read, so it renders while this chunk's last files
+    # parse and export instead of after (bibr.batch.runner.LocalExecutor).
+    overlap_chunks: bool = Field(
+        True,
+        description="In a local bibr batch on the streaming path (PIPELINE_STREAM_BACKHALF), "
+        "start each chunk once the one before has read its last page, so the next chunk's "
+        "pages are read while the last files of the one before are parsed and exported. At "
+        "most two chunks are in flight and they share the back-half limit; each chunk still "
+        "gets its own verdicts. false runs each chunk after the one before has ended.",
+    )
     # glibc keeps freed page images and model buffers in its per-thread malloc
     # arenas, so a long batch keeps every chunk's high-water mark unless the
     # free pages are handed back (bibr.utils.heap). Batch drivers only:
@@ -2457,7 +2472,7 @@ class PipelineOptions(_BibrSettings):
         "keep glibc's default; no effect off glibc Linux.",
     )
     # Max requests running the pipeline concurrently per worker (0 = unlimited).
-    # The LitServe async loop dispatches unbounded concurrent predicts; this
+    # The worker's async loop runs unbounded concurrent predicts; this
     # bounds peak host RAM (page images) under an upload flood. GPU peak VRAM is
     # bounded separately by the layout/segmenter GpuBatcher.
     max_inflight_requests: int = Field(
@@ -2722,8 +2737,8 @@ class GlobalSettings(_BibrSettings):
     )
     SERVE_LOG_LEVEL: str = Field(
         "info",
-        description="Log level for bibr serve's own loggers (bibr.*), also handed to uvicorn "
-        "and LitServe: debug, info, warning or error. Metering records (METER_ENABLED) are "
+        description="Log level for bibr serve's own loggers (bibr.*), also handed to uvicorn: "
+        "debug, info, warning or error. Metering records (METER_ENABLED) are "
         "emitted regardless of this level.",
     )
 
@@ -2928,18 +2943,18 @@ class GlobalSettings(_BibrSettings):
         "for this call. Bounds degenerate generations to a fast, detectable truncation.",
     )
     # Local geometry reference segmenter (REF_SEG_STRATEGY=geom). Frozen GBM
-    # bundle in a public HF repo, loaded via bibr.ner.checkpoint.resolve_checkpoint
-    # (the bare repo id gets ":geom_segmenter.joblib" appended). Needs the ml extra.
+    # bundle in a public HF repo, loaded via bibr.utils.gbm_bundle.load_gbm_bundle:
+    # geom_segmenter.json and its .npz (bibr-gbm/1), read with numpy alone.
     REF_GEOM_SEG_MODEL_ID: str = Field(
         "scienceverse/bibr-geom-segmenter-v1",
         description="HF Hub repo id for the local geometry reference segmenter (REF_SEG_STRATEGY=geom). "
-        "Needs the ml extra. TRUST BOUNDARY: this is deserialized with joblib (executes code on "
-        "load); a local path here is loaded via the gadget-restricted loader but must still be a "
-        "checkpoint you control — never point it at an untrusted file.",
+        "A local path names the geom_segmenter.json manifest (bibr-gbm/1, its .npz beside it) "
+        "or the directory holding them; scripts/export_gbm_bundle.py converts a .joblib bundle.",
     )
     # Keep the pinned bundle compatible with geom_adjacent_features patterns.
+    # The pinned revision holds geom_segmenter.json/.npz (bibr-gbm/1) beside the joblib bundle.
     REF_GEOM_SEG_REVISION: str = Field(
-        "4d1702e2c766d96c8887bd4b30ef56637aa9b32c",
+        "88a292ffc709e5338dc5faf078fd8337b3ff962d",
         description="Pinned commit revision for the geometry reference segmenter bundle.",
     )
     # Line-sequence tagger the geom tier tries before the GBM

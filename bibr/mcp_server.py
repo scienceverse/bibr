@@ -703,6 +703,9 @@ def build_server(
     chew_unavailable = ""
     try:
         chewer = Chewer(refs=refs, settings=settings, **options)
+        # The server is configured with ``bibr mcp`` flags, so a refusal names
+        # those rather than the library's keyword arguments.
+        chewer._library_wording = False
     except (ValueError, BibrError) as e:
         # Only the preflight may fail softly: the same options with it
         # skipped must build, so a bad option still stops the server.

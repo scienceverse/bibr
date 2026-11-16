@@ -192,8 +192,8 @@ class AsyncCircuitBreaker:
         self._failure_count = 0
         self._last_failure_time: float = 0.0
 
-        # One breaker can serve several event loops: test fixtures, LitServe
-        # worker spawn, or a process-wide client used from threads that each
+        # One breaker can serve several event loops: test fixtures, the serve
+        # worker, or a process-wide client used from threads that each
         # run their own loop (bibr.chew() from a web threadpool). The state
         # machine is shared by all of them, so it is guarded by a thread
         # lock. No critical section awaits, so it is never held across a

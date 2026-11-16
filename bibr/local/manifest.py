@@ -157,6 +157,10 @@ def load_manifest(path: str | Path) -> list[ManifestRecord]:
 
 
 def resolve_cli_source_mode(inputs: list[str], manifest: str | None) -> str:
-    if bool(inputs) == bool(manifest):
-        raise ManifestError("provide exactly one input mode: positional inputs or --manifest")
+    if inputs and manifest:
+        raise ManifestError("pass input paths or --manifest, not both")
+    if not inputs and not manifest:
+        raise ManifestError(
+            "no input: name a paper or a folder of papers, e.g. bibr chew paper.pdf -o result.json"
+        )
     return "manifest" if manifest else "inputs"

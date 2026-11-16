@@ -57,7 +57,7 @@ class ValidateStage:
                 if not input_file.is_valid:
                     code = "unknown"
                     if not input_file.is_supported:
-                        msg = "Unsupported file format"
+                        msg = _unsupported_message(path.name, input_file)
                         code = "unsupported_format"
                     elif input_file.is_corrupted:
                         msg = "File appears to be corrupted or unreadable"
@@ -69,6 +69,17 @@ class ValidateStage:
                         msg = "File could not be validated"
                     fs.set_error(msg, code=code, stage="validate")
                     fs.free_all()
+            except FileNotFoundError as e:
+                # The caller's mistake, not bibr's: no traceback. Recorded as an
+                # InputFileNotFoundError (also a FileNotFoundError), which
+                # Pipeline.process_file raises as it is.
+                from bibr.exceptions import InputFileNotFoundError
+
+                missing = e if isinstance(e, InputFileNotFoundError) else None
+                missing = missing or InputFileNotFoundError(e.filename or fs.path)
+                fs.set_error(str(missing), code=missing.error_code, stage="validate", exc=missing)
+                fs.free_all()
+                logger.info("Input rejected for %s: %s", fs.path.name, missing)
             except InputValidationError as e:
                 # A rejected input is a client-side 4xx, not an internal
                 # failure. Flattening it into code="unknown" cost the serve
@@ -85,3 +96,18 @@ class ValidateStage:
 
         logger.debug("Validate stage: %.1fs", time.monotonic() - t0)
         ctx.progress.stage_end(self.name)
+
+
+def _unsupported_message(name: str, input_file) -> str:
+    """Why a file is refused as unsupported: its extension, or content that does not match it."""
+    from bibr.input.supported_files import SUPPORTED_EXTENSIONS, SupportedFileType
+
+    formats = ", ".join(file_type.value for file_type in SupportedFileType)
+    extension = (input_file.file_extension or "").lower()
+    if extension in SUPPORTED_EXTENSIONS:
+        fmt = getattr(input_file, "input_format", None)
+        detected = getattr(fmt, "detected_mime_type", None)
+        content = f" ({detected})" if detected else ""
+        return f"Unsupported file format: the content of {name}{content} is not a {extension} file"
+    shown = f"'{extension}'" if extension else "no extension"
+    return f"Unsupported file format: {name} has {shown}; bibr reads {formats} files"

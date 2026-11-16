@@ -123,10 +123,13 @@ def test_full_export_validation_block(capsys):
     run_inspect(str(FULL))
     out = capsys.readouterr().out
 
-    assert "VAL_XREF_ZERO" in out
-    assert "low xref count" in out
-    # ``extraction.warnings`` entry folded in by _format_validation_line.
-    assert "processing warnings" in out
+    assert "! in-text citations: low xref count  [VAL_XREF_ZERO]" in out
+    assert "1 warning to review (in-text citations) · 1 processing note" in out
+    # ``extraction.warnings`` is its own section, each entry with its code.
+    assert "Processing notes" in out
+    assert (
+        "· funding_statement filled by lexical anchor matching  [STATEMENT_LEXICAL_FALLBACK]" in out
+    )
 
 
 def test_full_export_llm_usage_table(capsys):
@@ -379,3 +382,79 @@ def test_cli_dispatch_calls_run_inspect(monkeypatch):
         raise AssertionError("main() should have called sys.exit(0)")
 
     assert called["path"] == str(FULL)
+
+
+# --- every finding and every processing note is listed --------------------------
+
+
+def _write_export(tmp_path, **blocks):
+    import json
+
+    path = tmp_path / "export.json"
+    path.write_text(
+        json.dumps({"schema_version": "11", "metadata": {"title": "T"}, **blocks}), encoding="utf-8"
+    )
+    return path
+
+
+def test_every_validation_issue_is_listed_errors_first(tmp_path, capsys):
+    from bibr.local.inspect import run_inspect
+
+    issues = [
+        {"code": "VAL_TITLE_GENERIC", "severity": "warning", "message": "generic title"},
+        {"code": "VAL_UNKNOWN_FUTURE", "severity": "warning", "message": "something new"},
+        {"code": "VAL_AUTHOR_EMPTY", "severity": "error", "message": "no authors found"},
+        {"code": "VAL_REF_NONE", "severity": "warning", "message": "no references"},
+    ]
+    path = _write_export(tmp_path, validation={"errors": 1, "warnings": 3, "issues": issues})
+
+    assert run_inspect(str(path)) == 0
+    out = capsys.readouterr().out
+
+    lines = [line.strip() for line in out.splitlines()]
+    # More than the two the run summary names: all four, the error first with ✗.
+    assert lines.index("✗ authors: no authors found  [VAL_AUTHOR_EMPTY]") < lines.index(
+        "! title: generic title  [VAL_TITLE_GENERIC]"
+    )
+    assert "! references: no references  [VAL_REF_NONE]" in lines
+    # A code outside every known family is still listed, without a subject prefix.
+    assert "! something new  [VAL_UNKNOWN_FUTURE]" in lines
+
+
+def test_processing_notes_section_lists_every_entry_including_routine_ones(tmp_path, capsys):
+    from bibr.local.inspect import run_inspect
+
+    notes = [
+        {"code": "LLM_SKIPPED", "message": "fast mode: no LLM call"},
+        {"code": "REF_FALLBACK", "message": "references read by the fallback parser"},
+    ]
+    path = _write_export(tmp_path, extraction={"warnings": notes})
+
+    run_inspect(str(path))
+    out = capsys.readouterr().out
+
+    section = out.split("Processing notes", 1)[1].split("LLM usage", 1)[0]
+    # The run summary leaves LLM_SKIPPED out as routine; inspect is the full record.
+    assert "· fast mode: no LLM call  [LLM_SKIPPED]" in section
+    assert "· references read by the fallback parser  [REF_FALLBACK]" in section
+
+
+def test_processing_notes_section_says_none_when_there_are_none(tmp_path, capsys):
+    from bibr.local.inspect import run_inspect
+
+    run_inspect(str(_write_export(tmp_path)))
+    out = capsys.readouterr().out
+
+    assert out.split("Processing notes", 1)[1].split("LLM usage", 1)[0].strip() == "none"
+
+
+def test_inspecting_a_directory_is_a_one_line_error(tmp_path, capsys):
+    from bibr.local.inspect import run_inspect
+
+    assert run_inspect(str(tmp_path)) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "is a directory; name one export" in captured.err
+    assert "Traceback" not in captured.err
+    assert len(captured.err.strip().splitlines()) == 1

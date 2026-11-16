@@ -39,6 +39,10 @@ _SECTION_TITLES = {
     "MCP_": "MCP endpoint (serve)",
 }
 
+#: Settings sections shown first, in this order: the ones that decide what a run does.
+#: The rest follow in the order bibr.config declares them, top-level settings last.
+_SETTINGS_SECTIONS_FIRST = ("PIPELINE_", "OCR_", "OCR_VISION_", "LLM_")
+
 _HEADER = (
     "<!-- GENERATED at mkdocs build time by scripts/gen_docs_reference.py — do not edit. -->\n"
 )
@@ -80,6 +84,36 @@ def _settings_table(docs: list[SettingDoc]) -> str:
     return "\n".join(lines)
 
 
+def _unconfigured_box(docs: list[SettingDoc]) -> str:
+    """The "with nothing configured" admonition, with defaults read from the settings."""
+    default = {
+        d.env_name: {"True": "true", "False": "false"}.get(
+            d.default_repr, d.default_repr.strip('"')
+        )
+        for d in docs
+    }
+    return (
+        '!!! info "With nothing configured"\n'
+        f"    `PIPELINE_MODE` defaults to `{default['PIPELINE_MODE']}`, which runs in "
+        "**fast mode** while no LLM is configured: bibr's local models only, no LLM call "
+        "and no API key. A fast run with no OCR setting reads PDFs from their text layer "
+        "(the `text-layer` backend); the `OCR_BACKEND` default "
+        f"(`{default['OCR_BACKEND']}`) applies in full mode or once you set an OCR "
+        f"option, and `LLM_PROVIDER` (`{default['LLM_PROVIDER']}`) only in full mode. "
+        f"Crossref enrichment is off (`CROSSREF_ENRICH` is `{default['CROSSREF_ENRICH']}`). "
+        "An LLM key such as `GOOGLE_API_KEY` or `LLM_API_KEY` in the environment counts "
+        "as a configured LLM. `bibr setup` writes the settings for an LLM or OCR, and "
+        "`--fast` / `--full` choose the mode for one run.\n"
+    )
+
+
+def _settings_section_order(sections: list[str]) -> list[str]:
+    """Run-deciding sections first, then the rest in declaration order, top-level last."""
+    first = [s for s in _SETTINGS_SECTIONS_FIRST if s in sections]
+    rest = [s for s in sections if s and s not in first]
+    return first + rest + [s for s in sections if not s]
+
+
 def render_settings_md() -> str:
     docs = iter_setting_docs()
     by_section: dict[str, list[SettingDoc]] = {}
@@ -88,6 +122,7 @@ def render_settings_md() -> str:
     parts = [
         _HEADER,
         "# Settings reference\n",
+        _unconfigured_box(docs),
         "Configuration loads `~/.bibr/.env`, then the working directory's `.env`; "
         "environment variables override both. `BIBR_ENV_FILE` replaces this file "
         "chain (use `:` between paths on Unix, `;` on Windows, or an empty value "
@@ -99,9 +134,7 @@ def render_settings_md() -> str:
         "your `.env` file. See the [configuration guide](../guides/configuration.md) "
         "for presets and examples.\n",
     ]
-    # Sections in walker order, "" (top-level) last for readability
-    ordered = [s for s in by_section if s] + [s for s in by_section if not s]
-    for section in ordered:
+    for section in _settings_section_order(list(by_section)):
         title = _SECTION_TITLES.get(section, section.rstrip("_") or "Other")
         suffix = f" (`{section}*`)" if section else ""
         parts.append(f"## {title}{suffix}\n")
@@ -117,6 +150,27 @@ def _expand_help(action: argparse.Action) -> str:
         return help_text
 
 
+def _documented(actions: list[argparse.Action]) -> list[argparse.Action]:
+    return [
+        a
+        for a in actions
+        if not isinstance(a, argparse._SubParsersAction) and a.dest != "help"  # noqa: SLF001
+    ]
+
+
+def _actions_table(actions: list[argparse.Action]) -> str | None:
+    """Render a flag table for *actions*, or ``None`` when none is worth a row."""
+    rows = _documented(actions)
+    if not rows:
+        return None
+    lines = ["| Flag | Default | Description |", "|---|---|---|"]
+    for action in rows:
+        flags = ", ".join(f"`{s}`" for s in action.option_strings) or f"`{action.dest}`"
+        default = "" if action.default in (None, argparse.SUPPRESS) else f"`{action.default!r}`"
+        lines.append(f"| {flags} | {default} | {_md_escape(_expand_help(action))} |")
+    return "\n".join(lines)
+
+
 def _options_table(parser: argparse.ArgumentParser) -> str | None:
     """Render the flag table, or ``None`` if the parser has nothing to document.
 
@@ -124,16 +178,81 @@ def _options_table(parser: argparse.ArgumentParser) -> str | None:
     (e.g. ``bibr setup``, ``bibr doctor``) has no rows to show — an
     empty header-only table reads as a rendering bug, not "no options".
     """
-    lines = ["| Flag | Default | Description |", "|---|---|---|"]
-    has_rows = False
-    for action in parser._actions:  # noqa: SLF001 — argparse has no public tree API
-        if isinstance(action, argparse._SubParsersAction) or action.dest == "help":
-            continue
-        has_rows = True
-        flags = ", ".join(f"`{s}`" for s in action.option_strings) or f"`{action.dest}`"
-        default = "" if action.default in (None, argparse.SUPPRESS) else f"`{action.default!r}`"
-        lines.append(f"| {flags} | {default} | {_md_escape(_expand_help(action))} |")
-    return "\n".join(lines) if has_rows else None
+    return _actions_table(parser._actions)  # noqa: SLF001 — argparse has no public tree API
+
+
+def _titled_groups(parser: argparse.ArgumentParser) -> list[argparse._ArgumentGroup]:
+    """The argument groups a command defines itself (``bibr chew``'s "run mode", ...).
+
+    argparse's own two groups (positional arguments and options) are left out.
+    """
+    defaults = {id(parser._positionals), id(parser._optionals)}  # noqa: SLF001
+    return [
+        g
+        for g in parser._action_groups  # noqa: SLF001
+        if id(g) not in defaults and _documented(g._group_actions)  # noqa: SLF001
+    ]
+
+
+def _grouped_options(parser: argparse.ArgumentParser) -> list[str] | None:
+    """The options of a command with titled groups, one table per group.
+
+    The ungrouped arguments come first in one untitled table, then each group under a
+    heading with its description. ``None`` when the command defines no groups.
+    """
+    groups = _titled_groups(parser)
+    if not groups:
+        return None
+    grouped = {id(a) for g in groups for a in g._group_actions}  # noqa: SLF001
+    parts = []
+    ungrouped = _actions_table([a for a in parser._actions if id(a) not in grouped])  # noqa: SLF001
+    if ungrouped is not None:
+        parts.append(ungrouped + "\n")
+    for group in groups:
+        title = group.title or ""
+        parts.append(f"### {title[:1].upper()}{title[1:]}\n")
+        if group.description:
+            parts.append(" ".join(group.description.split()) + "\n")
+        parts.append(_actions_table(group._group_actions) + "\n")  # noqa: SLF001
+    return parts
+
+
+#: Task → command rows at the top of the CLI reference. Every flag is checked
+#: against the parser by tests/test_docs_ref_core.py.
+CLI_CHEAT_SHEET: tuple[tuple[str, str], ...] = (
+    ("Extract one paper to a JSON file", "bibr chew paper.pdf -o paper.json"),
+    ("Try the sample paper that ships with bibr", "bibr chew --sample -o sample.json"),
+    ("Summarize a result and its warnings", "bibr inspect paper.json"),
+    ("Every paper in a folder", "bibr chew papers/ -o results/"),
+    ("Only some pages", "bibr chew paper.pdf --pages 1-3"),
+    ("Never call an LLM, even if one is configured", "bibr chew paper.pdf --fast"),
+    ("Use the configured LLM", "bibr chew paper.pdf --full"),
+    ("See the plan and what would download, process nothing", "bibr chew paper.pdf --dry-run"),
+    ("Skip the reference list", "bibr chew paper.pdf --refs off"),
+    ("Look references up in Crossref", "bibr chew paper.pdf --crossref"),
+    (
+        "Read a scanned PDF with a cloud vision model "
+        "([what it needs](../getting-started/troubleshooting.md#a-scanned-pdf-stops-with-no-usable-text-layer))",
+        "bibr chew scan.pdf --ocr anthropic",
+    ),
+    ("Show bibr's log while it runs", "bibr chew paper.pdf -o paper.json -v"),
+    (
+        "Reference lists to BibTeX (.ris: RIS, .json: CSL-JSON)",
+        "bibr references results/ -o refs.bib",
+    ),
+    ("Results to Parquet tables", "bibr tables results/ --out tables/"),
+    ("A large corpus, resumable", "bibr batch papers/ --out corpus/"),
+    ("Check this machine and your configuration", "bibr doctor"),
+    ("Add an LLM or OCR", "bibr setup"),
+    ("Where each setting comes from", "bibr config show --sources"),
+    ("A commented-out `.env` to start from", "bibr config example"),
+)
+
+
+def _cheat_sheet_md() -> str:
+    lines = ["## Common tasks\n", "| Task | Command |", "|---|---|"]
+    lines += [f"| {task} | `{command}` |" for task, command in CLI_CHEAT_SHEET]
+    return "\n".join(lines) + "\n"
 
 
 def _walk_commands(
@@ -184,6 +303,7 @@ def render_cli_md() -> str:
         "Tables are generated from the CLI parser; a blank default usually means "
         "the command resolves a value from configuration or hardware at runtime. "
         "Use `bibr chew paper.pdf --dry-run` to preview the resolved processing plan.\n",
+        _cheat_sheet_md(),
     ]
     for prog, sub, desc in _walk_commands(_build_parser(), "bibr")[1:]:  # skip the root parser
         if prog == "bibr demo":
@@ -192,8 +312,10 @@ def render_cli_md() -> str:
         parts.append(f"## {prog}\n")
         if desc:
             parts.append(desc + "\n")
-        table = _options_table(sub)
-        if table is not None:
+        grouped = _grouped_options(sub)
+        if grouped is not None:
+            parts.extend(grouped)
+        elif (table := _options_table(sub)) is not None:
             parts.append(table + "\n")
         if prog in delegated_help:
             parts.append(delegated_help[prog])

@@ -21,7 +21,7 @@ File / bytes --> Validate
 Two runtime options are available:
 
 - **`bibr chew` / Python library** (`bibr/local/pipeline.py`) -- `LocalPipeline` manages model lifetimes on one machine. OCR uses the selected Paddle-first runtime, an explicit HTTP backend, or a cloud vision provider.
-- **`bibr serve`** (`bibr/serve/app.py`) -- LitServe HTTP API with disk-backed
+- **`bibr serve`** (`bibr/serve/app.py`) -- FastAPI HTTP API with disk-backed
   multipart ingress and one spawned inference worker hosting the pipeline GPU
   models (layout, segmenter).
 
@@ -42,10 +42,11 @@ Checks MIME type, file corruption, and encryption. Refuses unsupported formats (
 - DOCX and JATS XML files are parsed natively (python-docx, and a JATS `<article>` parser respectively) to extract headings and text structure, skipping OCR entirely
 - HTML (`.html`/`.htm`) and ePub (`.epub`) files are also parsed natively — `HtmlHandlingStage` (`bibr/pipeline/stages/html.py`), backed by `bibr/input/html_native.py` and `bibr/input/epub_native.py` — skipping OCR the same way as DOCX/JATS
 - PP-DocLayoutV3 detects PDF regions (headings, body text, tables, formulas, figures, and more); regions then flow through native-text inspection and recognition
-- `OCR_BACKEND=paddle` selects one Paddle-first OCR runtime transactionally at startup; explicit `paddle-*`, `glm-*`, and cloud backends remain available through `OcrOptions`
+- A fast run that names no OCR route reads PDFs with the text-layer backend and starts no OCR model (see below). Otherwise `OCR_BACKEND=paddle`, the default, selects one Paddle-first OCR runtime transactionally at startup; explicit `paddle-*`, `glm-*`, and cloud backends remain available through `OcrOptions`
 
 **PDF limits.** `PIPELINE_MAX_PAGES` limits the processed page count
-(default 200). Pages beyond the cap are dropped without a warning in the
+(default 200), counted from the first page processed (the start of `--pages`,
+or page 1). Pages beyond the cap are dropped without a warning in the
 console or the export; for a long document, compare the length of the export's
 `extraction.pages` list with the PDF's page count. Render-pixel and dimension
 limits reject oversized pages before rasterization. Size memory for the
@@ -303,7 +304,9 @@ instead of copying them. The superseded
 
 ### OCR selection and evidence
 
-PDF OCR starts with PP-DocLayoutV3 regions. `OCR_BACKEND=paddle` then selects a
+PDF OCR starts with PP-DocLayoutV3 regions. A fast run that names no OCR route
+reads them from the text layer and starts no OCR runtime. Otherwise
+`OCR_BACKEND=paddle` (the default) selects a
 concrete runtime transactionally at startup: Linux x86_64 tries
 `paddle-vllm` (PaddleOCR-VL-1.6) when an NVIDIA GPU with at least 8 GB VRAM
 is detected, then `glm-llama`; without that GPU it uses `glm-llama` directly.
@@ -390,7 +393,7 @@ IMRaD+ section classification enum:
 
 | Service | Purpose | Required |
 |---|---|---|
-| OCR runtime (`paddle-*` default; `glm-*` explicit/fallback) | PDF recognition after layout detection | `bibr chew` selects a local runtime; `bibr serve` proxies to an explicit external OCR service |
+| OCR runtime (`paddle-*` by default in full mode; `glm-*` explicit/fallback; none for the text layer, which a fast run with no OCR setting uses) | PDF recognition after layout detection | `bibr chew` selects a local runtime; `bibr serve` proxies to an explicit external OCR service |
 | LLM API (Google/OpenAI/Anthropic/Groq/Ollama or managed local server) | Metadata extraction and fallback tasks | Standard extraction path; `no_llm=True` disables these tasks |
 | Crossref API | Reference enrichment (DOI lookup + search) | Optional |
 | Redis | Response caching (`bibr serve` mode) | Optional |
@@ -408,7 +411,7 @@ Pipeline orchestrator (`bibr/local/pipeline.py`). Loads models sequentially to f
 | `bibr/local/layout.py` | PP-DocLayoutV3 layout detector |
 | `bibr/local/segmenter.py` | wtpsplit-lite sentence segmenter |
 | `bibr/local/ocr.py`, `bibr/local/vllm_ocr.py`, `bibr/local/mlx_vlm_ocr.py`, `bibr/local/rapid_mlx.py`, `bibr/local/ocr_cloud.py` | OCR backends behind `bibr/ocr/registry.py`: managed `paddle-vllm` / `glm-llama` / `paddle-*-mlx` / `glm-rapid-mlx` servers, `paddle-http` / `glm-http` external servers, and the cloud vision LLMs |
-| `bibr/pipeline/` | The stage pipeline (`stages/`), run context, resources and caches shared by the local and LitServe entry points |
+| `bibr/pipeline/` | The stage pipeline (`stages/`), run context, resources and caches shared by the local and serve entry points |
 
 Memory management modes control GPU VRAM usage: `aggressive` (load/unload per phase), `balanced` (keep layout + segmenter resident; OCR also stays resident across chunks unless a local LLM server needs the VRAM), `keep_all` (everything loaded).
 
@@ -420,12 +423,17 @@ left out of the rule: no managed LLM server, an OCR route that starts no engine
 onnxruntime has no CUDA provider and that has no torch. On Linux, system RAM is the machine's RAM or a
 smaller cgroup memory limit (a container, or a batch job's allocation). With a cloud LLM and non-aggressive memory
 mode, `PIPELINE_STREAM_BACKHALF=true` allows completed files' parsing,
-extraction, enrichment, and export to overlap subsequent OCR work. Managed
+extraction, enrichment, and export to overlap subsequent OCR work. In
+`bibr batch`, `PIPELINE_OVERLAP_CHUNKS=true` (the default) also starts the
+next chunk once a chunk has read its last page, so that chunk's last back
+halves overlap the next chunk's reading too; at most two chunks are in flight
+and they share the back-half limit. Managed
 local LLMs retain the stage barrier for the OCR-to-LLM memory handoff.
 
-### `bibr serve` (LitServe)
+### `bibr serve`
 
-LitServe separates the HTTP API process from its spawned inference worker.
+`bibr serve` runs the HTTP API (FastAPI under uvicorn) in one process and the
+pipeline in one spawned inference worker (`bibr/serve/worker.py`).
 Public multipart bodies never cross that process boundary. The request flow is:
 
 ```
@@ -435,18 +443,19 @@ POST /papers/extract
   -> one multipart spool (at most 1 MiB in memory)
   -> owner-only disk file (50 MiB file limit; 51 MiB body envelope)
   -> leased UUID/size/SHA-256/options descriptor
-  -> LitServe multiprocessing queue
+  -> pipe to the inference worker
   -> worker verifies one read, deletes file, and runs the pipeline
 ```
 
-`/_bibr/inference` is the private LitServe descriptor route and returns `404`
-when called over HTTP. It exists only so the API process can dispatch the
-opaque descriptor through LitServe's in-process route adapter. A descriptor
-contains no file bytes and no filesystem path.
+A descriptor contains no file bytes and no filesystem path. The worker
+answers each with the encoded result, or with the status and detail of an
+`HTTPException`; any other worker error is logged there and answered with a
+generic `500`.
 
 | Component | Module | Purpose |
 |---|---|---|
-| `build_server()` | `bibr/serve/app.py` | Builds the `litserve.LitServer`, public multipart route, private descriptor dispatch, and owned upload lifecycle |
+| `build_server()` | `bibr/serve/app.py` | Builds the FastAPI app, public multipart route, private descriptor dispatch, and owned upload lifecycle; `BibrServer.run()` binds, starts the worker and serves |
+| `InferenceWorker` | `bibr/serve/worker.py` | Spawns the worker, dispatches descriptors to it, answers its waiters when it dies, and restarts or fail-stops |
 | `UploadStore` / `InferenceDispatchTracker` | `bibr/serve/ingress.py` | Persists bounded uploads, queues opaque descriptors, and cleans files on consumption, cancellation, failure, or shutdown |
 | `BibrPipelineAPI` | `bibr/serve/deployments/pipeline.py` | Main processing orchestrator |
 | `LayoutDetector` | `bibr/serve/deployments/layout.py` | PP-DocLayoutV3 layout detection (GPU/CPU) |
@@ -458,21 +467,17 @@ and `GpuBatcher`, so batches shrink as workers rise. Async I/O and the GPU
 batchers provide concurrency within that one worker, and the heavy CPU stages
 already use every core from one process — see
 [Production deployment](deployment.md#why-there-is-no-worker-count-setting).
-Failed inference workers
-fail-stop by default (`PIPELINE_RESTART_WORKERS=false`). LitServe 0.2.17 worker
-replacement cannot reliably notify the API waiter owned by a dead worker, so
-`true` remains an unsupported opt-in until the locked real-process death-path
-gate proves completion notification.
+When the worker dies, the requests in flight on it are answered with a `503`
+(`inference_worker_stopped`) at once; the server then stops for a supervisor to
+restart (`PIPELINE_RESTART_WORKERS=false`, the default) or starts a new worker
+(`true`).
 
 Async jobs persist through the same upload store and submit the same descriptor
-to LitServe. The queue remains in the HTTP API process;
+to the worker. The queue remains in the HTTP API process;
 `JOBS_STORE=memory` keeps results there too, while `JOBS_STORE=redis` shares
 status and results between replicas. The server pins exactly one API process
 per instance, including with jobs disabled.
 Upload leases keep queued and dispatched descriptors out of stale sweeping.
-LitServe is pinned below 0.3 because this boundary relies on 0.2.x
-manager/worker helpers; the spawned success and death-path compatibility tests
-must be migrated before that version constraint is relaxed.
 
 ## Configuration
 
@@ -490,7 +495,7 @@ Key settings:
 | `LLM_REASONING_EFFORT` | Default reasoning effort for OpenAI models | `minimal` |
 | `LLM_REASONING_EFFORT_AUTHORS` | Reasoning effort override for author extraction | `low` |
 | `LLM_REASONING_EFFORT_CITATIONS` | Reasoning effort override for citation resolution | `low` |
-| `OCR_BACKEND` | OCR runtime selector/backend | `paddle` |
+| `OCR_BACKEND` | OCR runtime selector/backend | `paddle` (a fast run with no OCR setting uses `text-layer`) |
 | `OCR_BASE_URL` | Base URL for an external HTTP OCR server | `http://localhost:8080` |
 | `CROSSREF_ENRICH` | Enable Crossref/resolver reference enrichment (per-run override: `--crossref`/`--no-crossref`, `chew(crossref=...)`, serve `crossref` field) | `false` |
 | `EQUATION_EXTRACTION` | Enable equation extraction | `true` |

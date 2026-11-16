@@ -186,7 +186,7 @@ class BodyAdmission:
     a single call never holds two spool slots at once.
 
     A body declared larger than ``max_body`` is refused with a 413 that explains the
-    base64 arithmetic before a byte of it is read; LitServe's payload middleware still
+    base64 arithmetic before a byte of it is read; the app's ``BodySizeLimit`` still
     enforces the same cap on bodies that arrive without a length.
     """
 

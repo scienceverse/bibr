@@ -20,7 +20,7 @@ def test_vllm_extra_is_limited_to_linux_cuda_python_range():
 def test_all_extra_does_not_include_platform_specific_runtimes():
     optional = _pyproject()["project"]["optional-dependencies"]
 
-    assert optional["all"] == ["bibr[batch,cache,demo,mcp,torch]"]
+    assert optional["all"] == ["bibr[anthropic,batch,cache,demo,google,mcp,serve,torch]"]
 
 
 def test_ml_extra_is_an_alias_for_torch():
@@ -38,8 +38,12 @@ def test_core_carries_the_onnx_runtime_and_no_torch():
         for req in project["dependencies"]
     }
 
-    assert {"onnxruntime", "tokenizers", "huggingface-hub", "scikit-learn", "joblib"} <= core
+    assert {"onnxruntime", "tokenizers", "huggingface-hub"} <= core
     assert not core & {
+        # The GBM bundles are read with numpy (bibr.utils.gbm_bundle); only the
+        # converter and the tests need these, from the dev group.
+        "scikit-learn",
+        "joblib",
         "torch",
         "torchvision",
         "transformers",

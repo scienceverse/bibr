@@ -1,118 +1,180 @@
 # Quickstart
 
-Install bibr from PyPI, configure your backends, and extract a first paper.
-The first run may download several GB of models.
+Install bibr, extract a first paper and look at the result. With uv already installed
+this takes a few minutes, most of it one-time downloads. There is nothing to configure
+first.
 
 ## 1. Install
 
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/), which also
+installs a suitable Python for you. Create a project folder and add bibr to it:
+
 ```bash
-uv init --python 3.12 paper-extraction
+uv init --bare --pin-python --python 3.12 paper-extraction
 cd paper-extraction
 uv add bibr
 ```
 
-On macOS and Linux, install the system libmagic library first (see
-[Installation](install.md#system-prerequisites)).
+`--bare` creates only a `pyproject.toml`, and `--pin-python --python 3.12` pins the
+project to Python 3.12, which bibr supports. In an existing Python 3.11–3.14
+environment, `python -m pip install bibr` works too; then drop the `uv run` prefix from
+the commands below. [Installation](install.md) covers extras, GPUs, updating and
+uninstalling.
 
-This installs core bibr, including the ONNX runtime for its trained models.
-The setup wizard offers any additional runtime extras your hardware needs;
-see [Installation](install.md) for prerequisites, the optional demo, and source installs.
+## 2. Chew a paper
 
-## 2. Configure once
-
-```bash
-uv run bibr setup
-```
-
-The wizard detects your hardware, then shows a plan — OCR backend, LLM, extras, memory mode, privacy, and expected speed — for one confirmation. Decline it and the wizard offers to switch into `bibr setup --advanced` for exact provider/backend control instead. Two common outcomes:
-
-- **Capable hardware (Apple Silicon, or an NVIDIA GPU with at least 5 GB of VRAM):** the plan uses local OCR and a managed local LLM: bibr's fine-tuned Qwen3.5-4B, as its 4-bit W4A16 build on a Linux NVIDIA GPU with 10-19 GB of VRAM, except on a 10-11 GB card where setup finds a CUDA `llama-server` of build 11282 or newer and runs the GGUF build and GLM-OCR on it (see [choosing an extraction model](../guides/extraction-models.md#on-10-and-11-gb-cards)). On Apple Silicon, the OCR selector tries Paddle Rapid-MLX before Paddle MLX-VLM, with GLM startup fallbacks. On Windows and on NVIDIA GPUs below 10 GB, OCR (GLM-OCR) and the LLM run through llama.cpp, which you install separately; on Windows the plan gives the `winget install llama.cpp` command. The preview shows the requested backends, model, and memory mode. Crossref enrichment, a network service, stays off unless you enable it (`--crossref` or `CROSSREF_ENRICH=true`).
-- **Weaker hardware:** the wizard asks whether you have a private OCR/LLM server; if not, it offers cloud processing with Claude Haiku 5.5 (Anthropic) for both OCR and metadata, with a consent question that defaults to No (document content leaves your machine) and an Anthropic API key prompt. A full run, `--no-llm` included, needs an OCR backend for every PDF, so on such a machine it needs that server or cloud, or a separately installed llama.cpp, which is slow on a CPU (see [Installation](install.md#choosing-serving-extras)). A fast run (`--fast`, which is what `auto` becomes when no LLM is configured) that names no OCR route reads a born-digital PDF from its text layer and needs none; a scanned PDF then needs `--ocr anthropic`, a GPU OCR server or the hosted demo. DOCX, JATS, HTML and ePub need no OCR.
-
-It writes `.env`, saves a preset, and offers to install the extras the plan
-needs. Validation includes an optional connection/server check and a one-page
-smoke test on a bundled synthetic paper. That smoke test disables downstream
-LLM extraction and references; process your own paper next to check metadata.
-
-The recommended local setup writes the Paddle-first automatic selector;
-cloud and private-server plans write their chosen backend instead:
+bibr ships with a short synthetic sample paper, so you can start without a PDF of your
+own:
 
 ```bash
-OCR_BACKEND=paddle
+uv run bibr chew --sample -o sample.json
 ```
 
-It intentionally leaves `OCR_MODEL` and `OCR_PROFILE` unset so the selected
-Linux or Apple-Silicon candidate can retain its own model/profile. For an
-explicit external Paddle endpoint, use `OCR_BACKEND=paddle-http` with
-`OCR_MODEL=paddle-ocr-vl-1.6` and `OCR_PROFILE=paddle`; custom aliases also
-require `OCR_PROFILE`.
+```text
+  mode fast · local models only, no LLM call · OCR text-layer (no OCR model; reads the PDF's own text)
+  [1/1] sample_paper.pdf
+  [1/6] Checking file...
+  [2/6] Analyzing layout...
+        2.4s
+  [3/6] Reading the PDF text layer...
+  [4/6] Structuring content...
+        2.8s
+  [5/6] Extracting metadata...
+        2.0s
+  [6/6] Writing output...
+  ✓ Wrote sample.json (7.8s)
+    4 warnings to review (abstract, authors, in-text citations) · 1 processing note · details: bibr inspect sample.json
+```
 
-Use `--ocr paddle-vllm` for explicit Paddle OCR on Linux/CUDA. Use
-`--ocr glm-rapid-mlx` (Apple Silicon), `--ocr glm-llama`, or `--ocr glm-http`
-when you deliberately want GLM-OCR. (The older `glm-mlx`
-backend is disabled: vllm-mlx produced corrupted OCR text.) On Linux the
-automatic selector only tries `paddle-vllm` on an NVIDIA GPU with at least 8 GB
-of VRAM; smaller GPUs and CPU-only machines go straight to llama.cpp
-(`glm-llama`), which needs `llama-server` on your `PATH`.
-The automatic `paddle` selector falls back only while starting an OCR runtime;
-it does not retry failed individual regions with GLM.
+The first line says what kind of run this is. With nothing configured, bibr runs in
+**fast mode**: its own local models read the paper, and no LLM is called. A born-digital
+PDF is read from its **text layer**, the text the PDF already carries, so no OCR model
+is needed.
 
-## 3. Chew a paper
+Then your own paper:
 
 ```bash
 uv run bibr chew paper.pdf -o paper.json
 ```
 
-You get schema-versioned JSON (currently v{{ schema_version }}) with title,
-authors, affiliations, DOI, sections, sentences, tables, figure metadata, and
-parsed references. Add `--figure-images` to embed figure images.
+The same command reads Word (`.docx`), JATS XML, HTML and ePub files. These are parsed
+directly and never need OCR.
 
-`-o` also writes two files next to the result: `paper.core.json`, the core
-extraction before any enrichment (it matches `paper.json` when Crossref is off,
-the default), and `paper.json.receipt.json`, the run's status. With `--crossref`,
-`paper.json.enrichment.json` holds the enrichment as well.
+**The first run is slower.** bibr downloads about 1.5 GB of models from Hugging Face
+once; in our test the whole first run took about a minute and a half. After that, a
+full-length paper took about half a minute on a CPU, and the sample about 10 seconds.
+To see what would download before anything does, run
+`uv run bibr chew paper.pdf --dry-run`.
 
-An export that is not promotable goes to `_quarantine/<disposition>/` beside the
-requested path instead. For example, a blocking validation error such as
-`VAL_METADATA_MULTI_ITEM` writes `_quarantine/blocked/paper.json` (and its
-`paper.core.json`). The receipt stays next to the requested path and records the
-`"disposition"`, the console prints where the export went, and the command still
-exits 0.
+**A scanned PDF** has no text layer, so fast mode stops with "no usable text layer".
+It needs an OCR backend; see [Troubleshooting](troubleshooting.md#a-scanned-pdf-stops-with-no-usable-text-layer).
 
-The same command accepts DOCX, JATS XML (`.xml`), HTML (`.html`/`.htm`), and ePub
-files. These formats are parsed natively without OCR. PDF text layers also supply
-usable text directly; regions needing recognition still use the OCR backend.
-Point the command at a directory to process supported files in that directory:
+## 3. Look at the result
+
+`bibr inspect` prints a summary:
 
 ```bash
-uv run bibr chew papers/ -o out/
+uv run bibr inspect sample.json
 ```
 
-A directory, a glob or several inputs always write one `out/<name>.json` per
-paper, even when they hold a single paper; `-o` names a file only for one
-input file named directly.
+```text
+bibr inspect — sample.json
 
-## Common variations
+Title: The Coefficient of Rodential Efficiency: A Synthetic Benchmark
+Authors: 2 (Ada Vole, Boris Capybarov)
+DOI: —
+Paper type: empirical
+
+Sections: 7
+Sentences: 29
+Tables: 1   Figures: 0   Footnotes: 0   Equations: 10
+
+References
+  Bibliography entries: 10
+  In-text citations: not present
+  Enrichment: not present
+
+Validation
+  4 warnings to review (abstract, authors, in-text citations) · 1 processing note
+  ! abstract: abstract suspicion: non_reference_share_gt_20pct  [VAL_ABSTRACT_SUSPECT]
+  ! authors: 2 extracted author(s) could not be checked: the selected front matter carries no byline row  [VAL_AUTHOR_UNCHECKED]
+  ...
+```
+
+The warnings are not errors. Each one names a field bibr could not fully check, so look
+at that field in the paper before you rely on it. `sample.json` itself is one JSON object
+with a table per kind of thing (`metadata`, `author`, `section`, `text`, `bib`, …)
+linked by IDs; [What you get](output.md) walks through it with real rows.
+
+To put the reference list into a reference manager:
+
+```bash
+uv run bibr references sample.json -o refs.bib
+```
+
+```text
+  ✓ 10 references from 1 paper → refs.bib (bibtex)
+```
+
+A `.ris` file name writes RIS, and a `.json` name CSL-JSON.
+
+`-o` also writes `sample.core.json` and `sample.json.receipt.json` next to the result.
+You can ignore both for now; [What you get](output.md#files-next-to-the-result) says what
+they are, and [Batch runs](../guides/batch.md) covers them for large corpora.
+
+## 4. Common variations
 
 | Goal | Command |
 |---|---|
-| Keep metadata, skip references and their enrichment | `uv run bibr chew paper.pdf --refs off` |
-| Skip downstream LLM extraction and Crossref | `uv run bibr chew paper.pdf --no-llm` |
-| Parse reference fields with the configured LLM | `uv run bibr chew paper.pdf --refs llm` |
-| Try only the first three PDF pages | `uv run bibr chew paper.pdf --pages 1-3` |
-| Preview resolved settings without processing | `uv run bibr chew paper.pdf --dry-run` |
-| Write the references of `out/` for a reference manager (`.bib`, `.ris`, or CSL-JSON `.json`) | `uv run bibr references out/ -o refs.bib` |
+| Every paper in a folder (one `results/<name>.json` each) | `uv run bibr chew papers/ -o results/` |
+| Only pages 1 to 3 | `uv run bibr chew paper.pdf --pages 1-3` |
+| Never call an LLM, even if a key is set | `uv run bibr chew paper.pdf --fast` |
+| Skip the reference list | `uv run bibr chew paper.pdf --refs off` |
+| Look references up in Crossref (sends them to Crossref) | `uv run bibr chew paper.pdf --crossref` |
+| See the plan and what would download, process nothing | `uv run bibr chew paper.pdf --dry-run` |
+| See more detail while it runs | `uv run bibr chew paper.pdf -v` |
+| References of a folder of results for a reference manager | `uv run bibr references results/ -o refs.bib` |
+| Results as Parquet tables for pandas, DuckDB or R | `uv run bibr tables results/ --out tables/` |
+| A large corpus, resumable | `uv run bibr batch papers/ --out corpus/` |
 | Check your setup | `uv run bibr doctor` |
 
-`--no-llm` leaves the configured OCR route active, including cloud vision OCR if
-selected. For PDFs and DOCX it primarily produces document structure; structured
-metadata and references already parsed from native formats can still be retained.
-It is different from `--refs off`, which preserves normal metadata extraction.
+A folder, a glob or several inputs always write one file per paper into the `-o`
+directory; `-o` names a single file only when you give one input file. Every flag is in
+the [CLI reference](../reference/cli.md).
 
-Every flag is documented in the generated [CLI reference](../reference/cli.md).
+## 5. Optional: more accuracy with an LLM
 
-## Next steps
+Fast mode reads titles, authors, abstracts and references with bibr's own local models.
+An LLM helps with the hard cases. To add one, run:
 
-- [Installation matrix](install.md) — extras for local OCR, GPU, caching.
-- [Python library](../guides/library.md) — `bibr.chew()` in your own code, and [reference lists](../guides/library.md#reference-lists) for reference managers.
-- [Production deployment](../guides/deployment.md) — `bibr serve`, Docker, sizing.
+```bash
+uv run bibr setup
+```
+
+The wizard first detects your hardware and asks whether to run in fast mode; pressing
+Enter keeps fast mode and finishes. Answer **No** and it proposes, for your machine:
+
+- bibr's fine-tuned local model, on an NVIDIA GPU with 5 GB of memory or more, or on
+  Apple Silicon;
+- an OCR/LLM server you run yourself; or
+- Claude Haiku 5.5 in the cloud, with your Anthropic API key. This sends page images and
+  extracted text to Anthropic, so the wizard asks for your consent first (the default
+  answer is No).
+
+It writes `.env` (including `PIPELINE_MODE=fast` or `full`), can install the extras the
+plan needs, and can run a one-page test on the sample paper. Runs then use full mode.
+`--fast` still keeps any single run free of LLM calls.
+
+For speeds, GPU memory tiers and OCR backends, see
+[Choosing an extraction model](../guides/extraction-models.md),
+[Configuration](../guides/configuration.md) and
+[Windows and GPU setups](../guides/windows-gpu.md). What each choice sends where is in
+[What leaves your machine](../guides/privacy.md).
+
+## Where to go next
+
+- [What you get](output.md): every table in the JSON, the warnings, the side files.
+- [Troubleshooting](troubleshooting.md): the errors you are most likely to meet.
+- [Python library](../guides/library.md): `bibr.chew()` in your own code.
+- [R and Metacheck](../guides/r.md): the results in R.
+- [Batch runs](../guides/batch.md): thousands of papers, resumable.

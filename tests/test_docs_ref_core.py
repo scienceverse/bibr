@@ -234,3 +234,90 @@ def test_schema_md_lists_every_warning_code(core):
     section = md.split("## Warning codes\n", 1)[1]
     for code in WarningCode:
         assert f"| `{code}` | {DESCRIPTIONS[code]} |" in section
+
+
+def test_settings_md_leads_with_the_unconfigured_defaults(core):
+    """The reference opens with what an unconfigured install does, then the sections
+    that decide a run (pipeline mode, OCR, LLM), and keeps top-level settings last."""
+    from bibr.config_introspect import iter_setting_docs
+
+    md = core.render_settings_md()
+    box, rest = md.split("\n## ", 1)
+    assert '!!! info "With nothing configured"' in box
+    assert "**fast mode**" in box
+    defaults = {d.env_name: d.default_repr for d in iter_setting_docs()}
+    # The box quotes the shipped defaults, so it cannot drift from bibr.config.
+    assert defaults["PIPELINE_MODE"] == '"auto"'
+    assert "`PIPELINE_MODE` defaults to `auto`" in box
+    assert defaults["CROSSREF_ENRICH"] == "False"
+    assert "`CROSSREF_ENRICH` is `false`" in box
+    assert f"(`{defaults['OCR_BACKEND'].strip(chr(34))}`) applies in full mode" in box
+
+    headings = [line for line in md.splitlines() if line.startswith("## ")]
+    assert headings[:4] == [
+        "## Pipeline (`PIPELINE_*`)",
+        "## OCR (`OCR_*`)",
+        "## OCR vision (`OCR_VISION_*`)",
+        "## LLM (`LLM_*`)",
+    ]
+    assert headings[-1] == "## Top-level"
+    assert len(headings) == len(set(headings))  # every section exactly once
+
+
+def _subcommand(parser, words):
+    import argparse
+
+    for word in words:
+        action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        parser = action.choices[word]
+    return parser
+
+
+def test_cli_cheat_sheet_commands_exist(core):
+    """Every command in the cheat-sheet names a real subcommand and real flags."""
+    import argparse
+
+    from bibr.local.cli import _build_parser
+
+    root = _build_parser()
+    md = core.render_cli_md()
+    sheet = md.split("## Common tasks\n", 1)[1].split("\n## ", 1)[0]
+    assert len(core.CLI_CHEAT_SHEET) >= 10
+    for task, command in core.CLI_CHEAT_SHEET:
+        assert f"| {task} | `{command}` |" in sheet
+        words = command.split()
+        assert words[0] == "bibr"
+        parser, consumed = root, 1
+        while True:
+            subs = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+            if not subs or consumed >= len(words) or words[consumed] not in subs[0].choices:
+                break
+            parser = subs[0].choices[words[consumed]]
+            consumed += 1
+        assert consumed > 1, f"no subcommand in {command!r}"
+        known = set(parser._option_string_actions)
+        for word in words[consumed:]:
+            if word.startswith("-"):
+                assert word in known, f"{command!r}: {word} is not an option of {parser.prog}"
+
+
+def test_cli_md_groups_chew_options_under_their_argparse_groups(core):
+    """bibr chew's options render once each, under the group --help shows them in."""
+    from bibr.local.cli import _build_parser
+
+    chew = _subcommand(_build_parser(), ["chew"])
+    md = core.render_cli_md()
+    section = md.split("\n## bibr chew\n", 1)[1].split("\n## ", 1)[0]
+    for group in core._titled_groups(chew):
+        title = group.title[:1].upper() + group.title[1:]
+        assert f"### {title}\n" in section
+        body = section.split(f"### {title}\n", 1)[1].split("\n### ", 1)[0]
+        for action in group._group_actions:
+            assert f"| `{action.option_strings[0]}`" in body, (title, action.option_strings)
+    for action in chew._actions:
+        if action.dest == "help":
+            continue
+        flag = action.option_strings[0] if action.option_strings else action.dest
+        assert section.count(f"| `{flag}`") == 1, flag
+    run_mode = section.split("### Run mode\n", 1)[1].split("\n### ", 1)[0]
+    assert "| `--fast` |" in run_mode

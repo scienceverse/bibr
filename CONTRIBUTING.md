@@ -14,7 +14,7 @@ cd bibr
 # (local, vllm, local-mlx, gpu) that match your hardware.
 uv sync --locked --extra all --all-groups
 
-# Configure .env when you want to run live extraction
+# Optional: add an LLM or OCR (live extraction works without it, in fast mode)
 uv run bibr setup
 ```
 
@@ -23,11 +23,10 @@ uv run bibr setup
 - Python 3.11–3.14 (3.12 is the primary CI version; optional serving runtimes
   may require a narrower version range)
 - [uv](https://docs.astral.sh/uv/) package manager
-- `libmagic` on Linux/macOS; see [Installation](https://bibr.org/getting-started/install/)
-- For live extraction: an OCR backend and a configured cloud or local LLM.
-  The `local` extra installs Apple Silicon serving dependencies; it is not
-  a universal OCR installation. Use the [setup wizard and Quickstart](https://bibr.org/getting-started/quickstart/)
-  to select runtimes for your hardware.
+- Live extraction works out of the box in fast mode (local models, no LLM, no key).
+  An OCR backend or an LLM is needed only for scanned PDFs or full mode; the
+  [Quickstart](https://bibr.org/getting-started/quickstart/) shows how `bibr setup`
+  adds them for your hardware.
 
 Unit tests do not require real API keys: `tests/conftest.py` supplies placeholder
 settings and tests mock external calls. For a core-only or docs environment, use
@@ -86,6 +85,8 @@ The repository uses pre-commit hooks for automated checks:
 
 - **Ruff** (lint + format), run through the project venv so it matches CI exactly
 - **Semgrep** (`p/security-audit`, `p/secrets`, `p/python` rulesets) — the same static-analysis packs CI runs
+- **gitleaks** — secret scanning
+- **public-source-boundary** — keeps private engineering records out of the public tree
 - Standard file checks: `check-yaml`, `check-json`, `check-toml`, `check-added-large-files`, `check-merge-conflict`, `detect-private-key`
 
 Install hooks:
@@ -165,7 +166,7 @@ for rehearsals, Trusted Publishing, and recovery from a partial release.
 - Global `Settings` mutations and `bibr.*` logger levels are restored after
   every test by autouse fixtures — no manual `model_fields_set` juggling
 - The torch-free ONNX bundles under `tests/fixtures/onnx` and the hermetic
-  LitServe/geometry fixtures are committed artifacts: regenerate them with
+  geometry fixtures are committed artifacts: regenerate them with
   `scripts/generate_onnx_test_bundles.py` and
   `scripts/generate_hermetic_test_fixtures.py` instead of editing by hand
 

@@ -43,6 +43,14 @@ class TestNegativeStartPage:
         with pytest.raises(ValueError, match="Invalid page range"):
             list(iter_pdf_pages_with_index(pdf, start_page=-1))
 
+    def test_a_start_past_the_last_page_says_where_it_starts_and_how_long_the_document_is(self):
+        from bibr.ocr.image_utils import iter_pdf_pages_with_index
+
+        with pytest.raises(ValueError) as exc:
+            list(iter_pdf_pages_with_index(_one_page_pdf(), start_page=49))
+
+        assert str(exc.value) == "Invalid page range: it starts at page 50, and the document has 1"
+
     def test_a_valid_start_page_still_renders(self):
         from bibr.ocr.image_utils import iter_pdf_pages_with_index
 

@@ -26,8 +26,10 @@ across concurrent requests, which per-file windowing would defeat.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import sys
+import weakref
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -46,6 +48,16 @@ if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
 
 logger = logging.getLogger(__name__)
+
+#: An event that a caller ready to start its next chunk early sets before running
+#: this one (``bibr batch``'s overlapped chunks, :mod:`bibr.batch.runner`). The
+#: streaming stage sets it when the chunk's last window has been read, before it
+#: waits for the back halves: from then on the chunk renders no more pages, so the
+#: next chunk's front half can run while this chunk's back halves finish. Unset
+#: (the default), nothing is signalled and chunks run one after another.
+FRONT_HALF_DONE: contextvars.ContextVar[asyncio.Event | None] = contextvars.ContextVar(
+    "bibr_front_half_done", default=None
+)
 
 
 class InterleavedRenderOcrStage:
@@ -218,10 +230,11 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
         "result_json",
     )
 
-    # Max windows running the back half concurrently. OCR remains the
-    # throughput governor — the point is overlap, not fan-out — and each
-    # concurrent PostParseStage.run multiplies its internal
-    # ``max_concurrent_post_parse`` semaphore, so keep this small and fixed.
+    # Max windows running the back half concurrently, on one event loop: the
+    # chunks bibr batch overlaps share it. OCR remains the throughput
+    # governor — the point is overlap, not fan-out — and each concurrent
+    # PostParseStage.run multiplies its internal ``max_concurrent_post_parse``
+    # semaphore, so keep this small and fixed.
     _MAX_CONCURRENT_BACKHALF_WINDOWS = 2
 
     def __init__(
@@ -238,6 +251,12 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
         ocr=None,
     ):
         super().__init__(layout=layout, native_text=native_text, ocr=ocr)
+        # One back-half semaphore per event loop, shared by every chunk this stage
+        # runs on it: chunks that overlap (FRONT_HALF_DONE) share the cap rather
+        # than each bringing its own.
+        self._backhalf_sems: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, asyncio.Semaphore
+        ] = weakref.WeakKeyDictionary()
         self._parse = parse
         self._post_parse = post_parse
         self._identity = identity
@@ -265,7 +284,7 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
         pending_windows = (len(pending) + window - 1) // window
         single_group = pending_windows + (1 if bypass else 0) <= 1
 
-        sem = asyncio.Semaphore(self._MAX_CONCURRENT_BACKHALF_WINDOWS)
+        sem = self._backhalf_semaphore()
         tasks: list[tuple[asyncio.Task, list]] = []
 
         def _spawn(group: list) -> None:
@@ -293,6 +312,7 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
                 _spawn(group)
                 if start + window < len(pending):
                     await trim_between_windows(ctx.settings)
+            self._signal_front_half_done(ctx)
         finally:
             # Settle every spawned back half before the stage returns — no
             # window task may outlive run(), even when a front-half stage
@@ -345,6 +365,29 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
             cfg.memory_mode, cfg.llm_backend, ctx.settings, cfg.ocr_backend
         ):
             await ctx.resources.shutdown_ocr()
+
+    def _backhalf_semaphore(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        sem = self._backhalf_sems.get(loop)
+        if sem is None:
+            sem = asyncio.Semaphore(self._MAX_CONCURRENT_BACKHALF_WINDOWS)
+            self._backhalf_sems[loop] = sem
+        return sem
+
+    @staticmethod
+    def _signal_front_half_done(ctx: PipelineContext) -> None:
+        """Tell a waiting caller that this chunk renders no more pages (FRONT_HALF_DONE)."""
+        event = FRONT_HALF_DONE.get()
+        if event is None:
+            return
+        cfg = ctx.config
+        if _should_unload_ocr_after_chunk(
+            cfg.memory_mode, cfg.llm_backend, ctx.settings, cfg.ocr_backend
+        ):
+            # This chunk shuts the OCR engine down when it ends, which would pull
+            # it from under the next chunk's windows: no early start.
+            return
+        event.set()
 
     async def _run_backhalf(
         self, ctx: PipelineContext, group: list, sem, live_progress: bool = False

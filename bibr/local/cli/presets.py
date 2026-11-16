@@ -8,10 +8,27 @@ from rich.markup import escape
 from bibr.local.cli import ui
 
 
+def _confirm(console, question: str, *, flag: str) -> bool:
+    """Ask a yes/no question, or stop with the flag that answers it when nobody can.
+
+    Without a terminal (a script, CI, a pipe) the prompt used to end in an
+    ``EOFError`` traceback.
+    """
+    from rich.prompt import Confirm
+
+    if not sys.stdin.isatty():
+        ui.error(
+            console,
+            "This needs a confirmation, and there is no terminal to ask on.",
+            hint=f"Pass [cyan]{flag}[/cyan] to go ahead without the question.",
+        )
+        sys.exit(1)
+    return Confirm.ask(question, default=False)
+
+
 def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
     """Handle ``bibr preset`` subcommands."""
     from rich.console import Console
-    from rich.prompt import Confirm
 
     from bibr.env_utils import parse_env
     from bibr.presets import (
@@ -86,8 +103,10 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             if (
                 manager.exists(args.name)
                 and not args.force
-                and not Confirm.ask(
-                    f"Preset [cyan]{args.name}[/cyan] already exists. Overwrite?", default=False
+                and not _confirm(
+                    console,
+                    f"Preset [cyan]{args.name}[/cyan] already exists. Overwrite?",
+                    flag="--force",
                 )
             ):
                 console.print("[dim]Aborted.[/dim]")
@@ -155,8 +174,8 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             console.print(f"[dim]No active preset marker in {env_path} — nothing to do.[/dim]")
 
     elif cmd == "rm":
-        if not args.yes and not Confirm.ask(
-            f"Delete preset [cyan]{args.name}[/cyan]?", default=False
+        if not args.yes and not _confirm(
+            console, f"Delete preset [cyan]{args.name}[/cyan]?", flag="--yes"
         ):
             console.print("[dim]Aborted.[/dim]")
             sys.exit(1)

@@ -14,6 +14,7 @@ exclude_docs: |
   llm-ref-parse-silent-drop-bug.md
   local-runtime-evaluation.md
   renobench-evaluation.md
+  # Being dissolved into the getting-started and guide pages; to be deleted.
 
 validation:
   nav:
@@ -52,33 +53,39 @@ theme:
 
 nav:
   - Home: index.md
-  - Getting started:
+  - Get started:
       - Quickstart: getting-started/quickstart.md
+      - What you get: getting-started/output.md
       - Installation: getting-started/install.md
-      - Tester guide: tester-guide.md
+      - Troubleshooting: getting-started/troubleshooting.md
   - Guides:
       - Python library: guides/library.md
-      - MCP server: guides/mcp.md
+      - R and Metacheck: guides/r.md
       - Batch runs: guides/batch.md
-      - Configuration: guides/configuration.md
+      - Web demo: guides/demo.md
+      - MCP server: guides/mcp.md
       - Extraction models: guides/extraction-models.md
-      - Fine-tuned reference model: guides/reference-model.md
+      - Configuration: guides/configuration.md
+      - Windows and GPU setups: guides/windows-gpu.md
+      - What leaves your machine: guides/privacy.md
       - Production deployment: guides/deployment.md
-      - Architecture: guides/architecture.md
-      - Classifiers: guides/classifiers.md
+  - Accuracy:
+      - Known limitations: limitations.md
+      - Evaluating extraction quality: contributing/evaluation.md
+      - LLM use: llm-use.md
   - Reference:
       - CLI: reference/cli.md
       - Settings: reference/settings.md
       - JSON schema: reference/schema.md
       - REST API: reference/rest-api.md
+  - Internals:
+      - Architecture: guides/architecture.md
+      - Classifiers: guides/classifiers.md
+      - Fine-tuned reference model: guides/reference-model.md
+      - Local model runtime: guides/model-runtime.md
   - Contributing:
       - Development setup: contributing/setup.md
-      - Evaluating extraction quality: contributing/evaluation.md
-  - About:
-      - Project history and contributors: about/history.md
-      - Known limitations: limitations.md
-      - LLM use: llm-use.md
-  - Scienceverse ↗: https://scienceverse.org/
+      - Project history: about/history.md
 
 markdown_extensions:
   - admonition
@@ -108,3 +115,6 @@ extra:
       link: https://github.com/scienceverse/bibr
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/bibr/
+    - icon: fontawesome/solid/globe
+      link: https://scienceverse.org/
+      name: Scienceverse

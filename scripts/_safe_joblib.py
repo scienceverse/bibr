@@ -1,15 +1,18 @@
-"""Restricted joblib/pickle loading for model checkpoints.
+"""Restricted joblib/pickle loading for ``scripts/export_gbm_bundle.py``.
+
+bibr itself reads no pickles: its gradient-boosted models ship as ``bibr-gbm/1``
+bundles (``bibr/utils/gbm_bundle.py``). The converter still has to read the
+joblib bundles a trainer writes, and does it with this loader.
 
 ``joblib.load`` (like ``pickle.load``) executes arbitrary code embedded in the
-file, so a ``*_MODEL_ID`` setting pointed at an attacker-controlled ``.joblib``
-is remote-code-execution (audit M6). You cannot validate a pickle's *shape*
+file, so converting an attacker-controlled ``.joblib`` would be
+remote-code-execution (audit M6). You cannot validate a pickle's *shape*
 before unpickling — the payload runs during load — so this module instead
 restricts *what* the unpickler may resolve: an allowlist of the exact classes a
 bibr model bundle is made of. A denylist of dangerous modules cannot work,
 because any allowed module can hand a denied one back as an attribute.
 
-This is a defense-in-depth backstop; ``*_MODEL_ID`` settings remain a trust
-boundary and should only point at artifacts you control.
+This is a defense-in-depth backstop: only convert bundles you control.
 """
 
 from __future__ import annotations

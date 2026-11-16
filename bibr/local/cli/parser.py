@@ -1,6 +1,10 @@
 """``bibr`` CLI argument parser construction."""
 
 import argparse
+import difflib
+import re
+import sys
+from typing import NoReturn
 
 
 def normalize_ocr_backend(name: str | None) -> str:
@@ -16,48 +20,28 @@ def normalize_ocr_backend(name: str | None) -> str:
 
 _EXAMPLES = """\
 examples:
-  process papers:
-    bibr chew paper.pdf                          # single file → stdout JSON
-    bibr chew paper.pdf -o result.json           # single file → file
-    bibr chew papers/ -o results/                # batch → directory
-    bibr batch papers/ --out results/            # resumable corpus run (ledger, report)
-    cat paper.pdf | bibr chew -                  # read from stdin
-    bibr chew paper.pdf --pages 1-5              # process only pages 1–5
-    bibr chew paper.pdf --dry-run                # preview the resolved plan, no processing
+  bibr chew paper.pdf -o result.json           # one paper → one JSON file
+  bibr chew paper.pdf                          # JSON on stdout (progress goes to stderr)
+  bibr chew papers/ -o results/                # every paper in a folder
+  bibr chew paper.pdf --pages 1-5              # only pages 1–5
+  bibr chew paper.pdf --dry-run                # show the plan, process nothing
+  cat paper.pdf | bibr chew -                  # read from stdin
 
-  backends & models:
-    bibr chew paper.pdf --ocr gemini             # use Gemini Flash for OCR
-    bibr chew paper.pdf --ocr glm-http           # use remote GLM-OCR server
-    bibr chew paper.pdf --ocr-url http://host:8080  # explicit remote OCR server
-    bibr chew paper.pdf --memory aggressive      # low-RAM machines (≤8 GB)
-    bibr chew paper.pdf --fast                   # no LLM, no API key: local models only
-    bibr chew paper.pdf --full                   # use the configured LLM (the default when set)
-    bibr chew paper.pdf --no-llm                 # structure only: no authors or references (OCR unchanged)
+  bibr chew paper.pdf --fast                   # local models only: no LLM, no API key
+  bibr chew paper.pdf --full                   # also use the configured LLM
+  bibr chew paper.pdf --refs off               # skip the reference list
+  bibr chew paper.pdf --refs llm               # parse references with the LLM
+  bibr chew paper.pdf --crossref               # look references up in Crossref
+  bibr chew scan.pdf --ocr anthropic           # read a scan with a cloud vision model
+  bibr chew paper.pdf --ocr-url http://host:8080   # use an OCR server you run
 
-  references & output:
-    bibr chew paper.pdf --crossref               # enrich references via Crossref (off by default)
-    bibr chew paper.pdf --no-crossref            # force enrichment off (overrides CROSSREF_ENRICH=true)
-    bibr chew paper.pdf --refs llm               # full-precision LLM ref parser (default is local NER)
-    bibr chew paper.pdf --refs off               # skip reference extraction entirely
-    bibr chew paper.pdf --figure-images          # include base64 figure images
-    bibr chew paper.pdf --preset NAME            # apply a saved preset for this run
-    bibr inspect result.json                     # summarize an extraction-output JSON
-    bibr tables results/ --out tables/           # exports → one Parquet file per table
-    bibr references results/ -o refs.bib         # exports → BibTeX (.ris, CSL-JSON .json)
+next steps:
+  bibr inspect result.json                     # summary of one result
+  bibr references results/ -o refs.bib         # reference lists → BibTeX, RIS or CSL-JSON
+  bibr tables results/ --out tables/           # results → Parquet tables
+  bibr batch papers/ --out corpus/             # large corpus: resumable, with a report
 
-  presets & config:
-    bibr preset list                             # show all saved presets
-    bibr preset save NAME                        # snapshot current .env (excludes secrets)
-    bibr preset use NAME                         # apply a preset to .env
-    bibr preset diff NAME                        # compare a preset against current .env
-    bibr preset show NAME                        # display preset contents
-    bibr preset rm NAME                          # delete a preset
-    bibr preset deactivate                       # clear the active-preset marker
-
-    bibr config show --sources                   # resolved settings + where each comes from
-    bibr config path                             # locate the .env file(s) bibr reads
-    bibr config set LLM_PROVIDER openai          # write a setting to .env
-    bibr config example --full                   # print a full .env template
+Every option, setting and JSON field: https://bibr.org/reference/cli/
 """
 
 
@@ -127,231 +111,310 @@ class _BibrParser(argparse.ArgumentParser):
         ver = _safe_version()
         return render_main_help(ver, commands)
 
+    def error(self, message: str) -> NoReturn:
+        """Report a usage error as one styled line and a pointer to ``--help``.
+
+        argparse's own report is the full usage synopsis (a dozen lines for
+        ``bibr chew``) followed by the message; the mistake is usually one
+        mistyped word, so say which, suggest the nearest real one, and name
+        the help screen instead. Exit status stays 2.
+        """
+        from rich.console import Console
+        from rich.markup import escape
+
+        from bibr.local.cli import ui
+
+        text, help_prog = _describe_usage_error(self, message)
+        ui.error(
+            Console(stderr=True),
+            escape(text),
+            hint=f"Run [cyan]{help_prog} --help[/cyan] to see what it accepts.",
+        )
+        self.exit(2)
+
+
+_INVALID_CHOICE = re.compile(
+    r"^argument (?P<arg>.+?): invalid choice: (?P<bad>.+?) \(choose from (?P<choices>.*)\)$"
+)
+_SUBCOMMAND_DESTS = ("command", "preset_command", "config_command", "ref_model_command")
+
+
+def _nearest(word: str, candidates: list[str]) -> str | None:
+    matches = difflib.get_close_matches(word, candidates, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+
+def _subcommand_parser(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.ArgumentParser:
+    """The parser of the subcommand *argv* names, or *parser* if it names none."""
+    for action in parser._actions:  # noqa: SLF001 — argparse has no public tree API
+        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+            for token in argv:
+                if token in action.choices:
+                    return _subcommand_parser(action.choices[token], argv)
+    return parser
+
+
+def _describe_usage_error(parser: argparse.ArgumentParser, message: str) -> tuple[str, str]:
+    """A usage error in plain words, and the command whose help explains it."""
+    invalid = _INVALID_CHOICE.match(message)
+    if invalid:
+        bad = invalid["bad"].strip("'\"")
+        choices = [c.strip(" '\"") for c in invalid["choices"].split(",")]
+        nearest = _nearest(bad, choices)
+        suggestion = f" Did you mean '{nearest}'?" if nearest else ""
+        if invalid["arg"] in _SUBCOMMAND_DESTS:
+            return f"Unknown command '{bad}'.{suggestion}", parser.prog
+        listed = "" if nearest else f" Choose from: {', '.join(choices)}."
+        return (
+            f"{invalid['arg']}: '{bad}' is not one of its values.{suggestion}{listed}",
+            parser.prog,
+        )
+
+    target = _subcommand_parser(parser, sys.argv[1:])
+    prefix = "unrecognized arguments: "
+    if message.startswith(prefix):
+        unknown = message[len(prefix) :].split()
+        flags = [token.split("=", 1)[0] for token in unknown if token.startswith("-")]
+        if flags:
+            nearest = _nearest(flags[0], list(target._option_string_actions))  # noqa: SLF001
+            suggestion = f" Did you mean '{nearest}'?" if nearest else ""
+            return f"Unknown option '{flags[0]}'.{suggestion}", target.prog
+        return f"Unexpected argument '{unknown[0]}'.", target.prog
+    return message[:1].upper() + message[1:], target.prog
+
+
+#: Every ``--ocr`` value. The help text groups them; argparse checks against this.
+OCR_BACKEND_CHOICES = [
+    "paddle",
+    "paddle-vllm",
+    "paddle-rapid-mlx",
+    "paddle-mlx-vlm",
+    "paddle-http",
+    "glm",
+    "glm-llama",
+    "glm-rapid-mlx",
+    "glm-http",
+    "gemini",
+    "openai",
+    "anthropic",
+    "text-layer",
+]
+
+LLM_BACKEND_CHOICES = ["cloud", "local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"]
+
 
 def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
     """Register the pipeline options shared by ``bibr chew`` and ``bibr batch``.
 
-    One definition, so the two commands cannot drift: OCR/LLM backends,
-    reference strategies, enrichment, output payload toggles, page range,
-    device, chunk size and presets. ``resolve_run_config`` and
+    One definition, so the two commands cannot drift: run mode, reference
+    strategies, enrichment, output payload toggles, OCR/LLM backends, page
+    range, device, chunk size and presets. ``resolve_run_config`` and
     ``_apply_runtime_settings`` read exactly these attributes.
+
+    The options are registered in titled groups, most used first, so that
+    ``--help`` reads as a short list of decisions rather than one flat wall.
     """
-    parser.add_argument(
-        "--memory",
-        choices=["aggressive", "balanced", "keep_all"],
-        default=None,
-        help=(
-            "Memory management mode (default: auto-detected from system RAM, CUDA VRAM "
-            "and the LLM backend)"
-        ),
+    mode = parser.add_argument_group(
+        "run mode",
+        "Default: full when an LLM is configured ('bibr setup'), otherwise fast.",
     )
-    parser.add_argument(
-        "--ocr",
-        choices=[
-            "paddle",
-            "paddle-vllm",
-            "paddle-rapid-mlx",
-            "paddle-mlx-vlm",
-            "paddle-http",
-            "glm",
-            "glm-llama",
-            "glm-rapid-mlx",
-            "glm-http",
-            "gemini",
-            "openai",
-            "anthropic",
-            "text-layer",
-        ],
-        default=None,
-        help=(
-            "OCR backend (default: paddle, automatically tries Paddle runtimes before the "
-            "explicit GLM fallback chain). text-layer runs no OCR model: it reads "
-            "born-digital PDFs from their embedded text layer, and scanned PDFs fail"
-        ),
-    )
-    parser.add_argument(
-        "--ocr-url",
-        help=(
-            "URL of an external OCR server. Connects as paddle-http unless --ocr (or, without "
-            "--ocr, OCR_BACKEND) names a GLM backend, then glm-http; --ocr gemini, openai or "
-            "anthropic ignores the URL"
-        ),
-    )
-    parser.add_argument(
-        "--ocr-model",
-        help="Model path or served model name for OCR (custom aliases require --ocr-profile)",
-    )
-    parser.add_argument(
-        "--ocr-profile",
-        choices=["paddle", "glm"],
-        help="OCR model family for a custom --ocr-model alias",
-    )
-    parser.add_argument(
-        "--llm",
-        choices=["cloud", "local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"],
-        default=None,
-        help=(
-            "LLM backend: cloud, or a managed local server — 'local' auto-picks "
-            "vllm-mlx/Rapid-MLX (Apple Silicon), llama.cpp (Windows/small CUDA), vLLM, "
-            "or external LM Studio/llmster. "
-            "Default: LLM_BACKEND "
-            "setting (cloud)."
-        ),
-    )
-    parser.add_argument(
-        "--llm-provider",
-        help="Override LLM_PROVIDER setting (ignored for managed local backends "
-        "(--llm vllm/vllm-mlx/rapid-mlx/local))",
-    )
-    parser.add_argument(
-        "--llm-model",
-        help="Override LLM_MODEL setting (ignored for managed local backends "
-        "(--llm vllm/vllm-mlx/rapid-mlx/local))",
-    )
-    crossref = parser.add_mutually_exclusive_group()
-    crossref.add_argument(
-        "--crossref",
-        action="store_true",
-        help=(
-            "Enable Crossref/resolver reference enrichment for this run "
-            "(off by default; overrides CROSSREF_ENRICH=false)"
-        ),
-    )
-    crossref.add_argument(
-        "--no-crossref",
-        action="store_true",
-        help="Disable Crossref reference enrichment for this run (overrides CROSSREF_ENRICH=true)",
-    )
-    parser.add_argument(
-        "--no-equations",
-        action="store_true",
-        help="Disable equation extraction",
-    )
-    run_mode = parser.add_mutually_exclusive_group()
+    run_mode = mode.add_mutually_exclusive_group()
     run_mode.add_argument(
         "--fast",
         action="store_true",
         help=(
-            "Fast mode: no LLM call and no API key. Local models read the title, authors and "
-            "abstract and parse the references; the run skips only what needs an LLM (the "
-            "unsure cases the local models would hand to one). This is what a run with no LLM "
-            "configured does without the flag. Overrides PIPELINE_MODE."
+            "No LLM call and no API key: local models read the title, authors, abstract "
+            "and references. What a run with no LLM configured does anyway. "
+            "Overrides PIPELINE_MODE."
         ),
     )
     run_mode.add_argument(
         "--full",
         action="store_true",
         help=(
-            "Full mode: the configured LLM reads what the local models are unsure of, so it "
-            "needs an LLM provider (an API key or a local backend). Overrides PIPELINE_MODE. "
-            "The default (PIPELINE_MODE=auto) is full when an LLM is configured, else fast."
+            "The configured LLM also reads what the local models are unsure of. Needs an "
+            "LLM (an API key or a local model; see bibr setup). Overrides PIPELINE_MODE."
         ),
     )
     run_mode.add_argument(
         "--no-llm",
         action="store_true",
         help=(
-            "Structure only: skip downstream LLM extraction, reference parsing, citation "
-            "linking, equations, and Crossref. Preserves document structure, plus the "
-            "metadata a JATS or HTML input already carries and JATS references; PDF and DOCX "
-            "output has no authors or references. "
-            "OCR still uses the selected backend, including cloud vision providers. "
-            "For a run that still extracts authors and references without an LLM, use --fast."
+            "Structure only: sections and text, but no authors, references, citation "
+            "links, equations or Crossref for PDF and DOCX (JATS and HTML keep the "
+            "metadata they carry). OCR still runs. To keep authors and references "
+            "without an LLM, use --fast."
         ),
     )
-    parser.add_argument(
+    mode.add_argument(
+        "--preset",
+        help="Apply a saved preset for this run (see bibr preset; .env is not modified)",
+    )
+
+    extract = parser.add_argument_group("what to extract")
+    extract.add_argument(
+        "--pages",
+        help="Page range to process (e.g. '1-5', '3')",
+    )
+    extract.add_argument(
         "--refs",
         choices=["llm", "ner", "llm-chunked", "ref-llm", "off"],
         help=(
-            "Reference parser: 'ner' (default) uses the local encoder-CRF model "
-            "through ONNX Runtime or the optional PyTorch runtime. "
-            "'llm' parses references with the configured LLM in batches. "
-            "'llm-chunked' parses region-aligned chunks of the reference list. "
-            "'ref-llm' uses a dedicated fine-tuned reference endpoint with NER recovery. "
-            "Choose segmentation separately with --ref-seg. "
-            "'off' skips references and their citation links while keeping core metadata, "
-            "sections, and equations. Overrides REF_PARSE_STRATEGY."
+            "How references are parsed: 'ner' (default) a local model; 'llm' the "
+            "configured LLM; 'llm-chunked' the LLM on chunks of the list; 'ref-llm' a "
+            "dedicated fine-tuned reference endpoint; 'off' skips references and their "
+            "citation links. Overrides REF_PARSE_STRATEGY."
         ),
     )
-    parser.add_argument(
+    extract.add_argument(
         "--ref-seg",
         choices=["llm", "crf", "geom", "region"],
         help=(
-            "Reference SEGMENTATION strategy (orthogonal to --refs, which selects "
-            "parsing): 'geom' (default) the local geometry GBM, cascading to region "
-            "anchors then LLM then CRF when geometry is absent/unconfident; "
-            "the geometry tier uses a text-layer PDF; 'region' segments "
-            "by layout-region anchors (LLM→CRF fallback), covering "
-            "scanned PDFs with no text layer; 'llm' anchor-emit with region→CRF "
-            "fallback; 'crf' the local ModernBERT-CRF segmenter. Sets "
-            "REF_SEG_STRATEGY."
+            "How the reference list is split into entries (separate from --refs): "
+            "'geom' (default) a local model on line geometry, which needs a PDF text "
+            "layer and falls back to the others; 'region' layout regions, for scans; "
+            "'llm' the configured LLM; 'crf' a local sequence model. "
+            "Sets REF_SEG_STRATEGY."
         ),
     )
-    parser.add_argument(
+    crossref = extract.add_mutually_exclusive_group()
+    crossref.add_argument(
+        "--crossref",
+        action="store_true",
+        help=(
+            "Look each reference up in Crossref for this run (off by default; "
+            "overrides CROSSREF_ENRICH=false)"
+        ),
+    )
+    crossref.add_argument(
+        "--no-crossref",
+        action="store_true",
+        help="Do not look references up for this run (overrides CROSSREF_ENRICH=true)",
+    )
+    extract.add_argument(
         "--consolidate",
         nargs="?",
         const="fill",
         choices=["fill", "replace"],
         help=(
-            "Merge accepted Crossref match data (bib_match) into the bib table. "
-            "Bare flag = 'fill' (only fills missing fields); 'replace' also "
-            "overwrites disagreeing ones, but only from a match carrying the "
-            "reference's printed DOI. The fields taken per row are listed in "
-            "extraction.diagnostics.consolidation. No-op when enrichment is off "
-            "(the default; see --crossref) or when no matches were found. "
-            "Place after the input path (e.g. `bibr chew paper.pdf "
-            "--consolidate`), or use `--consolidate=replace`."
+            "With --crossref: merge accepted matches into the reference table. 'fill' "
+            "(the bare flag) only fills missing fields; 'replace' also overwrites "
+            "disagreeing ones, but only from a match carrying the reference's printed "
+            "DOI. Put it after the input path, or write --consolidate=replace."
         ),
     )
-    parser.add_argument(
+    extract.add_argument(
+        "--no-equations",
+        action="store_true",
+        help="Disable equation extraction",
+    )
+
+    payload = parser.add_argument_group("extra output (off by default)")
+    payload.add_argument(
         "--figure-images",
         action="store_true",
-        help="Include base64-encoded figure images in output (off by default)",
+        help="Include base64-encoded figure images",
     )
-    parser.add_argument(
+    payload.add_argument(
         "--regions",
         "--include-regions",
         action="store_true",
-        help=(
-            "Include the extraction.regions debug payload (per-region layout: bbox, font, "
-            "content, etc.). Off by default — not consumed by standard "
-            "downstream tools like Metacheck."
-        ),
+        help="Include extraction.regions: per-region layout (bbox, font, content) for debugging",
     )
-    parser.add_argument(
+    payload.add_argument(
         "--region-meta",
         action="store_true",
         help=(
             "Include extraction.text_regions: per-sentence layout features "
-            "(bbox, font size, region type; training/debug payload). "
-            "Off by default."
+            "(bbox, font size, region type) for training and debugging"
         ),
     )
-    parser.add_argument(
-        "--pages",
-        help="Page range to process (e.g., '1-5', '3')",
+
+    ocr = parser.add_argument_group(
+        "OCR (PDF pages)",
+        # Hand-wrapped: the commands use RawDescriptionHelpFormatter.
+        "With no OCR setting, a fast run reads the PDF's own text layer, and a scan\n"
+        "needs one of these. 'bibr doctor' shows what this machine can run.",
     )
-    parser.add_argument(
+    ocr.add_argument(
+        "--ocr",
+        choices=OCR_BACKEND_CHOICES,
+        metavar="BACKEND",
+        default=None,
+        help=(
+            "text-layer: no OCR model, born-digital PDFs only. paddle: PaddleOCR-VL on "
+            "the runtime that fits this machine. anthropic, gemini, openai: a cloud "
+            "vision model (page images leave this machine). A specific runtime: "
+            "paddle-vllm, paddle-rapid-mlx, paddle-mlx-vlm, paddle-http, glm, glm-llama, "
+            "glm-rapid-mlx, glm-http."
+        ),
+    )
+    ocr.add_argument(
+        "--ocr-url",
+        help=(
+            "URL of an OCR server you run. Connects as paddle-http unless --ocr or "
+            "OCR_BACKEND names a GLM backend, then glm-http; ignored by the cloud backends"
+        ),
+    )
+    ocr.add_argument(
+        "--ocr-model",
+        help="Model path or served model name for OCR (a custom alias needs --ocr-profile)",
+    )
+    ocr.add_argument(
+        "--ocr-profile",
+        choices=["paddle", "glm"],
+        help="OCR model family for a custom --ocr-model alias",
+    )
+
+    llm = parser.add_argument_group("LLM (full mode)")
+    llm.add_argument(
+        "--llm",
+        choices=LLM_BACKEND_CHOICES,
+        metavar="BACKEND",
+        default=None,
+        help=(
+            "cloud: the provider in LLM_PROVIDER. local: a server bibr starts for this "
+            "machine (vllm-mlx or rapid-mlx on Apple Silicon, llama-cpp on Windows or a "
+            "small NVIDIA card, vllm on a larger one); name one of those to force it. "
+            "llmster: an LM Studio server you run. Default: LLM_BACKEND (cloud)."
+        ),
+    )
+    llm.add_argument(
+        "--llm-provider",
+        help="Override LLM_PROVIDER (ignored by the local backends)",
+    )
+    llm.add_argument(
+        "--llm-model",
+        help="Override LLM_MODEL (ignored by the local backends)",
+    )
+
+    perf = parser.add_argument_group("performance")
+    perf.add_argument(
+        "--memory",
+        choices=["aggressive", "balanced", "keep_all"],
+        default=None,
+        help=(
+            "How many models stay loaded at once (default: chosen from system RAM, "
+            "CUDA VRAM and the LLM backend; aggressive suits 8 GB machines)"
+        ),
+    )
+    perf.add_argument(
         "--device",
         choices=["cuda", "mps", "cpu"],
-        help="Force compute device",
+        help="Force the compute device",
     )
-    parser.add_argument(
+    perf.add_argument(
         "--batch-size",
         type=int,
         default=0,
-        help="Files per chunk in batch processing (default: auto-detected from memory mode)",
-    )
-    parser.add_argument(
-        "--preset",
-        help="Apply a preset before processing (does not modify .env)",
+        help="Files per chunk when processing several (default: from the memory mode)",
     )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = _BibrParser(
         prog="bibr",
-        description="bibr — scientific paper metadata extraction",
+        description="bibr — scientific papers to structured JSON",
         epilog=_EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -364,17 +427,34 @@ def _build_parser() -> argparse.ArgumentParser:
 
     chew = sub.add_parser(
         "chew",
-        help="extract metadata from papers (PDF, DOCX, XML, HTML, ePub)",
+        help="extract papers to JSON (PDF, DOCX, JATS XML, HTML, ePub)",
+        usage="bibr chew [options] INPUT [INPUT ...]",
+        # Hand-wrapped: RawDescriptionHelpFormatter (for the examples) does not
+        # re-flow the description.
+        description=(
+            "Extract papers to bibr's JSON format: metadata, sections and sentences,\n"
+            "references and citation links, tables, figures and equations.\n"
+            "\n"
+            "The JSON goes to stdout unless -o is given; progress and messages go to\n"
+            "stderr. With nothing configured this is a fast run: local models only, no\n"
+            "LLM and no API key. Run 'bibr setup' to add an LLM, or OCR for scans."
+        ),
         epilog=_EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     chew.add_argument(
         "input",
         nargs="*",
+        metavar="INPUT",
         help=(
-            "Input file(s) or directory of PDF, DOCX, JATS XML, HTML or ePub files "
-            "(use '-' for stdin)"
+            "Files or directories of PDF, DOCX, JATS XML, HTML or ePub papers "
+            "('-' reads one file from stdin)"
         ),
+    )
+    chew.add_argument(
+        "--sample",
+        action="store_true",
+        help="Process the sample paper that ships with bibr (no input needed)",
     )
     chew.add_argument(
         "--manifest",
@@ -383,9 +463,13 @@ def _build_parser() -> argparse.ArgumentParser:
     chew.add_argument(
         "-o",
         "--output",
+        "--out",
+        dest="output",
         help=(
-            "Output path: a file for one input file, a directory for a directory, "
-            "a glob or several inputs (batch)"
+            "Where to write: a file for one paper, a directory for several (one "
+            "<name>.json each). Beside each export bibr also writes <name>.core.json "
+            "(the extraction before enrichment) and <name>.json.receipt.json (a run "
+            "record). Default: stdout"
         ),
     )
     _add_pipeline_options(chew)
@@ -401,19 +485,18 @@ def _build_parser() -> argparse.ArgumentParser:
     chew.add_argument(
         "-v",
         "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
+        action="count",
+        default=0,
+        help="Show bibr's log (stage decisions, model loads, fallbacks); -vv adds debug detail",
     )
     chew.add_argument(
         "--dry-run",
         action="store_true",
         help=(
-            "Resolve and print the full run plan (input files, OCR/LLM config, "
-            "reference strategies, enrichment, memory mode, models that would "
-            "need downloading, output destinations) without processing anything. "
-            "No network calls, no model loads. Prints a Blockers section and "
-            "exits 1 when missing inputs, failing preflights or an -o that cannot "
-            "be written would fail the real run."
+            "Print the resolved plan (inputs, mode, OCR and LLM routes, reference "
+            "strategies, models still to download, outputs) and process nothing: no "
+            "network calls, no model loads. Exits 1 with a Blockers section when the "
+            "real run would fail."
         ),
     )
 
@@ -447,6 +530,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     batch.add_argument(
         "--out",
+        "-o",
+        "--output",
+        dest="out",
         help="Output directory (exports, outcomes.jsonl, run_info.json)",
     )
     batch.add_argument(
@@ -516,8 +602,9 @@ def _build_parser() -> argparse.ArgumentParser:
     batch.add_argument(
         "-v",
         "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
+        action="count",
+        default=0,
+        help="Show bibr's log (stage decisions, model loads, fallbacks); -vv adds debug detail",
     )
     _add_pipeline_options(batch)
     remote = batch.add_argument_group("remote executor (bibr serve job API)")
@@ -630,7 +717,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "start via the flags below (a subset of 'bibr chew'). The file tools "
             "reach only the "
             "--allow-dir directories (default: the current directory). Requires "
-            "the 'mcp' extra. Register with e.g.: claude mcp add bibr -- uv run bibr mcp"
+            "the 'mcp' extra. Register with e.g.: claude mcp add bibr -- uv run bibr mcp "
+            "(installed with uv tool install 'bibr[mcp]': claude mcp add bibr -- bibr mcp)"
         ),
     )
     mcp_parser.add_argument(
@@ -759,21 +847,51 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp_parser.add_argument(
         "-v",
         "--verbose",
-        action="store_true",
-        help="Enable verbose logging (stderr)",
+        action="count",
+        default=0,
+        help="Show bibr's log on stderr; -vv adds debug detail",
     )
 
     # --- doctor subcommand ---
-    ref_model = sub.add_parser("ref-model", help="download the pinned fine-tuned reference adapter")
+    ref_model_about = (
+        "The reference adapter is an optional fine-tuned Qwen3.5-0.8B LoRA adapter that "
+        "reviews the local parser's reference records, served from an endpoint you run. "
+        "Most setups do not need it. See https://bibr.org/guides/reference-model/"
+    )
+    ref_model = sub.add_parser(
+        "ref-model",
+        help="download the pinned fine-tuned reference adapter",
+        description=ref_model_about,
+    )
     ref_commands = ref_model.add_subparsers(dest="ref_model_command", required=True)
     ref_download = ref_commands.add_parser(
-        "download", help="verify and install the reference adapter"
+        "download",
+        help="verify and install the reference adapter",
+        description=(
+            "Download the pinned adapter bundle (about 84 MB), verify its checksum and "
+            "file manifest, and install it into a new directory. Re-running verifies an "
+            "existing installation; other files are never overwritten. " + ref_model_about
+        ),
     )
-    ref_download.add_argument("--output", required=True, type=str, help="new adapter directory")
+    ref_download.add_argument(
+        "--output",
+        "-o",
+        "--out",
+        dest="output",
+        required=True,
+        type=str,
+        help="Directory for the adapter (created; an existing installation there is verified)",
+    )
 
     sub.add_parser(
         "doctor",
-        help="validate your environment",
+        help="check that this machine and configuration can run bibr",
+        description=(
+            "Check that bibr can run here: Python and system libraries, the .env files "
+            "it reads, the run mode, the LLM and OCR routes that mode needs, the compute "
+            "device and the model runtimes. Each line is ok, a warning or a failure with "
+            "the command that fixes it. Processes no paper; exits 1 when a check fails."
+        ),
     )
 
     # --- tables subcommand ---
@@ -796,7 +914,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "inputs", nargs="+", help="Export JSON files or directories containing them"
     )
     tables_parser.add_argument(
-        "--out", required=True, help="Output directory for the .parquet files"
+        "--out",
+        "-o",
+        "--output",
+        dest="out",
+        required=True,
+        help="Output directory for the .parquet files",
     )
 
     # --- references subcommand ---
@@ -826,6 +949,8 @@ def _build_parser() -> argparse.ArgumentParser:
     references_parser.add_argument(
         "-o",
         "--out",
+        "--output",
+        dest="out",
         default=None,
         help="Output file (default: standard output, which needs --format)",
     )

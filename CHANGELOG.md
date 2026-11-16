@@ -6,8 +6,197 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `bibr chew --sample` processes the synthetic sample paper that ships with
+  bibr, so a first run needs no PDF: `bibr chew --sample -o sample.json`.
+- `bibr inspect` lists every validation finding (what it concerns, the message
+  and its code, errors first) and has a "Processing notes" section with the
+  entries of `extraction.warnings`. A directory given to it is refused in one
+  line.
+- `-v` shows bibr's INFO log (stage decisions, model loads, fallbacks) and
+  `-vv` adds debug detail, on `bibr chew`, `bibr batch` and `bibr mcp`.
+- `-o`, `--out` and `--output` are all accepted by `bibr chew`, `bibr batch`,
+  `bibr tables`, `bibr references` and `bibr ref-model download`.
+- `bibr setup --global` saves to `~/.bibr/.env`, which bibr reads from every
+  folder, instead of `./.env`.
+- `bibr.InputFileNotFoundError` (an `InputValidationError` and a
+  `FileNotFoundError`, `error_code="file_not_found"`) for a missing input,
+  `bibr.InvalidOptionError` (a `ConfigurationError` and a `ValueError`) for a
+  bad `ocr`, `refs`, `mode`, `ref_seg` or `consolidate` value, with a "did you
+  mean", and `NoExportsError` from `write_tables` / `write_references` with
+  the new `require_exports=True`. `BibrError`, `ProcessingError`,
+  `InputValidationError` and the other types a caller catches are importable
+  from `bibr`.
+- `Records` (`result.references` and the other tables) has a one-line `repr`
+  and renders as a table in Jupyter.
+- `bibr serve` prints one line with its URL, its API docs and its health
+  endpoint once the pipeline is ready, and `GET /` answers with the paths it
+  serves.
+- The web demo has a one-click sample paper, downloads for BibTeX, RIS, the
+  data tables (Parquet) and the paper's tables (CSV) beside the JSON, and
+  "Notes on this extraction" in plain words.
+- Documentation pages: What you get (a tour of the output), Troubleshooting
+  and FAQ, R and Metacheck, Web demo, Windows and GPU setups, What leaves your
+  machine, and Local model runtime. The CLI reference opens with a
+  task-to-command table and groups the `chew` and `batch` options; the settings
+  reference opens with what an unconfigured install does.
+- The geometry reference segmenter and the front-role classifier read a
+  pickle-free bundle format, `bibr-gbm/1`: a JSON manifest (`geom_segmenter.json`,
+  `front_role.json`) and the trees as arrays in an `.npz` file beside it, read
+  with numpy alone and checked against the SHA-256 the manifest records
+  (`bibr/utils/gbm_bundle.py`). The reader reproduces scikit-learn's arithmetic,
+  so the probabilities are the same floats the joblib bundles give.
+  `scripts/export_gbm_bundle.py` converts a joblib bundle and checks the result
+  against scikit-learn before it finishes.
+- `REF_GEOM_SEG_MODEL_ID` and `ML_FRONT_ROLE_MODEL_ID` take a local `.json`
+  manifest or the directory holding it.
+
 ### Changed
 
+- `bibr chew` and `bibr batch` print their progress, warnings and errors only.
+  bibr's INFO log lines (timestamp, logger name, level) used to be printed on
+  every run; they now need `-v`, and what `-v` printed before (debug) needs
+  `-vv`. Log records shown without `-v` are one plain line with no traceback.
+  A managed OCR or LLM server still announces that it is starting.
+- A run opens with one line (mode and OCR route) in place of four, and input
+  files are checked before it: a mistyped path or an unsupported file is
+  reported alone, before any model loads. `--dry-run` prints the plan only.
+- The line under each result says how much is worth checking and where, as in
+  `2 warnings to review (authors) · 1 processing note · details: bibr inspect
+  result.json`, in place of the first two validation codes. `LLM_SKIPPED`,
+  which every fast run carries, is not counted.
+- A usage error is one line with the nearest real command, option or value
+  (`Unknown option '--ouput'. Did you mean '--output'?`) and the help command
+  to run, in place of the usage synopsis. `bibr chew --help` groups its
+  options under headings and its examples are about `chew`.
+- Several papers with no `-o` are written to stdout as JSON Lines, one paper
+  per line: indented documents back to back were not readable as JSON. `-o`
+  naming a `.json` file for a directory or several inputs is refused instead of
+  creating a directory of that name.
+- Exports and the files beside them are created with the process umask
+  applied; they were owner-only (0600). A paper read from stdin is named
+  `stdin` (`paper_id`, `source.file_name`) rather than after a temporary file.
+- `--ocr anthropic` (and `OCR_BACKEND=anthropic`) uses `claude-haiku-5-5` when
+  `OCR_VISION_MODEL` is not set; it used to send the Gemini default to
+  Anthropic. A cloud OCR backend with no API key stops the run before any model
+  loads, and `--dry-run` lists it as a blocker.
+- A full run with neither an LLM credential nor an OCR runtime reports both,
+  the credential first.
+- `bibr doctor` reports a missing `.env` and an unconfigured Redis as ok lines:
+  a default install ends with no warnings. A failed LLM connection shows the
+  provider's message once instead of the raw response body three times.
+- `bibr config example` prints every setting commented out, with comments
+  wrapped at 88 columns, so the file can be saved as `.env` unchanged. Its
+  short form covers the run mode, the provider and its keys, the OCR backend
+  and the Crossref address. `.env.example` is that output plus a `bibr serve`
+  section.
+- `bibr setup`: a plan that cannot start on this machine says so, names what
+  is missing and is no longer the default answer; declining the local plan
+  leads on to the private-server and cloud questions; `--advanced` offers
+  `text-layer` and defaults to an OCR route that can start here; an empty API
+  key is refused; the `demo` extra is no longer recommended, `gpu` only where
+  the driver supports it, and a large extra is installed only on request, with
+  the command shown; an existing `.env` is merged without commenting out
+  hand-written values unasked, and overwriting keeps `.env.bak`; the closing
+  screen names the file written and the mode, lists any check that failed and
+  exits 1 in that case; without a terminal setup says how to configure bibr
+  instead and exits 2. The first-run download size is the one `--dry-run`
+  computes.
+- `bibr batch`: a resume with nothing left says so; interrupted papers are
+  counted apart from failed ones (`papers.interrupted` in the report,
+  `n_interrupted` in `run_info.json`); the warnings row uses short phrases and
+  leaves out `LLM_SKIPPED` (`--json` keeps the codes, with `LLM_SKIPPED` under
+  `warnings.expected`); stages under 0.5% of the time are not listed.
+- `bibr tables` and `bibr references` skip the `run_info.json` and
+  `validation_report.json` a batch run writes without a warning, and exit 1,
+  writing nothing, when no export was read; a paper given in place of an
+  export is named as one.
+- `bibr serve` shuts down on SIGTERM (`kill`, `docker stop`) the way it does on
+  Ctrl-C; under LitServe the API and worker processes kept serving.
+- The web demo is rearranged around the result: a paper card (title, authors,
+  journal, DOI, abstract), five tabs with empty states, a references table
+  that wraps, plain wording for modes and stages, and a start-up banner with
+  the URL. `bibr demo --log-level` defaults to `warning`.
+- On the library path a missing input file, an unsupported format (the message
+  names the extension and the formats bibr reads) and an unknown `ocr` backend
+  are refused before the pipeline is built, without a logged traceback. The
+  scanned-PDF message names `ocr=` arguments there and CLI flags on the command
+  line. `import bibr` adds a `NullHandler` to the `bibr` logger, and
+  reference-extraction notes are logged at INFO: they are in
+  `extraction.warnings`.
+- README, the site home, Quickstart and Installation describe what an install
+  does today: a first result needs no setup and no key, `bibr setup` is the
+  optional step that adds an LLM or OCR, and `--fast` (not `--no-llm`) is the
+  way to keep a run local. The tester guide is retired; its content is in the
+  Windows and GPU, R, Web demo, Installation and Troubleshooting pages. The
+  configuration guide starts with the settings most people touch and a mode
+  table, and its runtime internals moved to Local model runtime.
+- In a local `bibr batch` on the streaming path (a cloud LLM or a fast run,
+  memory mode not `aggressive`), a chunk starts once the chunk before it has
+  read its last page, instead of after that chunk's last paper is exported.
+  The page reading no longer idles at each chunk boundary while the chunk
+  before finishes its last papers (about 10 s per boundary for a fast run of
+  8-paper chunks on 8 CPU cores). At most two chunks are in flight, they
+  share the limit of two files in the later stages, and verdicts are still
+  written chunk by chunk in order. `PIPELINE_OVERLAP_CHUNKS=false` turns it
+  off. Ctrl-C now records every chunk in flight as `interrupted`, and a model
+  override that stops the run also stops the chunk running beside it, whose
+  papers are recorded `model_override_failed` and run again on resume.
+- **The Google and Anthropic SDKs are extras, not core dependencies.** `google`
+  installs `google-genai` and `jsonref` (`LLM_PROVIDER=google`, the provider a run
+  without a `.env` uses, and `OCR_BACKEND=gemini`); `anthropic` installs the
+  anthropic SDK below 1.0 (`LLM_PROVIDER=anthropic`, `OCR_BACKEND=anthropic`).
+  `batch` now means `bibr[anthropic]`, and `all` includes both. A core install
+  keeps LLM extraction through any OpenAI-compatible endpoint, since Instructor
+  stays core and brings the openai SDK.
+  - **Migration:** `pip install bibr` followed by a Gemini or Claude run now
+    stops before any work: `bibr chew`, `bibr.chew()`, `bibr doctor` and
+    `--dry-run` name the missing extra and the command that installs it (`pip
+    install "bibr[google]"`). `bibr setup` installs the extra for the provider or
+    cloud OCR backend you pick. The serve image installs both. A fast run, `--no-llm`
+    and the local model servers need neither.
+- **`bibr serve` no longer runs on LitServe.** The HTTP API is a FastAPI app
+  under uvicorn, and bibr starts and watches its one inference worker itself
+  (`bibr/serve/worker.py`). Requests, responses and status codes are unchanged:
+  a worker error keeps its status and detail, any other worker failure is a
+  generic `500`, a request that waited past `PIPELINE_TIMEOUT` for the worker is
+  a `504`, bodies over the cap are a `413`, and responses from 1000 bytes are
+  gzipped. LitServe's undocumented `GET /info` route is gone (it answers `404`,
+  or `401` without the bearer when auth is on), and `GET /` answers with the
+  paths bibr serves in place of LitServe's bare text. Also gone is LitServe's
+  `LIT_SERVER_API_KEY` and `LIGHTNING_CERT_PEM` handling, which bibr never
+  configured.
+- **The serve stack is an extra.** FastAPI, uvicorn and python-multipart move from
+  the core dependencies to the new `serve` extra, which `all` includes; litserve
+  is no longer installed. `bibr serve` without the extra exits with an install
+  hint (`uv tool install 'bibr[serve]'`). The serve image installs it.
+- Input validation no longer needs the system libmagic library, so a plain
+  `pip install bibr` on macOS or Linux works without installing it first.
+  Built-in content checks in `bibr/input/sniff.py` identify PDF, DOCX, JATS
+  XML, HTML (including UTF-16) and ePub inputs, and executables, the same way
+  on every host; libmagic is no longer consulted even when it is installed.
+  `python-magic` and `python-magic-bin` are no longer dependencies, the serve
+  image no longer installs `libmagic1`, `bibr doctor` drops its libmagic
+  check, and the install docs drop the system prerequisite.
+- An HTML or JATS XML file that mentions the PDF header (`%PDF-1.7`) near its
+  start is accepted; it was rejected as a mislabelled PDF.
+- A file that starts with a DOS or Windows (`MZ`) or Linux (ELF) executable
+  header is refused under every extension (`unsupported_format`). With
+  libmagic such files reached the format checks, and a PDF placed behind an
+  `MZ` header was accepted.
+- Error codes only: an ePub whose `mimetype` member is not first, renamed to
+  another supported extension, is `unsupported_format` (was
+  `corrupted_file`); a truncated DOCX, or a text file that mentions `%PDF-`
+  without a version, renamed to another supported extension, is
+  `corrupted_file` (was `unsupported_format`).
+- `REF_GEOM_SEG_REVISION` and `ML_FRONT_ROLE_REVISION` default to new revisions
+  of the two model repos (`88a292ff`, `a1fd6637`) that hold the `bibr-gbm/1`
+  files. Their scores are bit-identical to the joblib bundles'.
+- scikit-learn and joblib are no longer bibr dependencies, and bibr reads no
+  pickles. A `.joblib` bundle named by either setting is refused with how to
+  convert it (`scripts/export_gbm_bundle.py`, which needs the dev group).
+  `bibr doctor` no longer checks for scikit-learn.
 - The text-layer route reads a scan's own OCR layer (invisible text over a
   page-sized image) in place of refusing the file as `scan_needs_ocr`, when the
   scans are the only reason for the refusal and most of the layer's words are
@@ -18,6 +207,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `bibr chew paper.pdf | head` no longer ends in a `BrokenPipeError`
+  traceback (exit 141), and Ctrl-C during `bibr chew` prints `Interrupted.`
+  (exit 130) in place of two chained tracebacks.
+- An `-o` that cannot be written is reported before any model loads (exit 2)
+  instead of as a `PermissionError` traceback from the first write.
+- `bibr config example > .env` wrote a file python-dotenv could not parse (long
+  comments were folded at the terminal width) and that set `OCR_BACKEND=paddle`
+  and `LLM_PROVIDER=google`, which took a working fast install out of fast mode.
+- `--pages abc` says what a page range looks like instead of `invalid literal
+  for int()`, and a range past the last page names the page and the page count
+  in 1-based numbers.
+- `bibr preset rm` and an overwriting `bibr preset save` without a terminal
+  name `--yes` / `--force` instead of ending in an `EOFError` traceback.
+- The third progress stage reads "Reading the PDF text layer" on the text-layer
+  route; it said "Reading text (OCR)" while no OCR model ran.
+- `bibr setup` no longer prints "Setup complete!" after a failed connection
+  test or test extraction, no longer writes an OCR backend that cannot start
+  when every default is accepted in `--advanced`, and no longer shows
+  tracebacks and retry log lines between its questions.
+- The web demo shows what went wrong (a scan, an unreadable file, an
+  unsupported type) and what to do, where it showed a red "Error" badge; a busy
+  port and Ctrl-C after a run no longer print tracebacks.
+- The example notebooks read fields that exist in schema 12 (affiliations
+  through `affiliation[].author_ids`, the version from
+  `extraction.producer.version`) and no longer print empty values.
+- LIMITATIONS: the "Runs on" cells of the extraction-model table match the
+  model registry (the 4B model is the default wherever one of its builds fits;
+  the 2B model is offered in advanced setup and used on a Mac with too little
+  memory for the 4B).
+- **A request no longer hangs when the inference worker dies under it.** Every
+  request in flight on the worker is answered at once with a `503` whose detail
+  has the code `inference_worker_stopped` (which `bibr batch --serve-url`
+  resubmits, as it does a job whose replica died), `/health` answers `503` instead of
+  `ok`, and new requests get a `503` until a worker is ready. With
+  `PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
+  status 1 for its supervisor to restart; `PIPELINE_RESTART_WORKERS=true`, an
+  unsupported opt-in under LitServe, now starts a new worker in place.
+- Ctrl+C on `bibr serve` lets the requests in flight finish (within uvicorn's
+  30-second graceful shutdown) before the worker stops: the worker no longer
+  takes the terminal's SIGINT itself, and is asked to exit rather than
+  terminated.
 - A fast run's abstract no longer takes in a companion summary printed under
   its own heading (such as Highlights or a Simple Summary), a version in
   another language or script printed right after it, or its own "Abstract"

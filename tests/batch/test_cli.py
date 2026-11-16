@@ -204,6 +204,7 @@ def test_report_subcommand_text_and_json(tmp_path, capsys):
         "total": 2,
         "ok": 1,
         "failed": 1,
+        "interrupted": 0,
         "stopped_on_model_override": 0,
         "fell_back_on_model_override": 0,
         "fell_back_capped": 0,

@@ -28,15 +28,14 @@ multi-user front end must deduplicate per user itself.
 
 **Architecture.** Jobs persist their uploads through the same disk-backed
 ingress as ``/papers/extract`` and queue only its opaque descriptor. The job
-runner submits that descriptor through LitServe's private inference adapter,
-which owns worker dispatch and upload cleanup without rebuilding a multipart
-request or forwarding caller credentials.
+runner submits that descriptor through the inference dispatch tracker, which
+owns worker dispatch and upload cleanup without rebuilding a multipart request
+or forwarding caller credentials.
 
 **Job state** lives behind the :class:`JobStore` protocol. The default
 :class:`MemoryJobStore` is a process-local dict: every custom route runs in the
-*one* API-server process that ``serve.app.main`` pins (LitServe 0.2.17 would
-otherwise default ``num_api_servers`` to the inference-worker count), so it is
-consistent without Redis — but only for a single ``bibr serve`` instance.
+*one* API-server process ``bibr serve`` runs, so it is consistent without
+Redis — but only for a single ``bibr serve`` instance.
 ``JOBS_STORE=redis`` swaps in :class:`bibr.serve.jobs_redis.RedisJobStore`,
 which shares job status, results, and the active-job cap between replicas
 behind a load balancer: any replica answers status/result polls for a job that
@@ -773,7 +772,7 @@ async def _run_job(
     descriptor: dict[str, object],
     tracker: InferenceDispatchTracker,
 ) -> None:
-    """Execute one job through LitServe's in-process descriptor adapter.
+    """Execute one job through the inference worker's descriptor dispatch.
 
     A worker cancelled at shutdown lets the cancellation through; the dispatcher's
     ``close`` records the job it held.
@@ -825,7 +824,7 @@ def register_job_routes(
 
     Routes are NOT added to ``PUBLIC_PATHS`` — the app-wide ``_auth_gate``
     middleware covers them like any other route. Jobs share the public
-    extraction route's disk-backed upload store and LitServe dispatch tracker.
+    extraction route's disk-backed upload store and inference dispatch tracker.
     The caller owns ``store`` (and closes it); this only closes the dispatcher.
     """
 
@@ -1005,7 +1004,7 @@ def register_job_routes(
         if len(body) >= _RESULT_GZIP_MIN_BYTES and "gzip" in request.headers.get(
             "accept-encoding", ""
         ):
-            # Compress a large body here, off the loop. LitServe's GZipMiddleware (same
+            # Compress a large body here, off the loop. The app's GZipMiddleware (same
             # Accept-Encoding test) would do it on the loop, and passes an already
             # encoded response through untouched.
             body = await asyncio.to_thread(gzip.compress, body, 6)

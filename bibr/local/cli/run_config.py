@@ -438,9 +438,10 @@ def _local_llm_backend_blocker(backend: str) -> str | None:
 def _ocr_candidate_unavailable_reason(backend: str) -> str | None:
     """Cheap, start-nothing check that a managed local OCR runtime can launch.
 
-    Returns ``None`` for backends this function does not vet (HTTP and cloud
-    backends validate themselves at startup) and for runtimes whose launcher
-    and hardware are present. The check itself is the library's
+    Returns ``None`` for backends this function does not vet (HTTP backends
+    validate themselves at startup; a cloud vision backend is checked only for
+    its provider SDK extra) and for runtimes whose launcher and hardware are
+    present. The check itself is the library's
     (:func:`bibr.ocr.registry.local_runtime_unavailable_reason`), which the
     text-layer fallback also asks.
     """
@@ -464,7 +465,40 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     if config.ocr_backend == TEXT_LAYER_BACKEND:
         # Reads the PDF's own text layer: there is no runtime to start.
         return None
+    if config.ocr_backend in _CLOUD_OCR_KEYS:
+        return _cloud_ocr_key_problem(config.ocr_backend)
     return _ocr_runtime_blocker(config.ocr_backend, llm_backend=_run_llm_backend(config))
+
+
+#: The setting(s) that hold the key each cloud vision OCR backend sends.
+_CLOUD_OCR_KEYS = {
+    "gemini": "GOOGLE_API_KEY (or LLM_API_KEY)",
+    "openai": "LLM_API_KEY (or OPENAI_API_KEY)",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+def _cloud_ocr_key_problem(backend: str) -> str | None:
+    """Why the cloud vision OCR *backend* cannot be called, or ``None``.
+
+    Without a key every region's request fails on its own, after the layout
+    model has loaded, and the run ends in a wall of SDK retry errors. The key
+    is looked up the way the OCR client looks it up; no client is built.
+    """
+    import os
+
+    from bibr.config import Settings
+    from bibr.local.ocr_cloud import _api_key_for_provider
+
+    if _api_key_for_provider(backend, Settings):
+        return None
+    # The OpenAI SDK also reads OPENAI_API_KEY from the process environment.
+    if backend == "openai" and os.environ.get("OPENAI_API_KEY"):
+        return None
+    return (
+        f"The {backend} OCR backend sends page images to a cloud model and needs an API "
+        f"key: set {_CLOUD_OCR_KEYS[backend]} in .env or the environment."
+    )
 
 
 def _front_tagger_bundle(model_id: str, revision: str | None) -> Path | None:

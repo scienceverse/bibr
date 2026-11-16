@@ -5,7 +5,6 @@ from __future__ import annotations
 import errno
 import json
 import os
-import tempfile
 import uuid
 from pathlib import Path
 
@@ -40,10 +39,14 @@ def atomic_write_json(path: Path, payload: object, **json_kwargs) -> None:
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    # A fixed short name: one derived from the destination's would exceed
-    # NAME_MAX (255 bytes) for long, legal destination names.
-    fd, raw_temp = tempfile.mkstemp(dir=destination.parent, prefix=".bibr-", suffix=".tmp")
-    temp_path = Path(raw_temp)
+    # A short random name: one derived from the destination's would exceed
+    # NAME_MAX (255 bytes) for long, legal destination names. Created with the
+    # process umask applied, as any file the user writes is: ``mkstemp`` makes
+    # owner-only files, which left exports unreadable to a shared group.
+    temp_path = destination.parent / f".bibr-{uuid.uuid4().hex[:12]}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(temp_path, flags, 0o666)
     options = {"ensure_ascii": False, "allow_nan": False, **json_kwargs}
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:

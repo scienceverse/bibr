@@ -35,14 +35,15 @@ from bibr.extract.front_role_features import (
     FrontRegion,
     region_features,
 )
-from bibr.utils.ml_runtime import is_hub_repo_id
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
 
 logger = logging.getLogger(__name__)
 
-_BUNDLE_FILENAME = "front_role.joblib"
+# The bundle's file stem: front_role.json + .npz (bibr-gbm/1,
+# bibr.utils.gbm_bundle.load_gbm_bundle).
+_BUNDLE_STEM = "front_role"
 MODEL_KIND_FRONT_ROLE_V1 = "front_role_v1"
 
 
@@ -80,13 +81,6 @@ class FrontRolePredictions:
 
     def __iter__(self):
         return iter(self._scores.items())
-
-
-def _resolve_spec(model_spec: str) -> str:
-    # resolve_checkpoint warns about a same-named cwd path, with the filename.
-    if ":" in model_spec or not is_hub_repo_id(model_spec, warn=False):
-        return model_spec
-    return f"{model_spec}:{_BUNDLE_FILENAME}"
 
 
 def _region_attr(region: Any, name: str, default=None):
@@ -131,14 +125,11 @@ class FrontRoleClassifier:
     """Loads a bundle and scores regions; safe to share across threads."""
 
     def __init__(self, model_spec: str, revision: str | None = None) -> None:
-        from bibr.ner.checkpoint import resolve_checkpoint
-        from bibr.utils.safe_pickle import safe_joblib_load
+        from bibr.utils.gbm_bundle import load_gbm_bundle
 
-        path = resolve_checkpoint(_resolve_spec(model_spec), revision=revision)
+        # A pickle-free bibr-gbm/1 bundle, read with numpy, as for the geom segmenter.
+        path, bundle = load_gbm_bundle(model_spec, revision, stem=_BUNDLE_STEM)
         self.path = path
-        # Same trust boundary as the geom segmenter: joblib executes code on
-        # load, so only the gadget-restricted loader touches the file.
-        bundle = safe_joblib_load(path)
         self.model_kind = str(bundle.get("model_kind", MODEL_KIND_FRONT_ROLE_V1))
         if self.model_kind != MODEL_KIND_FRONT_ROLE_V1:
             raise ValueError(f"unknown front-role model_kind: {self.model_kind!r}")

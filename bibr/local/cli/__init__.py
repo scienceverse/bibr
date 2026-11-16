@@ -152,6 +152,113 @@ class _ShowOnceFilter(logging.Filter):
 #: Messages that are advice repeated by every client of a library, shown once.
 _REPEATED_ADVICE = ("unauthenticated requests",)
 
+#: Loggers that stay at INFO without ``-v``: the managed OCR and LLM servers,
+#: whose start-up can take minutes and would otherwise look like a hang.
+_LIFECYCLE_LOGGERS = (
+    "bibr.local.ocr",
+    "bibr.local.vllm_ocr",
+    "bibr.local.vllm_llm",
+    "bibr.local.llama_cpp",
+    "bibr.local.rapid_mlx",
+    "bibr.local.mlx_vlm_ocr",
+    "bibr.local.llmster",
+    "bibr.local.llm",
+)
+
+_VERBOSE_LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
+
+
+class _QuietFormatter(logging.Formatter):
+    """The default (no ``-v``) log format: the message behind a status glyph.
+
+    Without ``-v`` the progress display is the interface, and the few records
+    that still reach the terminal (warnings, errors, a managed server starting)
+    read as part of it rather than as ``HH:MM:SS logger.name LEVEL`` lines.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("%(message)s")
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.levelno >= logging.ERROR:
+            glyph = ui.FAIL
+        elif record.levelno >= logging.WARNING:
+            glyph = ui.WARN
+        else:
+            glyph = ui.SEP
+        # The message only: a traceback logged beside it (``exc_info``) is for
+        # ``-v``, and the command reports the failure itself in one line.
+        return f"{ui.INDENT}{glyph} {record.getMessage()}"
+
+
+class _DropFilter(logging.Filter):
+    """Drop every record whose message contains one of the markers."""
+
+    def __init__(self, *markers: str) -> None:
+        super().__init__()
+        self._markers = markers
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(marker in message for marker in self._markers)
+
+
+def _configure_logging(verbosity: int) -> None:
+    """Send log records to stderr at the verbosity the user asked for.
+
+    * no flag: warnings and errors, plus the start-up lines of managed servers;
+    * ``-v``: every ``bibr.*`` INFO record (stage decisions, model loads,
+      fallbacks), with time, logger and level;
+    * ``-vv``: DEBUG for everything except the chattiest transport libraries.
+    """
+    handler = _LiveStderrHandler()
+    if verbosity >= 1:
+        handler.setFormatter(logging.Formatter(_VERBOSE_LOG_FORMAT, datefmt="%H:%M:%S"))
+    else:
+        handler.setFormatter(_QuietFormatter())
+    logging.basicConfig(
+        level=logging.DEBUG if verbosity >= 2 else logging.WARNING,
+        handlers=[handler],
+    )
+    # Scrub credential-shaped substrings (?key=…, Bearer …, AIza…/sk-…) from every
+    # emitted record, including SDK tracebacks logged with exc_info (audit L12).
+    from bibr.utils.redact import install_secret_scrubbing
+
+    install_secret_scrubbing(*logging.getLogger().handlers)
+    for installed in logging.getLogger().handlers:
+        installed.addFilter(_ShowOnceFilter(*_REPEATED_ADVICE))
+    # The same advice raised as a Python warning rather than a log record.
+    warnings.filterwarnings("once", message=".*unauthenticated requests.*")
+    if verbosity == 1:
+        logging.getLogger("bibr").setLevel(logging.INFO)
+    elif verbosity == 0:
+        for name in _LIFECYCLE_LOGGERS:
+            logging.getLogger(name).setLevel(logging.INFO)
+        # Hugging Face's advice to set a token is not something a first run
+        # needs to act on: anonymous downloads of the public models work.
+        for installed in logging.getLogger().handlers:
+            installed.addFilter(_DropFilter(*_REPEATED_ADVICE))
+        # huggingface_hub prints through a handler of its own, which the filter
+        # above never sees; the logger that emits the advice takes one too.
+        logging.getLogger("huggingface_hub.utils._http").addFilter(_DropFilter(*_REPEATED_ADVICE))
+        warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
+        # torch prints this from its own import when the installed wheel and the
+        # NVIDIA driver disagree; the device bibr then uses is reported by the
+        # run summary and by ``bibr doctor``.
+        warnings.filterwarnings("ignore", message="CUDA initialization", category=UserWarning)
+    # Silence noisy 3rd-party HTTP/transport loggers even with -vv — they bury
+    # our own messages under thousands of frame-level DEBUG lines.
+    for name in (
+        "httpcore",
+        "httpx",
+        "urllib3",
+        "huggingface_hub",
+        "filelock",
+        "asyncio",
+        "hf_xet",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
 
 class _LiveStderrHandler(logging.StreamHandler):
     """StreamHandler that resolves ``sys.stderr`` at emit time.
@@ -285,11 +392,19 @@ def _interrupt_on_termination():
 
 def main():
     """Entry point for ``bibr`` CLI command."""
-    # serve runs under LitServe and uvicorn, which install, restore and
+    # serve runs under uvicorn, which installs, restores and
     # re-raise their own SIGINT/SIGTERM handlers.
     serving = len(sys.argv) >= 2 and sys.argv[1] == "serve"
-    with contextlib.nullcontext() if serving else _interrupt_on_termination():
-        _main()
+    try:
+        with contextlib.nullcontext() if serving else _interrupt_on_termination():
+            _main()
+    except BrokenPipeError:
+        # Whatever read stdout has gone (``bibr chew paper.pdf | head``). Point
+        # stdout at the null device so the interpreter's exit flush cannot raise
+        # a second time, and leave the way a SIGPIPE-killed program does.
+        with contextlib.suppress(Exception):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(141 if os.name == "posix" else 1)
 
 
 def _main():
@@ -330,40 +445,7 @@ def _main():
         parser.print_help()
         sys.exit(0)
 
-    # Configure logging
-    log_level = logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[_LiveStderrHandler()],
-    )
-    # Scrub credential-shaped substrings (?key=…, Bearer …, AIza…/sk-…) from every
-    # emitted record, including SDK tracebacks logged with exc_info (audit L12).
-    from bibr.utils.redact import install_secret_scrubbing
-
-    install_secret_scrubbing(*logging.getLogger().handlers)
-    for handler in logging.getLogger().handlers:
-        handler.addFilter(_ShowOnceFilter(*_REPEATED_ADVICE))
-    # The same advice raised as a Python warning rather than a log record.
-    warnings.filterwarnings("once", message=".*unauthenticated requests.*")
-    # Always show INFO for bibr.* even without --verbose so the user sees stage
-    # transitions (native-text bypass, OCR readiness) without enabling -v.
-    if log_level > logging.INFO:
-        for name in ("bibr.local", "bibr.pipeline", "bibr.structure", "bibr.extract"):
-            logging.getLogger(name).setLevel(logging.INFO)
-    # Silence noisy 3rd-party HTTP/transport loggers even with -v — they bury
-    # our own messages under thousands of frame-level DEBUG lines.
-    for name in (
-        "httpcore",
-        "httpx",
-        "urllib3",
-        "huggingface_hub",
-        "filelock",
-        "asyncio",
-        "hf_xet",
-    ):
-        logging.getLogger(name).setLevel(logging.WARNING)
+    _configure_logging(int(getattr(args, "verbose", 0) or 0))
 
     # A bad .env surfaces as ConfigurationError the moment any subcommand
     # touches Settings; convert it to a clean stderr message + exit 1 for every
@@ -373,6 +455,12 @@ def _main():
         if args.command == "chew":
             try:
                 asyncio.run(_run_process(args))
+            except KeyboardInterrupt:
+                # Ctrl-C, or a SIGTERM/SIGHUP turned into one (which keeps its
+                # own exit status): one line, not asyncio's chained tracebacks.
+                _print_error("Interrupted.")
+                signum = _terminating_signal()
+                sys.exit(128 + signum if signum else 130)
             except BibrError as e:
                 # Convert known bibr exceptions to a clean stderr message + exit 1.
                 # Without this, users see a Python traceback for things like
