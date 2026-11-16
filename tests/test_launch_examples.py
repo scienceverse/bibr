@@ -23,7 +23,7 @@ def _no_request(*_args, **_kwargs):
 
 
 def _notebook_code(path: str):
-    notebook = json.loads((ROOT / path).read_text())
+    notebook = json.loads((ROOT / path).read_text(encoding="utf-8"))
     return ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
 
 
@@ -36,7 +36,7 @@ def _notebook_code(path: str):
     ],
 )
 def test_public_notebooks_have_no_saved_extractions(path):
-    notebook = json.loads((ROOT / path).read_text())
+    notebook = json.loads((ROOT / path).read_text(encoding="utf-8"))
     for cell in notebook["cells"]:
         if cell["cell_type"] == "code":
             assert not cell.get("outputs")

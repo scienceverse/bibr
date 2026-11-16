@@ -1,3 +1,4 @@
+import os
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -2741,6 +2742,7 @@ def _run_easy_setup(monkeypatch, probe, *, build=11282, wizard=None):
     """Run the easy wizard on an RTX 3080 10 GB up to the plan, then decline."""
     wizard = wizard or _recording_wizard()
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.platform_lib.machine", lambda: "x86_64")
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 10.0))
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
     monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", probe)
@@ -3091,6 +3093,7 @@ def _drive_easy_setup(
         return kwargs.get("default", "")
 
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.platform_lib.machine", lambda: "x86_64")
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: hardware)
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
     monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", lambda: (None, None))
@@ -4041,6 +4044,7 @@ def test_a_blocked_plan_taken_anyway_is_a_failed_check(monkeypatch, tmp_path):
 def test_the_plan_blocker_names_a_missing_llama_cpp_once_with_its_install_hint(monkeypatch):
     from bibr.local import llama_cpp
 
+    monkeypatch.setattr(sys, "platform", "linux")  # the install hint is per platform
     monkeypatch.setattr(llama_cpp, "find_llama_server", lambda: None)
     monkeypatch.setattr(llama_cpp, "_which_llama_command", lambda name: None)
     monkeypatch.setattr(
@@ -4299,7 +4303,7 @@ def test_overwrite_keeps_a_backup_and_names_the_dropped_settings(monkeypatch, tm
 
     backup = tmp_path / ".env.bak"
     assert backup.read_text() == _OLD_FULL_ENV
-    if sys.platform != "win32":
+    if os.name != "nt":  # sys.platform is faked as linux above
         assert stat.S_IMODE(backup.stat().st_mode) == 0o600
     text = " ".join(wizard.console.export_text().split())
     assert "Overwriting drops ANTHROPIC_API_KEY" in text and "(still in .env.bak)" in text
