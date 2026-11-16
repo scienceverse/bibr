@@ -20,7 +20,7 @@ def test_vllm_extra_is_limited_to_linux_cuda_python_range():
 def test_all_extra_does_not_include_platform_specific_runtimes():
     optional = _pyproject()["project"]["optional-dependencies"]
 
-    assert optional["all"] == ["bibr[batch,cache,demo,mcp,serve,torch]"]
+    assert optional["all"] == ["bibr[anthropic,batch,cache,demo,google,mcp,serve,torch]"]
 
 
 def test_ml_extra_is_an_alias_for_torch():

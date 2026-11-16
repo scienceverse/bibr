@@ -315,14 +315,11 @@ name = "bibr"
 version = "0.9.1"
 source = { editable = "." }
 dependencies = [
-    { name = "anthropic" },
     { name = "beautifulsoup4" },
-    { name = "google-genai" },
     { name = "html5lib" },
     { name = "httpx", extra = ["http2"] },
     { name = "huggingface-hub" },
     { name = "instructor" },
-    { name = "jsonref" },
     { name = "onnxruntime" },
     { name = "pandas" },
     { name = "pillow" },
@@ -346,7 +343,9 @@ all = [
     { name = "anthropic" },
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' and sys_platform == 'linux'" },
     { name = "fastapi", version = "0.143.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or sys_platform != 'linux'" },
+    { name = "google-genai" },
     { name = "gradio" },
+    { name = "jsonref" },
     { name = "mcp" },
     { name = "opencv-python-headless" },
     { name = "python-multipart" },
@@ -358,6 +357,9 @@ all = [
     { name = "transformers" },
     { name = "uvicorn", extra = ["standard"] },
 ]
+anthropic = [
+    { name = "anthropic" },
+]
 batch = [
     { name = "anthropic" },
 ]
@@ -366,6 +368,10 @@ cache = [
 ]
 demo = [
     { name = "gradio" },
+]
+google = [
+    { name = "google-genai" },
+    { name = "jsonref" },
 ]
 gpu = [
     { name = "onnxruntime-gpu", extra = ["cuda", "cudnn"], marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -436,19 +442,19 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.40.0,<1" },
-    { name = "anthropic", marker = "extra == 'batch'", specifier = ">=0.40.0,<1" },
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40.0,<1" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
-    { name = "bibr", extras = ["batch", "cache", "demo", "mcp", "serve", "torch"], marker = "extra == 'all'" },
+    { name = "bibr", extras = ["anthropic"], marker = "extra == 'batch'" },
+    { name = "bibr", extras = ["anthropic", "batch", "cache", "demo", "google", "mcp", "serve", "torch"], marker = "extra == 'all'" },
     { name = "bibr", extras = ["torch"], marker = "extra == 'ml'" },
     { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.136.0" },
-    { name = "google-genai", specifier = ">=1.0.0" },
+    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.0.0" },
     { name = "gradio", marker = "extra == 'demo'", specifier = ">=6.15.0" },
     { name = "html5lib", specifier = ">=1.1" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "instructor", specifier = ">=1.7.0" },
-    { name = "jsonref", specifier = ">=1.1.0" },
+    { name = "jsonref", marker = "extra == 'google'", specifier = ">=1.1.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2.0,<3" },
     { name = "numind", marker = "extra == 'nuextract'", specifier = ">=0.3,<0.3.1" },
     { name = "onnxruntime", specifier = ">=1.19.0" },
@@ -482,7 +488,7 @@ requires-dist = [
     { name = "wordfreq", specifier = ">=3.0.0" },
     { name = "wtpsplit-lite", specifier = ">=0.2.0" },
 ]
-provides-extras = ["cache", "nuextract", "vllm", "torch", "ml", "demo", "serve", "batch", "gpu", "local-mlx", "local", "mcp", "all"]
+provides-extras = ["cache", "nuextract", "vllm", "torch", "ml", "demo", "serve", "google", "anthropic", "batch", "gpu", "local-mlx", "local", "mcp", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -21,6 +21,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The Google and Anthropic SDKs are extras, not core dependencies.** `google`
+  installs `google-genai` and `jsonref` (`LLM_PROVIDER=google`, the provider a run
+  without a `.env` uses, and `OCR_BACKEND=gemini`); `anthropic` installs the
+  anthropic SDK below 1.0 (`LLM_PROVIDER=anthropic`, `OCR_BACKEND=anthropic`).
+  `batch` now means `bibr[anthropic]`, and `all` includes both. A core install
+  keeps LLM extraction through any OpenAI-compatible endpoint, since Instructor
+  stays core and brings the openai SDK.
+  - **Migration:** `pip install bibr` followed by a Gemini or Claude run now
+    stops before any work: `bibr chew`, `bibr.chew()`, `bibr doctor` and
+    `--dry-run` name the missing extra and the command that installs it (`pip
+    install "bibr[google]"`). `bibr setup` installs the extra for the provider or
+    cloud OCR backend you pick. The serve image installs both. A fast run, `--no-llm`
+    and the local model servers need neither.
 - **`bibr serve` no longer runs on LitServe.** The HTTP API is a FastAPI app
   under uvicorn, and bibr starts and watches its one inference worker itself
   (`bibr/serve/worker.py`). Requests, responses and status codes are unchanged:

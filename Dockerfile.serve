@@ -59,21 +59,24 @@ ARG ML_STACK
 # --extra mcp ships the optional MCP server so an operator can flip
 # MCP_ENABLED=true on the Compose stack without a custom image; it is a small
 # pure-Python dependency and stays inert unless enabled.
+# --extra google --extra anthropic ship the cloud provider SDKs (no longer core
+# dependencies), so LLM_PROVIDER=google (the default) or anthropic and their
+# vision OCR backends work in the image without a rebuild.
 # --locked fails the build when uv.lock is stale instead of re-resolving it.
 COPY pyproject.toml uv.lock README.md ./
 RUN case "$ML_STACK" in torch) ml_extra="--extra ml";; onnx) ml_extra="";; \
       *) echo "ML_STACK must be torch or onnx, got '$ML_STACK'" >&2; exit 1;; esac && \
     if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --locked --no-install-project --extra serve --extra cache --extra gpu $ml_extra --extra mcp --no-dev; \
+      uv sync --locked --no-install-project --extra serve --extra cache --extra gpu $ml_extra --extra mcp --extra google --extra anthropic --no-dev; \
     else \
-      uv sync --locked --no-install-project --extra serve --extra cache $ml_extra --extra mcp --no-dev; \
+      uv sync --locked --no-install-project --extra serve --extra cache $ml_extra --extra mcp --extra google --extra anthropic --no-dev; \
     fi
 
 # Install the project, then swap onnxruntime → onnxruntime-gpu on GPU builds.
 COPY bibr ./bibr
 RUN if [ "$ML_STACK" = "onnx" ]; then ml_extra=""; else ml_extra="--extra ml"; fi && \
     if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --locked --extra serve --extra cache --extra gpu $ml_extra --extra mcp --no-dev && \
+      uv sync --locked --extra serve --extra cache --extra gpu $ml_extra --extra mcp --extra google --extra anthropic --no-dev && \
       # onnxruntime (CPU) and onnxruntime-gpu share an `onnxruntime/` import
       # namespace, so installing both leaves a broken venv where the CPU
       # pybind11_state.so shadows the GPU one. Uninstall both and reinstall just
@@ -90,7 +93,7 @@ RUN if [ "$ML_STACK" = "onnx" ]; then ml_extra=""; else ml_extra="--extra ml"; f
       # commit could ship different ORT binaries and CUDA/cuDNN wheels. The
       # export pins onnxruntime-gpu and its nvidia-* wheels to the locked versions.
       uv export --quiet --locked --no-dev --no-emit-project --no-hashes \
-        --extra serve --extra cache --extra gpu $ml_extra --extra mcp -o /tmp/locked-requirements.txt && \
+        --extra serve --extra cache --extra gpu $ml_extra --extra mcp --extra google --extra anthropic -o /tmp/locked-requirements.txt && \
       uv pip install --python /app/.venv/bin/python \
         --constraint /tmp/locked-requirements.txt 'onnxruntime-gpu[cuda,cudnn]' && \
       # Assert the swap actually took. get_available_providers() can't be used
@@ -103,7 +106,7 @@ RUN if [ "$ML_STACK" = "onnx" ]; then ml_extra=""; else ml_extra="--extra ml"; f
         assert got == ['onnxruntime-gpu'], \
         f'GPU build must ship onnxruntime-gpu alone — got {got}.'"; \
     else \
-      uv sync --locked --extra serve --extra cache $ml_extra --extra mcp --no-dev; \
+      uv sync --locked --extra serve --extra cache $ml_extra --extra mcp --extra google --extra anthropic --no-dev; \
     fi
 
 # ===========================================================================
