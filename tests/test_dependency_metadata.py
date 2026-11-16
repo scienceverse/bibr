@@ -38,8 +38,12 @@ def test_core_carries_the_onnx_runtime_and_no_torch():
         for req in project["dependencies"]
     }
 
-    assert {"onnxruntime", "tokenizers", "huggingface-hub", "scikit-learn", "joblib"} <= core
+    assert {"onnxruntime", "tokenizers", "huggingface-hub"} <= core
     assert not core & {
+        # The GBM bundles are read with numpy (bibr.utils.gbm_bundle); only the
+        # converter and the tests need these, from the dev group.
+        "scikit-learn",
+        "joblib",
         "torch",
         "torchvision",
         "transformers",

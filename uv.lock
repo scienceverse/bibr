@@ -320,7 +320,6 @@ dependencies = [
     { name = "httpx", extra = ["http2"] },
     { name = "huggingface-hub" },
     { name = "instructor" },
-    { name = "joblib" },
     { name = "litserve" },
     { name = "onnxruntime" },
     { name = "pandas" },
@@ -337,7 +336,6 @@ dependencies = [
     { name = "questionary" },
     { name = "rapidfuzz" },
     { name = "rich" },
-    { name = "scikit-learn" },
     { name = "tenacity" },
     { name = "tokenizers" },
     { name = "uvicorn", extra = ["standard"] },
@@ -415,6 +413,7 @@ vllm = [
 [package.dev-dependencies]
 dev = [
     { name = "fakeredis", extra = ["lua"] },
+    { name = "joblib" },
     { name = "mypy" },
     { name = "numind" },
     { name = "onnx" },
@@ -449,7 +448,6 @@ requires-dist = [
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "instructor", specifier = ">=1.7.0" },
-    { name = "joblib", specifier = ">=1.3.0" },
     { name = "jsonref", marker = "extra == 'google'", specifier = ">=1.1.0" },
     { name = "litserve", specifier = ">=0.2.16,<0.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2.0,<3" },
@@ -474,7 +472,6 @@ requires-dist = [
     { name = "rapidfuzz", specifier = ">=3.6.0" },
     { name = "redis", marker = "extra == 'cache'", specifier = ">=5.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "scikit-learn", specifier = ">=1.9.0" },
     { name = "sentencepiece", marker = "extra == 'torch'", specifier = ">=0.1.99" },
     { name = "tenacity", specifier = ">=8.0.0" },
     { name = "tokenizers", specifier = ">=0.21.0" },
@@ -493,6 +490,7 @@ provides-extras = ["cache", "nuextract", "vllm", "torch", "ml", "demo", "google"
 [package.metadata.requires-dev]
 dev = [
     { name = "fakeredis", extras = ["lua"], specifier = ">=2.30.0" },
+    { name = "joblib", specifier = ">=1.3.0" },
     { name = "mypy", specifier = ">=1.15.0" },
     { name = "numind", specifier = ">=0.3,<0.3.1" },
     { name = "onnx", specifier = ">=1.17.0" },
