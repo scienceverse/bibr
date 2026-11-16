@@ -30,7 +30,12 @@ def main(port: int) -> None:
     register_extract_route(app, store, tracker)
     _register_health_route(app, worker)
     try:
-        BibrServer(app, worker).run(host="127.0.0.1", port=port, log_level="info")
+        BibrServer(app, worker).run(
+            host="127.0.0.1",
+            port=port,
+            log_level="info",
+            ready_line=f"bibr serve is ready: http://127.0.0.1:{port}",
+        )
     finally:
         store.close_sync()
 

@@ -208,9 +208,10 @@ def test_chew_requires_exactly_one_source_mode(tmp_path):
     both = parser.parse_args(["chew", "paper.pdf", "--manifest", str(tmp_path / "q.jsonl")])
     manifest_only = parser.parse_args(["chew", "--manifest", str(tmp_path / "q.jsonl")])
 
-    with pytest.raises(ManifestError, match="exactly one"):
+    # Each mistake gets its own sentence: nothing named at all, and both at once.
+    with pytest.raises(ManifestError, match="no input: name a paper or a folder"):
         resolve_cli_source_mode(neither.input, neither.manifest)
-    with pytest.raises(ManifestError, match="exactly one"):
+    with pytest.raises(ManifestError, match="input paths or --manifest, not both"):
         resolve_cli_source_mode(both.input, both.manifest)
     assert resolve_cli_source_mode(manifest_only.input, manifest_only.manifest) == "manifest"
 

@@ -358,6 +358,7 @@ def test_started_lines_are_on_disk_but_not_in_verdict_readers(tmp_path, monkeypa
         "total": 2,
         "ok": 1,
         "failed": 1,
+        "interrupted": 0,
         "stopped_on_model_override": 0,
         "fell_back_on_model_override": 0,
         "fell_back_capped": 0,

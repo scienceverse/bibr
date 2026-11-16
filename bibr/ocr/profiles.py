@@ -287,6 +287,25 @@ def resolve_served_family(
     return "glm"
 
 
+def cloud_vision_model(backend: str, settings: GlobalSettings) -> str:
+    """The vision model the cloud OCR *backend* calls under *settings*.
+
+    ``OCR_VISION_MODEL`` when it is set. Its built-in default is a Gemini model,
+    which only the gemini backend serves, so an unset model follows the backend
+    where bibr has a tested choice: ``--ocr anthropic`` on its own (what the
+    scanned-PDF message and ``bibr doctor`` suggest) used to ask Anthropic for the
+    Gemini model. ``bibr setup`` writes the same model for its hosted route.
+    """
+    vision = settings.ocr_vision
+    fields_set = getattr(vision, "model_fields_set", None)
+    if isinstance(fields_set, set | frozenset) and "model" not in fields_set:
+        from bibr.config import DEFAULT_LLM_MODELS
+
+        if backend == "anthropic":
+            return DEFAULT_LLM_MODELS["anthropic"]
+    return vision.model
+
+
 def resolve_served_model(
     *,
     requested_backend: str,
@@ -306,7 +325,7 @@ def resolve_served_model(
     if concrete_backend == TEXT_LAYER_BACKEND:
         return TEXT_LAYER_MODEL
     if concrete_backend in CLOUD_VISION_OCR_BACKENDS:
-        return ocr.model or settings.ocr_vision.model
+        return ocr.model or cloud_vision_model(concrete_backend, settings)
     if concrete_backend == "serve-http":
         if (
             resolve_served_family(

@@ -1,164 +1,105 @@
 # Configuration
 
-bibr reads settings from environment variables and optional `.env` files.
-CLI flags, presets, and Python API arguments also provide per-run overrides.
-This page covers OCR, LLMs, references, and memory settings; the generated
-[Settings reference](../reference/settings.md) lists every variable and default.
+bibr works with nothing configured. This page shows the few settings most
+people change, how to pick a mode, and the options for OCR, LLMs, references
+and presets. The generated [Settings reference](../reference/settings.md) lists
+every variable and its default.
 
-## How settings resolve
+## Start here
 
-For settings loaded from the environment, the order is:
+bibr reads its settings from environment variables and from `.env` files
+(`./.env` and `~/.bibr/.env`); a command-line flag such as `--fast` or
+`--ocr`, a saved preset (`--preset`) or a Python API argument overrides a
+setting for one run. With nothing set, bibr runs in
+**fast mode**: local models only, no LLM and no API key, and PDFs are read from
+their text layer. `bibr setup` is optional: it writes a `.env` that adds an
+LLM (full mode), OCR for scanned PDFs, or both.
 
-1. **Environment variables** — always win.
-2. **`.env` files** — both `~/.bibr/.env` and the current working directory's
-   `.env` are read and merged key-by-key; where both set the same key, the
-   CWD file wins. So a global config in `~/.bibr/.env` still applies when
-   you run `bibr` from a directory that doesn't have its own `.env`, and a
-   local `.env` can override individual keys from it.
-3. **Built-in defaults** — used when a setting isn't in either of the above.
+These are the settings most people touch:
 
-`BIBR_ENV_FILE` replaces layer 2 outright when you need to control it exactly:
-set it to a specific path (or several, separated by `:` on Linux/macOS or `;`
-on Windows, merged in the same last-wins order), or to an empty value to skip
-`.env` loading altogether. The
-empty form is useful in containers, CI, and test runs, where picking up
-whatever `.env` happens to sit in the working directory is a surprise rather
-than a convenience. `${NAME}` inside a `.env` value remains literal; bibr does
-not interpolate it from another environment variable.
+| Setting | Default | What it does |
+|---|---|---|
+| `PIPELINE_MODE` | `auto` | `fast` never calls an LLM; `full` uses the configured LLM; `auto` is full when an LLM is configured and fast otherwise. `--fast` / `--full` choose for one run. |
+| `LLM_PROVIDER` | `{{ default_llm_provider }}` | The LLM provider full mode calls: `google`, `openai`, `anthropic`, `groq` or `ollama`. |
+| API key | none | `google`: `GOOGLE_API_KEY` (also read as `GEMINI_API_KEY`). `anthropic`: `ANTHROPIC_API_KEY`. `groq`: `GROQ_API_KEY`. `openai`: `LLM_API_KEY`. `ollama`: no key. `LLM_API_KEY` works for every provider that needs a key. |
+| `LLM_MODEL` | follows the provider | The model to call; see [Choosing an LLM](#choosing-an-llm). |
+| `OCR_BACKEND` | not set | How PDF pages are read. Not set: the text layer in fast mode, the automatic `paddle` selector in full mode. `--ocr` chooses for one run; see [OCR backends](#ocr-backends). |
+| `CROSSREF_ENRICH` | `false` | `true` looks each reference up in Crossref. `--crossref` / `--no-crossref` choose for one run. |
+| `CROSSREF_API_EMAIL` | not set | Your e-mail address, sent to Crossref with enrichment lookups for its "polite pool". |
 
-Explicit run flags such as `--ocr`, `--llm`, `--refs`, and `--memory` override
-their corresponding settings for that invocation. In a uv project (the
-Quickstart install or a source checkout), prefix the commands on this page with
-`uv run`.
+To see what is in effect, run `bibr config show` (settings that differ from
+the defaults; `--all` for every one, `--sources` for where each value came
+from). `bibr config set KEY VALUE` writes one setting to `.env`, and
+`bibr chew paper.pdf --dry-run` shows the mode, OCR and LLM a run would use
+without processing anything. In a uv project (the Quickstart install or a
+source checkout), prefix the commands on this page with `uv run`.
 
-Set `BIBR_DISABLE_DOTENV=1` to skip both `.env` files entirely. Benchmark
-harnesses and CI should do this so every setting a run records came from the
-process environment, not from whatever `.env` happened to be in the checkout.
+## Pick a mode
 
-While `BIBR_DISABLE_DOTENV` or an empty `BIBR_ENV_FILE` turns `.env` loading
-off, the configuration tools follow it: `bibr config show --sources` and
-`bibr config path` report no `.env` file, and `bibr config set`, `bibr preset
-save/use/deactivate/diff` and `bibr setup` refuse to run, naming the variable,
-instead of writing a file bibr would not read.
+A **mode** decides whether an LLM is called. Fast mode uses bibr's local models
+alone. Full mode adds an LLM, which reads the parts of a paper the local
+models are unsure of.
 
-```bash
-bibr setup
-```
+| You want | What to set | What it needs | What leaves your machine |
+|---|---|---|---|
+| **Fast** (the default) | Nothing, or `PIPELINE_MODE=fast` / `--fast` | Nothing more than the install. PDFs need a text layer; a scanned PDF needs an [OCR backend](#ocr-backends). | Nothing from the paper. The first run downloads bibr's models from Hugging Face. |
+| **Full, cloud LLM** | `LLM_PROVIDER` and its API key, or run `bibr setup` | A provider account and key. With no OCR setting, full mode starts the automatic `paddle` OCR, which needs an NVIDIA GPU, llama.cpp or Apple Silicon; on other machines set `OCR_BACKEND=text-layer` or a cloud OCR backend. | The paper's text goes to the LLM provider; with cloud OCR, page images go to the OCR provider. |
+| **Full, local LLM** | `bibr setup`, or `--llm local` | An NVIDIA GPU with 5 GB or more, or Apple Silicon. On Windows and on cards below 10 GB, also llama.cpp, which you install. See [Choosing an extraction model](extraction-models.md). | Nothing from the paper: the model servers run on this machine. |
+| **Private server** | `LLM_PROVIDER=openai`, `LLM_BASE_URL` and `LLM_MODEL` for the LLM; `OCR_BACKEND=paddle-http` (or `glm-http` for a GLM-OCR server) and `OCR_BASE_URL`, or `--ocr-url`, for OCR | A GPU machine you run, such as the [Docker OCR/API stack](deployment.md#docker-deployment) | Page images and text, to your server only. |
 
-`bibr setup` is the easiest way to get a working `.env`: it detects your
-hardware, recommends a private/local setup where the machine can support it,
-and asks only the follow-up questions needed to write the config. The wizard
-is intentionally honest about trade-offs: fully local runs can be slower,
-especially on weaker hardware and Apple Silicon, and first runs may download
-several GB of model weights.
+`bibr setup` detects your hardware and asks which of these you want; every
+run of it writes `PIPELINE_MODE` (`fast` or `full`). Run
+`bibr setup --advanced` for exact control over the LLM provider, OCR backend,
+Crossref settings, cache extras and model choices.
 
-Run `bibr setup --advanced` when you want exact control over the LLM provider,
-OCR backend, Crossref settings, cache extras, and model choices. If your local
-machine is too weak but privacy still matters, use the private-server path:
-run the Docker OCR/API stack on a GPU machine and point your laptop's `.env`
-at that server.
+A `GOOGLE_API_KEY`, `GEMINI_API_KEY` or `LLM_API_KEY` already in your
+environment counts as a configured LLM, and so does setting `LLM_PROVIDER`,
+`LLM_MODEL` or `LLM_BASE_URL`: with `PIPELINE_MODE=auto`, such a run is in
+full mode. `--fast` or `PIPELINE_MODE=fast` keeps every run in fast mode.
 
-Re-running `bibr setup` merges into an existing `.env` by default and keeps
-values it does not ask about. When you choose an LLM provider, it also writes
-`LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL` where you
-entered none, so that a key or server left by an earlier setup, in `./.env`
-or `~/.bibr/.env`, cannot override the one you entered.
-
-`bibr setup` writes `./.env`, or the last file `BIBR_ENV_FILE` lists, since
-that file's values win; it stops before asking anything when that file's
-folder does not exist. Environment variables still override it: when your
-shell exports a setting the wizard writes (`LLM_API_KEY`, `LLM_BASE_URL`,
-`LLM_PROVIDER`, ...), or another name bibr reads it under (`GEMINI_API_KEY`
-for `GOOGLE_API_KEY`), with a different value, the wizard names it, so you
-can unset or update it before running bibr.
-
-## Namespaces
-
-There's no global `BIBR_` prefix. Instead, each settings group has its own
-short prefix — `LLM_` for the LLM client, `OCR_` for the OCR backend,
-`CROSSREF_` for reference enrichment, `PIPELINE_` for orchestration, and so
-on (the full list is in the [Settings reference](../reference/settings.md)).
-Two examples:
-
-```bash
-# .env
-LLM_PROVIDER=openai
-CROSSREF_API_EMAIL=you@example.org
-```
-
-`LLM_PROVIDER` selects the LLM client's provider; `CROSSREF_API_EMAIL` is
-passed to Crossref's "polite pool" for reference enrichment lookups.
-
-Reference enrichment itself is opt-in: `CROSSREF_ENRICH` defaults to `false`,
-so a plain `bibr chew` (or `POST /papers/extract`) never calls Crossref or the
-resolver and the `bib_match` table stays empty. Set `CROSSREF_ENRICH=true` to
-enrich by default, or switch it per run — `bibr chew --crossref` /
-`--no-crossref`, `bibr.chew(..., crossref=True)`, or the `crossref=true|false`
-form field on `/papers/extract` — which wins over the setting either way.
-Matches stay in `bib_match` and do not become values of the references in
-`bib`, unless you opt in with `CROSSREF_CONSOLIDATE=fill` or `replace` (off by
-default). With enrichment on, `CROSSREF_VERIFY` (default `true`) checks each
-reference's parsed volume, issue and pages against its matched record and
-reports disagreements; it fills or corrects one of those values only when
-the record's value is printed in the reference string, so a value the paper
-did not print is never added. The optional resolver's
-`BIBR_RESOLVER_RAW_SEARCH` (default `true`) only finds matches: it searches
-again with the whole reference string for references the title searches
-left unmatched; see
-[Reference extraction at scale](deployment.md#reference-extraction-at-scale).
+`--no-llm` is not a fast mode. It keeps sections and text but drops authors,
+references, citation links and equations for PDF and DOCX input, and it still
+runs OCR on PDFs, so it needs an OCR backend. To avoid every LLM call, use
+`--fast`.
 
 ## What leaves your machine
 
-bibr sends nothing about a paper anywhere unless a setting below says so, and
-it has no usage reporting of its own. It also turns off the usage statistics
-of the vLLM servers it starts (`VLLM_NO_USAGE_STATS`); a vLLM server you run
-yourself keeps vLLM's default. What a run contacts depends on how it is set
-up:
+In fast mode with no OCR setting, nothing from a paper leaves your machine.
+A cloud LLM receives the paper's text, a cloud OCR backend receives page
+images, and Crossref enrichment (off by default) sends each reference's DOI,
+title and author names. [What leaves your machine](privacy.md) lists every
+route, including model downloads and the Google-key caveat above.
 
-| Setup | What is sent | Where |
-|---|---|---|
-| Fast mode on the text layer (`bibr chew --fast` with no OCR setting) | Nothing from the paper | — |
-| A local OCR or LLM server that bibr starts or that you run (`--ocr paddle`, `--llm vllm`, `--ocr-url`, `LLM_BASE_URL` on your own host) | Page images and text from the paper | That server only |
-| A cloud OCR model (`--ocr anthropic`, `gemini` or `openai`, also as `OCR_BACKEND` or `OCR_CONSENSUS_BACKEND`) | Images of the paper's pages, or parts of them | The OCR provider |
-| A cloud LLM (full mode with `LLM_PROVIDER` `google`, `openai`, `anthropic` or `groq`, or an `LLM_BASE_URL` on someone else's host) | Text from the paper | The LLM provider |
-| Enrichment (`--crossref`, or `CROSSREF_ENRICH=true`; off by default) | The references' DOIs, titles and author names; affiliation strings and funder names unless `ROR_ENRICH=false`; your `CROSSREF_API_EMAIL` if set | `api.crossref.org`, `api.ror.org`, and the resolver at `BIBR_RESOLVER_URL` if you set one |
-| `bibr batch --serve-url` | The whole file | The bibr server you name |
-| The MCP tool `chew_url` | A request for the URL it is given | The site that hosts it |
+## OCR backends
 
-Two things happen without a setting of yours:
-
-- **Model downloads.** The first run downloads bibr's models from the Hugging
-  Face Hub. Those requests name the models and the library versions, nothing
-  from a paper. Once the models are in the cache, `HF_HUB_OFFLINE=1` keeps bibr
-  from contacting the Hub at all.
-- **A Google key in the environment.** With no mode chosen, bibr runs in full
-  mode when an LLM is configured and in fast mode when none is. A
-  `GOOGLE_API_KEY`, `GEMINI_API_KEY` or `LLM_API_KEY` in the shell or in `.env`
-  counts as a configured LLM, even one exported for another tool, so a plain
-  `bibr chew paper.pdf` then sends the paper's text to Google. `--fast` or
-  `PIPELINE_MODE=fast` keeps a run on the machine whatever keys are set, and
-  `bibr chew --dry-run` shows the mode and the routes a run would take before
-  it starts.
-
-For papers that must not leave the machine: `PIPELINE_MODE=fast`, no OCR
-setting (or `--ocr text-layer`), enrichment left off, and `HF_HUB_OFFLINE=1`
-after the first run.
-
-## Choosing an OCR backend
-
-`bibr chew` defaults to the `paddle` startup selector. It selects a concrete
-runtime when OCR starts:
+**OCR** (optical character recognition) reads text from page images. With no
+OCR setting, a fast run reads each PDF from its embedded text layer
+(`text-layer`) and starts no OCR model. A full run, or a run under
+`--no-llm`, uses `paddle`, the automatic selector. Naming a route (`--ocr`,
+`--ocr-url`, or `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE`) keeps that route
+in either mode. `OCR_BASE_URL` alone names no route. `bibr doctor` shows what
+this machine can run.
 
 | Request or runtime | When it's used |
 |---|---|
-| `paddle` | Default automatic selector. Linux x86_64 with at least 8 GB detected NVIDIA VRAM: `paddle-vllm`, then `glm-llama`; otherwise `glm-llama`. Apple Silicon: `paddle-rapid-mlx`, `paddle-mlx-vlm`, `glm-rapid-mlx`, then `glm-llama`. Windows: `glm-llama`. |
+| `text-layer` | Default in fast mode with no OCR setting; `--ocr text-layer` or `OCR_BACKEND=text-layer` on any run. Runs no model and needs no GPU. Reads born-digital PDFs only: a scanned page stays unread, and a file with fewer than half of its text regions readable stops with `scan_needs_ocr`. See [Known limitations](../limitations.md#the-text-layer-route-reads-born-digital-pdfs-only). |
+| `paddle` | Automatic selector, the default in full mode. Linux x86_64 with at least 8 GB detected NVIDIA VRAM: `paddle-vllm`, then `glm-llama`; otherwise `glm-llama`. Apple Silicon: `paddle-rapid-mlx`, `paddle-mlx-vlm`, `glm-rapid-mlx`, then `glm-llama`. Windows: `glm-llama`. |
 | `paddle-vllm` | Explicit managed PaddleOCR-VL-1.6 vLLM runtime on Linux/CUDA. |
 | `paddle-rapid-mlx` / `paddle-mlx-vlm` | Explicit PaddleOCR-VL-1.6 Apple-Silicon runtimes. Both use the quantized `olragon/PaddleOCR-VL-1.6-8bit` default. |
 | `paddle-http` | Explicit external Paddle server, addressed by the served alias `paddle-ocr-vl-1.6`. |
 | `glm-rapid-mlx`, `glm-llama`, `glm-http` | Explicit GLM-OCR compatibility choices. They are also the ordered startup fallback candidates for `paddle` where listed above. The older `glm-mlx` (vllm-mlx) backend is disabled and refuses to start; use `glm-rapid-mlx`. |
-| `gemini` / `openai` / `anthropic` | Vision-LLM OCR via a cloud provider — no local GPU needed, useful for a laptop or a low-resource box. |
+| `gemini` / `openai` / `anthropic` | Vision-LLM OCR via a cloud provider — no local GPU needed, useful for a laptop or a low-resource box. Page images leave your machine. |
 
-The fallback is **startup-only**: a candidate must construct and pass its
+`OCR_FALLBACK_TO_TEXT_LAYER` decides what happens when no runtime of the
+automatic `paddle` selector can start on the machine (no NVIDIA GPU for vLLM,
+no llama.cpp, no Apple Silicon for MLX; checked without starting one). `off`
+(the default) stops with an error. `auto` warns once, reads born-digital PDFs
+from their text layer as `text-layer` does, and marks each export
+`OCR_BACKEND_UNAVAILABLE`; scanned PDFs then fail, since they need OCR. A
+runtime that is installed but fails to start is still an error.
+
+The `paddle` selector's fallback between candidates is **startup-only**: a
+candidate must construct and pass its
 readiness check before it is selected. Once one has started, bibr records its
 identity and does not silently send failed individual OCR requests to GLM.
 Choose a concrete backend with `--ocr <name>` (or `OCR_BACKEND` in `.env`).
@@ -168,10 +109,11 @@ backend, or set `OCR_BACKEND` to one) for a GLM endpoint. An explicit
 `--ocr gemini`, `openai` or `anthropic` ignores the URL with a warning. A
 cloud vision `OCR_BACKEND` does not override a URL you pass: the run uses
 that server as `paddle-http` and sends no page image to the cloud provider.
-The cloud vision backends all use `OCR_VISION_MODEL`, whose default
-(`gemini-3-flash-preview`) is a Gemini model, so with `--ocr openai` or
-`--ocr anthropic` set it to one of that provider's vision models, such as
-`OCR_VISION_MODEL=claude-haiku-5-5`.
+The cloud vision backends call the model in `OCR_VISION_MODEL`. Its default
+(`gemini-3-flash-preview`) is a Gemini model. When the setting is unset,
+`--ocr anthropic` uses `claude-haiku-5-5` instead; with `--ocr openai` set it to
+one of OpenAI's vision models. A cloud OCR backend with no API key stops the run
+before any model loads.
 For example:
 
 ```bash
@@ -189,14 +131,6 @@ tokens count against the same limit.
 
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.
-
-An `LLM_BASE_URL` (or `OCR_VISION_BASE_URL`) that receives an API key may use
-plain `http://` for loopback and private-network hosts — a local vLLM or
-Ollama, a GPU box on the LAN or tailnet. For a public host bibr refuses to
-send the key over plain HTTP unless `LLM_ALLOW_INSECURE_HTTP=true`; the
-pipeline, `bibr setup` and `bibr doctor` apply the same rule. The vision
-endpoint receives the LLM provider's key, so the LLM setting governs it too,
-not `OCR_ALLOW_INSECURE_HTTP`.
 
 ### Model and profile overrides
 
@@ -239,17 +173,12 @@ leaves the output as it is. Both retain the unmodified model response as
 profile are included in `extraction.ocr` and in the OCR-cache identity, so a
 cache hit never crosses a Paddle/GLM or normalizer boundary.
 
-The managed llama.cpp servers default to full GPU offload, flash attention,
-and `q8_0` KV-cache quantization. OCR uses one parallel slot. The LLM can use
-two slots with a unified KV cache and n-gram speculative decoding when the
-installed server supports those flags, otherwise it uses one slot. Override
-individual flags with
-`OCR_LLAMA_CPP_EXTRA_ARGS` / `LLM_LLAMA_CPP_EXTRA_ARGS` (user flags replace the
-matching defaults). On older GPUs (Pascal / GTX 10-series) PyTorch may fall
-back to CPU for layout/NER while llama.cpp still uses the GPU — that is
-expected; install a CUDA build of `llama-server` and skip the `gpu` extra.
-
 ## Choosing an LLM
+
+An LLM is used only in full mode. With no LLM configured, a run is in fast mode
+and needs no key.
+
+### Cloud providers
 
 `LLM_PROVIDER` selects the provider used for metadata extraction and LLM
 fallbacks such as section classification and citation linking: `{{ default_llm_provider }}`
@@ -261,6 +190,10 @@ follows the provider: `{{ default_llm_model }}` for `google`,
 models `bibr setup` writes. An `openai` provider pointed at your own server
 with `LLM_BASE_URL` keeps `{{ default_llm_model }}`, so name the served model
 there.
+
+The key each provider reads is in [Start here](#start-here).
+
+### Ollama and your own server
 
 For Ollama, `LLM_OLLAMA_BASE_URL` names the server (default
 `http://localhost:11434`). bibr talks to Ollama's OpenAI-compatible API under
@@ -302,175 +235,39 @@ the server runs a smaller context than it reports. Caps you set yourself
 (`LLM_MAX_INPUT_CHARS`, `LLM_MAX_TOKENS`, `LLM_REF_SEG_WINDOW_CHARS`) are
 kept, with a warning when they exceed the cap for a known window.
 
+An `LLM_BASE_URL` (or `OCR_VISION_BASE_URL`) that receives an API key may use
+plain `http://` for loopback and private-network hosts — a local vLLM or
+Ollama, a GPU box on the LAN or tailnet. For a public host bibr refuses to
+send the key over plain HTTP unless `LLM_ALLOW_INSECURE_HTTP=true`; the
+pipeline, `bibr setup` and `bibr doctor` apply the same rule. The vision
+endpoint receives the LLM provider's key, so the LLM setting governs it too,
+not `OCR_ALLOW_INSECURE_HTTP`.
+
+### Local models
+
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
 Windows, CUDA cards below 10 GB and CUDA cards older than Ampere (compute
 capability below 8.0); and vLLM on other Linux/CUDA systems with at least
 10 GB (or when VRAM detection is unavailable). With the same card it picks the
-model and the OCR that `bibr setup` writes and the memory mode it shows, except on a 10–11 GB
-card where setup found a CUDA llama.cpp server and wrote `LLM_BACKEND=llama-cpp`
-(see [choosing an extraction model](extraction-models.md#on-10-and-11-gb-cards)):
-`--llm local` never reads `PATH` and keeps vLLM there. After such a setup, run
-plain `bibr chew` (or `--llm llama-cpp`): `--llm local` would start vLLM with the
-GGUF build setup wrote, which vLLM cannot serve.
+model and the OCR that `bibr setup` writes and the memory mode it shows, with
+one exception on 10–11 GB cards (see
+[choosing an extraction model](extraction-models.md#on-10-and-11-gb-cards)).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
-supported hybrid configuration. A managed vLLM LLM server and the managed
-`paddle-vllm` OCR server each reserve a share of GPU memory. The LLM server
-takes at most 0.85 of the card (see below); PaddleOCR-VL takes about 5 GB, so
-0.16 of a 32 GB card, 0.21 of 24 GB and 0.32 of 16 GB. A vLLM server starts
-only when its whole share is free, and the rest of the card holds bibr's
-layout, sentence and reference models, which stay on the GPU between chunks
-when `onnxruntime-gpu` is installed. Unless the two shares leave at least 6 GB
-of the card for those models (with the LLM at 0.85, only on cards of about
-80 GB), bibr stops the server that is running before starting the other: in a
-batch, each chunk's OCR stops the LLM server and that chunk's LLM stage starts
-it again. The shares are sized from the card that `CUDA_VISIBLE_DEVICES`
-exposes; when bibr cannot tell which card that is (cards of different sizes
-numbered in CUDA's default fastest-first order), PaddleOCR-VL keeps 0.92 and
-the servers take turns. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID` or select the card
-by UUID to avoid that.
+supported hybrid configuration.
 
-The LLM server works out its share each time it starts, from the GPU memory
-free at that moment. It takes at most 0.85 of the card, and less when the card
-is busier: the share leaves room for vLLM's brief extra use while it starts
-(0.75 GiB for the 4B student's builds, 1 GiB for the 2B) and for bibr's
-models. That room is 6 GB less what bibr's models already hold, and at least
-1 GB: about 0.71 of a free 24 GB card and 0.78 of a free 32 GB card. When that
-does not leave the model its minimum budget (11.0 GiB for the 4B student,
-6.0 GiB for its W4A16 build, 6.25 GiB for the 2B; more with
-[speculative decoding](#speculative-decoding-on-vllm)), a server that takes
-turns with PaddleOCR-VL drops to the minimum while bibr's models keep at least
-1 GB, since it starts again beside them in the next chunk. A server that stays
-up for the run (with cloud OCR, an OCR server at `--ocr-url` or GLM-OCR) keeps
-that room: it usually starts in the first chunk, before bibr's models have
-grown to the 5 GB or so they reach in a batch. So on a 24 GB card that also
-runs a PaddleOCR-VL server at `--ocr-url` (about 5.4 GB), the 4B student just
-fits (it needs 17.25 GiB, and about 17.7 are free) with an 11.3 GiB budget,
-below MTP's minimum; with a desktop on the card as well it does not, and its
-W4A16 build does. When the share does not fit, the start fails at once with an
-error that says how much memory was free and how much it needs, that chunk's
-papers fail, and the next chunk tries again. Set `LLM_LOCAL_MEM_FRACTION`, or
-`--gpu-memory-utilization` in `LLM_VLLM_EXTRA_ARGS`, to start the LLM server at
-exactly that share instead.
+Run `bibr setup` to choose the model as well as the runtime.
+[Choosing an extraction model](extraction-models.md) lists the model for each
+card, the memory it needs and how it scores, and the hosted model setup
+recommends when no local model fits. `LLM_LOCAL_MODEL` selects managed local
+weights; `LLM_MODEL` and `--llm-model` select the provider model.
 
-The LLM server starts after a chunk's OCR, and OCR only adds to what bibr
-holds. So while the LLM server is down, bibr checks before each chunk's OCR
-whether the memory free then could start it. When it could not, the chunk's
-papers fail with the same error before any OCR runs, and the check is made
-again before the next chunk, which goes ahead once enough memory is free. A
-server already listening on the LLM server's port (`LLM_VLLM_PORT`) is never
-checked: the start reuses one that serves the model, such as one another
-pipeline in the same process started, without asking for memory.
-
-The minimum comes from bibr's model registry, which lists the published
-builds with the smallest budget each was measured to start with: a first
-start, before vLLM has filled its compile cache, that served one
-32,768-token request on an RTX 3090, rounded up to a quarter GiB. The 4B
-student's builds were measured with vLLM 0.32.0 at 64 sequences, the 2B with
-vLLM 0.31.0 at 128. On vLLM 0.31 a later start reused the cache and needed
-about 1 GiB less. The minimum is a budget, not a card size: on the swap path a
-start also needs vLLM's extra use while it starts (0.75 GiB at 64 sequences,
-1 GiB at 128) and 1 GiB for bibr's models free beside it, so the W4A16 build
-needs 7.75 GiB free and the 4B student 12.75 GiB. A server that stays up needs
-6 GiB less what bibr's models hold in place of that 1 GiB: 12.25 and 17.25 GiB
-while they hold 0.5 GiB. A model the registry does not list, such as a local
-path, has no minimum, so a start that cannot fit is launched and fails inside
-vLLM. Set `LLM_LOCAL_MIN_VRAM_GB` to give it one. For a model the registry
-lists, the setting can raise the minimum but not lower it: a lower value is
-ignored and bibr logs a warning once, so a value left over from a local build
-cannot start the 4B student below its 11.0 GiB. For a local copy of the 4B
-student's W4A16 build, the minimum is 6.0 GiB with vLLM 0.32 and at most 64
-sequences (more with 128, since vLLM keeps a cache block for each sequence):
-
-```bash
-LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-W4A16
-LLM_LOCAL_MIN_VRAM_GB=6.0
-LLM_VLLM_EXTRA_ARGS='--language-model-only --generation-config vllm --max-model-len 32768 --max-num-seqs 64'
-LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
-```
-
-`bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
-when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,
-`timeout`, an MCP host stopping `bibr mcp`) and SIGHUP (a closed terminal or SSH
-session). A `bibr chew` or `bibr mcp` stopped by a signal exits with 128 plus its
-number (143 for SIGTERM) and `bibr batch` exits 130 as after Ctrl-C; in a systemd
-unit, set `SuccessExitStatus=130 143` so that `systemctl stop` counts as a clean
-stop.
-
-Run `bibr setup` to choose the model as well as the runtime. It recommends a
-model for your hardware ([choosing an extraction model](extraction-models.md)
-has the measurements):
-
-| Runtime | Setup model | Registry memory floor |
-|---|---|---|
-| vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | an 11.0 GiB budget; 12.75 GiB free to start |
-| vLLM, 10–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.0 GiB budget; 7.75 GiB free to start |
-| llama.cpp (Windows, cards below 10 GB, and 10–11 GB cards where setup found a CUDA llama-server) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
-| Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
-
-When no local model fits, the recommended hosted model is Claude Haiku 5.5
-(`LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5`), which `bibr setup`
-also uses for cloud OCR (`OCR_BACKEND=anthropic`,
-`OCR_VISION_MODEL=claude-haiku-5-5`), so one Anthropic key covers both.
-
-These are model-fit estimates, not total pipeline memory guarantees. Setup
-matches a card that reports up to 0.25 GiB under a size (an RTX 5070 reports
-12,227 MiB) to that size, for the model and for the memory mode; PaddleOCR-VL's
-8 GB minimum has no such slack. On a Linux card below 10 GB that could run
-PaddleOCR-VL, setup sets `OCR_BACKEND=glm-llama`, so OCR and the LLM both run
-on llama.cpp and take turns on the card; without setup, the automatic OCR
-chain does the same whenever the LLM runs on llama.cpp. Cards below 12 GB
-whose LLM server bibr manages get the aggressive memory mode
-(`PIPELINE_MEMORY_MODE=aggressive`, 3 papers a chunk), which unloads bibr's
-own models before each start of the LLM; with a cloud or remote LLM, only
-cards of 8 GB or less do, and not even those when nothing in the run can load
-onto the card (no OCR engine to start, and an install without a CUDA
-onnxruntime or torch). A managed llama.cpp LLM server stops before each
-start of GLM-OCR on llama.cpp in the aggressive mode, and in the others only
-when the memory free cannot also hold GLM-OCR (2.25 GiB) and 1 GiB for bibr's
-models. In the balanced mode, when the memory free cannot
-start the managed vLLM LLM server, bibr first releases the same models (and a
-resident OCR server) and refuses the start only if it is still short.
-
-Cards older than Ampere (compute capability below 8.0: Turing, Volta,
-Pascal) run the LLM and the automatic OCR on llama.cpp at any size: bibr's
-vLLM models are bf16, which vLLM serves from compute capability 8.0, and
-on an older card it casts them to float16, which bibr has not tested. No
-batch on a Turing or Pascal card has been recorded with either runtime; this
-is a conservative routing rule. The advanced wizard
-also offers the 2B student on vLLM from 12 GB
-(`scienceverse/bibr-extract-qwen35-2b`, a 6.25 GiB budget at 128 sequences and
-8.25 GiB free to start), Gemma 4 E4B on CUDA, and custom model IDs.
-`LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`
-select the provider model. When `LLM_LOCAL_MODEL` is unset, every managed
-runtime uses the build `bibr setup` recommends for the card: on vLLM the 4B
-bf16 from 20 GB and its W4A16 build below, on llama.cpp the 4B Q8_0 from 7 GB
-and Q4_K_M below, and the 8-bit build on vllm-mlx. The managed llama.cpp server starts with thinking off
-(`--reasoning off`, or `--reasoning-budget 0` on older builds, plus
-`--chat-template-kwargs '{"enable_thinking": false}'`) when the installed
-build supports it, and `bibr setup` also writes
-`LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'` for the fine-tuned models. Rapid-MLX
-has a separate `LLM_RAPID_MLX_MODEL` default (`qwen3.5-4b-4bit`) when no local
-model was explicitly configured.
-
-`LLM_STRUCTURED_BACKEND=auto` uses Instructor. The experimental
-`nuextract-native` backend, for a NuExtract server you run yourself, is
-explicit-only and needs `pip install 'bibr[nuextract]'`, because bibr no longer
-installs numind by default.
-
-`LLM_POINTER_OUTPUTS=true` is experimental and off by default. It shortens
-the answers of the two front-matter calls: the title and keywords call names
-the abstract's first and last words and bibr copies the abstract from the
-front matter, and the authors call lists each affiliation once and gives each
-author its numbers. When the abstract cannot be placed in the text, or the
-answer is cut off or does not parse, bibr asks for the verbatim answer
-instead. The merged call (`LLM_MERGED_CORE_METADATA`) and the
-`nuextract-native` backend do not use it. The current revision of bibr's 4B
-was trained on these answers and passes as many papers with the flag on as
-off, but first-author accuracy is lower with it on and bibr's resolver can
-take a wrong span as the abstract without a warning, so it stays off; see
-[choosing an extraction model](extraction-models.md#pointer-answers-llm_pointer_outputs).
+[Local model runtime](model-runtime.md) covers how bibr shares GPU memory
+between its servers (`LLM_LOCAL_MEM_FRACTION`, `LLM_LOCAL_MIN_VRAM_GB`),
+pinned model revisions, speculative decoding (`LLM_VLLM_SPEC_DECODE`), the
+managed llama.cpp flags (`LLM_LLAMA_CPP_EXTRA_ARGS`) and how managed servers
+start and stop.
 
 For `--llm llmster`, install LM Studio's `lms` CLI and download the desired model
 first, then set `LLM_LLMSTER_MODEL` to its model key. Bibr can start its daemon
@@ -481,6 +278,20 @@ Local inference speed depends on the runtime, model, hardware, and document.
 Validate the fields you need on representative papers before choosing a model
 for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
 with local OCR when local LLM throughput is insufficient.
+
+### Structured output and pointer answers
+
+`LLM_STRUCTURED_BACKEND=auto` uses Instructor. The experimental
+`nuextract-native` backend, for a NuExtract server you run yourself, is
+explicit-only and needs `pip install 'bibr[nuextract]'`, because bibr no longer
+installs numind by default.
+
+`LLM_POINTER_OUTPUTS=true` is experimental and off by default. It shortens the
+answers of the two front-matter calls; see
+[choosing an extraction model](extraction-models.md#pointer-answers-llm_pointer_outputs)
+for what it does and why it stays off.
+
+### Rate limits, retries and caching
 
 `LLM_RATE_LIMIT_RPM` defaults to 60 requests per minute to stay inside a cloud
 provider's quota. For a server bibr starts itself, and for an `LLM_BASE_URL` on
@@ -520,179 +331,29 @@ them calls the model again; for `--llm llmster`, so does changing
 same model name and URL cannot be told apart: clear the directory after
 swapping the model behind it.
 
-### Pinned model revisions
+## References
 
-Each build of bibr's 4B student in the registry is pinned to a commit on the
-Hugging Face Hub ([the list](extraction-models.md#builds-and-revisions)).
-vLLM gets the commit as `--revision`. `llama-server -hf` and the MLX servers
-(vllm-mlx, Rapid-MLX) always download a repository's `main`, so for the GGUF
-and MLX builds bibr downloads the pinned files into the Hugging Face cache
-itself (`HF_HUB_CACHE`, or `HF_HOME/hub`; for Rapid-MLX,
-`RAPID_MLX_HF_HUB_CACHE` or `RAPID_MLX_HF_HOME/hub` when set) and starts the
-server on the local copy, still under the model's Hub id. A build already in
-the cache starts with no request to the Hub, so offline runs work once it has
-been downloaded. Offline without it, the start stops with the `hf download`
-command that fetches it. Another commit of the same repository in the cache,
-such as its `main`, does not count: `bibr chew --dry-run` says
-`will download revision 0aa228e8` until the pinned one is there.
+### Crossref enrichment
 
-Each repository's `main` still holds the builds of the 4B's previous revision
-(`6ab47a4e`), but `main` will move on, so the commands below name each
-build's commit. To run one of them, keep `LLM_LOCAL_MODEL` as setup wrote it
-and override the revision, or point `LLM_LOCAL_MODEL` at a local copy:
+Reference enrichment itself is opt-in: `CROSSREF_ENRICH` defaults to `false`,
+so a plain `bibr chew` (or `POST /papers/extract`) never calls Crossref or the
+resolver and the `bib_match` table stays empty. Set `CROSSREF_ENRICH=true` to
+enrich by default, or switch it per run — `bibr chew --crossref` /
+`--no-crossref`, `bibr.chew(..., crossref=True)`, or the `crossref=true|false`
+form field on `/papers/extract` — which wins over the setting either way.
+Matches stay in `bib_match` and do not become values of the references in
+`bib`, unless you opt in with `CROSSREF_CONSOLIDATE=fill` or `replace` (off by
+default). With enrichment on, `CROSSREF_VERIFY` (default `true`) checks each
+reference's parsed volume, issue and pages against its matched record and
+reports disagreements; it fills or corrects one of those values only when
+the record's value is printed in the reference string, so a value the paper
+did not print is never added. The optional resolver's
+`BIBR_RESOLVER_RAW_SEARCH` (default `true`) only finds matches: it searches
+again with the whole reference string for references the title searches
+left unmatched; see
+[Reference extraction at scale](deployment.md#reference-extraction-at-scale).
 
-```bash
-# vLLM: the last --revision wins over the registry's.
-LLM_VLLM_EXTRA_ARGS='--revision 6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc'   # bf16
-LLM_VLLM_EXTRA_ARGS='--revision a2af8f6e90e6481251af9eb07d02c034c30e3446'   # W4A16
-
-# llama.cpp: a local .gguf file is loaded with -m
-hf download scienceverse/bibr-extract-qwen35-4b-GGUF bibr-extract-qwen35-4b-Q8_0.gguf --revision 8f5cb6f80329f800f17f3b25dd40be131068f872
-LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-Q8_0.gguf
-
-# MLX: a local model directory
-hf download scienceverse/bibr-extract-qwen35-4b-mlx-8bit --revision 16bf58c9e4f453176cdabf3cfe64665c92a006c3 --local-dir ./bibr-4b-mlx-6ab47a4e
-LLM_LOCAL_MODEL=./bibr-4b-mlx-6ab47a4e
-```
-
-On vllm-mlx, bibr serves a local MLX directory as a text model, as it does the
-pinned build: vllm-mlx alone would take the `image_token_id` in its
-`config.json` for a vision model and fail to load it.
-
-A local path is not a registry model, so bibr applies none of the registry's
-memory floors or launch arguments to it; the vLLM `--revision` route keeps
-them. The 4B's FP8-Dynamic build
-(`scienceverse/bibr-extract-qwen35-4b-FP8-Dynamic`, 219/252 on an RTX 5090) is
-not in the registry either, so setup does not offer it and it has no measured
-memory floor. To try it on vLLM, set `LLM_LOCAL_MODEL` to that id and take
-`LLM_VLLM_EXTRA_ARGS` and `LLM_CHAT_TEMPLATE_KWARGS` from the local W4A16
-example above, with `--revision 101d1ee1d449195f6882019b0fd2aa4328ed8bef`
-added to the extra args. That example's `LLM_LOCAL_MIN_VRAM_GB=6.0` was
-measured for the W4A16 build, not this one.
-
-### Speculative decoding on vLLM
-
-`LLM_VLLM_SPEC_DECODE` sets speculative decoding for the managed vLLM LLM
-server. It applies to the published builds of the 4B student, which bibr's
-registry lists with the configs below; other models, local paths included,
-start without it unless `LLM_VLLM_EXTRA_ARGS` passes a `--speculative-config`,
-which always replaces bibr's choice.
-
-| Value | What the server starts with |
-|---|---|
-| `auto` (default) | MTP (3 tokens drafted by the model's own multi-token-prediction layers) when the server stays up for the whole run and its budget is at least MTP's minimum: 12.0 GiB for the 4B student, 7.25 GiB for its W4A16 build. Otherwise none. Below the minimum the server starts without MTP; `auto` never refuses a start. |
-| `none` | no speculative decoding |
-| `mtp` | MTP at every start, including starts that take turns with PaddleOCR-VL. The start needs MTP's minimum: on the swap path 13.75 GiB free for the 4B student and 9 GiB for the W4A16 build; a server that stays up for the run needs 18.25 and 13.5 GiB while bibr's models hold 0.5 GiB. |
-| `dflash` | DFlash (7 tokens drafted by [`z-lab/Qwen3.5-4B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-4B-DFlash), a separate 1.27 GB model pinned to revision `9a1996cc`), for the 4B student's bf16 build only, with a 13.5 GiB minimum. Other models start without it, with a warning. |
-
-The server stays up for the run when no managed PaddleOCR-VL server takes
-turns with it: with cloud OCR, an OCR server at `OCR_BASE_URL`, or OCR on
-llama.cpp. With the automatic OCR on a card of up to 64 GB, PaddleOCR-VL and
-the LLM take turns, the LLM restarting every chunk, and `auto` leaves MTP off.
-Both MTP and DFlash add `--no-async-scheduling`, which every measured run
-used.
-
-What was measured, with vLLM 0.32.0 at 64 sequences:
-
-- **One LLM server for the run** (the 252 development papers, OCR read from a
-  cache, the server at 0.85 of the card): with MTP the 4B student passed 218
-  against 219 without it on an RTX 3090 and 218 against 218 on an RTX 5090;
-  its LLM stage took 0.80x and 0.74x as long, and papers an hour rose 5.7%
-  and 12.1%. With DFlash: 220 against 219 and 217 against 218, the LLM stage
-  0.72x and 0.64x as long, papers an hour +8.1% and +15.8%, but about half the
-  KV cache capacity (159,251 against 310,108 tokens at 0.85 of an RTX 3090).
-  These runs served the bf16 build at the registry's revision (`9199424d`).
-  The previous revision's W4A16 build (`a2af8f6e`) passed 218/252 with MTP,
-  as without it on vLLM 0.31; the pinned W4A16 build has not been scored with
-  MTP.
-- **The default plan on 12 and 16 GB cards** (the previous revision's W4A16
-  build taking turns with PaddleOCR-VL, 48 papers, emulated cards beside a
-  0.5 GiB desktop): MTP passed 40 and 39 of 48 against 39 and 40 without it,
-  but each LLM start took 51 s instead of 37 s, and papers an hour fell 5.0%
-  and 8.6%. On the 12 GB card three of its six starts fitted only after bibr
-  released its own models. This is why `auto` leaves MTP off there.
-- Speculative decoding has not been measured on 24 GB cards in the swap plan,
-  on the 2B student, or with DFlash on the W4A16 build.
-
-### Managed local servers
-
-The local OCR backends and `--llm local` start their model server as a child
-process that listens on `127.0.0.1` at a fixed port. The vLLM and llama.cpp
-servers get a new random API key at every launch. bibr passes the key through
-the server's environment, not its command line, so other users on the machine
-cannot call them. Rapid-MLX, vllm-mlx and MLX-VLM servers run without a key.
-`OCR_API_KEY` goes only to an OCR endpoint you configure (`--ocr-url` or
-`OCR_BASE_URL`), never to a server that bibr manages.
-
-If the port already has a server that lists the requested model, bibr reuses
-it and logs a warning that it did not start that server. A reused server
-receives your documents, so stop any server there that you did not start
-yourself. Two pipelines in one Python process, such as an open `bibr.Chewer`
-and a `bibr.chew()` call, share the vLLM or llama.cpp server that the first one
-started; it stops when the pipeline that started it closes. bibr does not share
-a server that rejects its unauthenticated probe with HTTP 401 and was not
-started by this process, which is usually a server that another bibr process
-started with its own key. Stop that server or configure a free port.
-
-The Rapid-MLX OCR backends (`glm-rapid-mlx`, `paddle-rapid-mlx`) restart their
-server every `OCR_RAPID_MLX_RECYCLE_AFTER` regions (default 80). This releases
-memory that Rapid-MLX's vision cache would otherwise leak. bibr can restart only
-a server it started, so these backends refuse a server that is already running
-on their port, including one that another pipeline in the same process started.
-`paddle-mlx-vlm` shares its port and model with `paddle-rapid-mlx`, so it
-refuses a Rapid-MLX or vllm-mlx server it finds there too; an MLX-VLM server is
-still reused. To fix this, stop that server, move the port
-(`OCR_RAPID_MLX_PORT`, or `OCR_PADDLE_MLX_PORT` for the Paddle backends), or set
-`OCR_RAPID_MLX_RECYCLE_AFTER=0` so that the Rapid-MLX backends reuse the server
-without restarts. Each refusal is logged as a warning that names the port. The
-automatic `paddle` chain reports only which candidates failed, and then tries
-the next one.
-
-Each server writes its stderr to a private log file in the system temp
-directory, and bibr logs the path when the server starts. A Rapid-MLX server
-keeps a single log file for the whole run, across all of its restarts.
-
-## Presets
-
-If you switch between setups often — cloud vs. local, different models for different
-corpora — save each as a named preset instead of
-hand-editing `.env` every time:
-
-```bash
-bibr preset save fast-gemini   # snapshot the current .env
-bibr preset list                # show all saved presets
-bibr preset use fast-gemini     # apply a preset to .env
-bibr preset show fast-gemini    # display a preset's contents
-bibr preset diff fast-gemini    # compare a preset against the current .env
-bibr preset rm fast-gemini      # delete a preset
-bibr preset deactivate          # clear the active-preset marker (no other changes)
-```
-
-The "current `.env`" is the file whose values win: `./.env` when the working
-directory has one, otherwise `~/.bibr/.env` (or the last existing file in
-`BIBR_ENV_FILE`). `save`, `use` and `deactivate` name the file they read or
-changed.
-
-Presets are stored as JSON under `~/.bibr/presets/` (or `BIBR_PRESETS_DIR`),
-readable only by you when bibr creates them. Secrets (API keys and similar,
-and URLs such as `REDIS_URL` that carry a password or `?key=`) are excluded
-when saving, and `save` names the URL settings it left out; endpoint URLs and
-other private configuration may still be present. `show`, `diff` and `use`
-mask secrets and URL credentials when they print values.
-
-A preset can change where bibr sends requests while your API keys stay in
-`.env`, or what it launches. When `bibr preset use` changes a `*_URL`,
-`*_ARGS` or `*_EXECUTABLE` setting (`LLM_BASE_URL`, `OCR_BASE_URL`,
-`LLM_LLAMA_CPP_EXTRA_ARGS`, ...), it names those settings; check them before
-running bibr with a preset someone else gave you.
-
-You can also apply a preset for a single run without touching `.env`:
-
-```bash
-bibr chew paper.pdf --preset fast-gemini
-```
-
-## Reference-extraction strategies
+### Reference-extraction strategies
 
 Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
 
@@ -757,14 +418,76 @@ download, serving command, request limits and export diagnostics. The base
 Qwen3.5-0.8B checkpoint alone is not the fine-tuned parser. Routing checks are
 observable source signals, not calibrated confidence.
 
+## Pages and memory
+
+`--pages` (`pages=` in the Python API) processes only part of a PDF. Pages are
+1-based: `--pages 1-5` reads the first five pages, `--pages 3` only the third.
+
+`PIPELINE_MAX_PAGES` (default 200) caps how many pages of one PDF bibr
+processes, counted from the first page it processes: with no `--pages`, pages
+1 to 200; with `--pages 150-400`, pages 150 to 349. Pages past the cap are
+dropped without a warning in the console or the export. To check a long
+document, compare the length of the export's `extraction.pages` list with the
+PDF's page count, and raise `PIPELINE_MAX_PAGES` if you need more pages; the
+cap exists so that a long PDF cannot exhaust the memory used to render pages.
+
+`--memory` (or `PIPELINE_MEMORY_MODE`) sets how many models stay loaded at
+once: `aggressive` loads and unloads them stage by stage, `balanced` keeps the
+layout and sentence models loaded, and `keep_all` keeps everything. Left
+unset, bibr chooses from system RAM, CUDA VRAM and the LLM backend;
+[choosing an extraction model](extraction-models.md#defaults-by-card) shows the
+choice for each card.
+
+## Presets
+
+If you switch between setups often — cloud vs. local, different models for different
+corpora — save each as a named preset instead of
+hand-editing `.env` every time:
+
+```bash
+bibr preset save fast-gemini        # snapshot the current .env
+bibr preset list                     # show all saved presets
+bibr preset use fast-gemini          # apply a preset to .env
+bibr preset show fast-gemini         # display a preset's contents
+bibr preset diff fast-gemini         # compare a preset against the current .env
+bibr preset rm fast-gemini --yes     # delete a preset (without --yes, it asks first)
+bibr preset deactivate               # clear the active-preset marker (no other changes)
+```
+
+The "current `.env`" is the file whose values win: `./.env` when the working
+directory has one, otherwise `~/.bibr/.env` (or the last existing file in
+`BIBR_ENV_FILE`). `save`, `use` and `deactivate` name the file they read or
+changed.
+
+Presets are stored as JSON under `~/.bibr/presets/` (or `BIBR_PRESETS_DIR`),
+readable only by you when bibr creates them. Secrets (API keys and similar,
+and URLs such as `REDIS_URL` that carry a password or `?key=`) are excluded
+when saving, and `save` names the URL settings it left out; endpoint URLs and
+other private configuration may still be present. `show`, `diff` and `use`
+mask secrets and URL credentials when they print values.
+
+A preset can change where bibr sends requests while your API keys stay in
+`.env`, or what it launches. When `bibr preset use` changes a `*_URL`,
+`*_ARGS` or `*_EXECUTABLE` setting (`LLM_BASE_URL`, `OCR_BASE_URL`,
+`LLM_LLAMA_CPP_EXTRA_ARGS`, ...), it names those settings; check them before
+running bibr with a preset someone else gave you.
+
+You can also apply a preset for a single run without touching `.env`:
+
+```bash
+bibr chew paper.pdf --preset fast-gemini
+```
+
 ## Local model runtime
 
-Four of bibr's models run locally: the PP-DocLayoutV3 layout detector, the
-section classifier, the paper classifier and the encoder+CRF reference
-parser. Each ships twice — as PyTorch weights, and as an ONNX bundle
-(`onnx/model.onnx` + `onnx/bibr_onnx.json`, plus `onnx/tokenizer.json` for the
-text models) in the same Hub repo at the same pinned revision. `ML_RUNTIME`
-picks which one is loaded:
+bibr runs all of its own models on your machine. Four of them (the
+PP-DocLayoutV3 layout detector, the section classifier, the paper classifier
+and the encoder+CRF reference parser) have both an ONNX Runtime and a PyTorch
+implementation, and `ML_RUNTIME` picks which one loads; the default reference
+parser ships as an ONNX bundle alone
+([details](model-runtime.md#default-models-and-earlier-versions)). An ONNX bundle is `onnx/model.onnx` and
+`onnx/bibr_onnx.json`, plus `onnx/tokenizer.json` for the text models, in the
+model's Hub repo at its pinned revision:
 
 | `ML_RUNTIME` | Behaviour |
 |---|---|
@@ -777,16 +500,6 @@ the full HTTP-service path — OCR and the LLM over HTTP, every bibr-owned model
 through ONNX Runtime — with no `torch`, `transformers` or OpenCV in the
 environment. The `torch` extra remains the training-parity runtime, the Apple
 MPS path, and the `torch.compile` path `bibr serve` uses for layout.
-
-A bundle resolves from a local directory containing `onnx/`, or holding
-`bibr_onnx.json` and `model.onnx` itself (point the model's existing
-`*_MODEL_ID` / `NER_PARSER_CKPT` setting at it), or from the Hub at the pinned
-revision, offline-tolerant through the Hub cache. A value shaped like a
-Hub id (`org/name`) is always fetched from the Hub, even when a directory of
-that name exists in the working directory; write a local directory as a path —
-absolute, or starting with `./`, `../` or `~`. Layout is the one model
-whose PyTorch weights live in a third-party repo, so its ONNX artifact has its
-own pair of settings, `LAYOUT_ONNX_MODEL_ID` and `LAYOUT_ONNX_REVISION`.
 
 These bundles are published, so a core install needs no configuration (the front-matter tagger additionally stays off in a full run until `ML_FRONT_TAGGER_MODE=primary`; fast mode turns it on):
 
@@ -801,313 +514,71 @@ These bundles are published, so a core install needs no configuration (the front
 | Statement tagger | `scienceverse/bibr-statement-tagger-v1` | `b446f943` |
 | Front-matter tagger | `scienceverse/bibr-front-tagger` | `13a0f5c3` |
 
-The paper-classifier pin is the 0.9 model, which replaced the PyTorch weights
-and the ONNX bundle together; set
-`ML_PAPER_CLASSIFIER_REVISION=6046171b3198a255acb1f07f81a586a32f399ac4` to keep
-0.8.0's. The reference-parser pin
-is the v7 parser (mmBERT-small encoder), published as an ONNX bundle alone: it
-runs on ONNX Runtime whatever `ML_RUNTIME` says, as the front-matter tagger
-does, and needs no custom code. Set
-`NER_PARSER_CKPT=scienceverse/bibr-parser-v5-1-ultrabert` and
-`NER_PARSER_REVISION=97b06cc7dd6511bdd53f8855c93a29020231d215` to keep the
-0.8.0 parser (UltraBERT-150M), which also has a PyTorch form; its repo carries
-the encoder's `config.json`, modeling code and tokenizer, so the PyTorch runtime
-loads them from the same pinned commit with `trust_remote_code` and cannot load
-it at `NER_PARSER_REVISION=main`.
+`--device cpu` runs these models on the CPU. Loading rules, earlier model
+versions, GPU and Mac execution, CPU threads and memory, and how to try a
+retrained model are in [Local model runtime](model-runtime.md#bibrs-onnx-models).
 
-The geometry line tagger, the text reference segmenter and the statement
-tagger are defaults since 0.9. Each one turns off with its setting set to
-null (`REF_GEOM_TAGGER_MODEL_ID=null`, `REF_TEXT_SEG_MODEL_ID=null`, which
-brings back the CRF segmenter, and `ML_STATEMENT_TAGGER_MODEL_ID=null`), which
-reads a paper as 0.8.0 did at that step. As shipped defaults, a model that
-cannot be loaded (the Hub out of reach with nothing cached, for instance) does
-not stop a run: the paper goes on without it, as described below, and the
-log says so. `NER_PARSER_ENCODER` (and
-`NER_PARSER_ENCODER_REVISION`) override the encoder for a checkpoint that does
-not ship one; an encoder with its own modeling code runs it only from a local
-directory or a commit SHA. The section-classifier pin is the model retrained in 0.7.1; set
-`ML_SECTION_CLASSIFIER_REVISION=ee1a83db01ce947e3a5eb87dfde7221328f4b207` to
-keep the previous one.
+## How settings resolve
 
-Execution providers come from the same chain the sentence segmenter uses
-(CUDA → CPU), so `bibr[gpu]` accelerates all four models, not just
-segmentation. `--device cpu` runs these models on the CPU provider alone, and
-`device="cuda:1"` in the Python API puts them on that GPU.
+For settings loaded from the environment, the order is:
 
-On a Mac these models run on the CPU provider. CoreML is opt-in, because it may
-compute in FP16: set a model's own device to `mps`, such as `NER_DEVICE=mps` or
-`ML_SECTION_CLASSIFIER_DEVICE=mps`. The layout model stays on the CPU provider
-even then, because it fails on CoreML.
+1. **Environment variables** — always win.
+2. **`.env` files** — both `~/.bibr/.env` and the current working directory's
+   `.env` are read and merged key-by-key; where both set the same key, the
+   CWD file wins. So a global config in `~/.bibr/.env` still applies when
+   you run `bibr` from a directory that doesn't have its own `.env`, and a
+   local `.env` can override individual keys from it.
+3. **Built-in defaults** — used when a setting isn't in either of the above.
 
-`Dockerfile.serve` sets `ML_RUNTIME=torch` explicitly. That image exists for the
-PyTorch stack — `torch.compile` on the layout model in particular — and since the
-classifier revisions it bakes now also carry an `onnx/` bundle, leaving the
-setting unset would let `auto` move serve onto ONNX Runtime the next time the
-image is built. Switching it is a deliberate choice, not a build-time accident.
+`BIBR_ENV_FILE` replaces layer 2 outright when you need to control it exactly:
+set it to a specific path (or several, separated by `:` on Linux/macOS or `;`
+on Windows, merged in the same last-wins order), or to an empty value to skip
+`.env` loading altogether. The
+empty form is useful in containers, CI, and test runs, where picking up
+whatever `.env` happens to sit in the working directory is a surprise rather
+than a convenience. `${NAME}` inside a `.env` value remains literal; bibr does
+not interpolate it from another environment variable.
 
-### Running a candidate model
+Explicit run flags such as `--ocr`, `--llm`, `--refs`, and `--memory` override
+their corresponding settings for that invocation.
 
-To compare a retrained model with the shipped one, point the shipped model's
-own setting at the candidate and run the same papers twice, once without the
-setting and once with it. No other setting changes:
+Set `BIBR_DISABLE_DOTENV=1` to skip both `.env` files entirely. Benchmark
+harnesses and CI should do this so every setting a run records came from the
+process environment, not from whatever `.env` happened to be in the checkout.
 
-| Model | Setting | Candidate format |
-|---|---|---|
-| Reference parser | `NER_PARSER_CKPT` | ONNX bundle directory (`model: ner_parser`) |
-| Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `geom_segmenter.json` manifest (with its `.npz`), or the directory holding them; `scripts/export_gbm_bundle.py` converts a `.joblib` bundle |
-| Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`), or a Hub repo id |
-| CRF reference segmenter | `NER_SEG_CKPT` | checkpoint file (`torch` extra) |
-| Text reference segmenter (replaces the CRF) | `REF_TEXT_SEG_MODEL_ID` | directory with `segmenter.json`, `model.onnx` and `tokenizer.json` (in it or in `onnx/`), or a Hub repo id |
-| Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `front_role.json` manifest (with its `.npz`), or the directory holding them; `scripts/export_gbm_bundle.py` converts a `.joblib` bundle |
-| Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
-| Statement tagger (adds a source) | `ML_STATEMENT_TAGGER_MODEL_ID` | ONNX bundle directory (`model: statement_tagger`), or a Hub repo id |
-| Section classifier | `ML_SECTION_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: section_classifier`) |
-| Paper classifier | `ML_PAPER_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: paper_classifier`) |
+While `BIBR_DISABLE_DOTENV` or an empty `BIBR_ENV_FILE` turns `.env` loading
+off, the configuration tools follow it: `bibr config show --sources` and
+`bibr config path` report no `.env` file, and `bibr config set`, `bibr preset
+save/use/deactivate/diff` and `bibr setup` refuse to run, naming the variable,
+instead of writing a file bibr would not read.
 
-A setting is an *override* when its value, or its revision, differs from the
-shipped default. That includes a mirror of a shipped model, an offline copy
-of it, and the shipped repo at another revision such as `main`: all of these
-are recorded as overrides, and all of them load and run as before. Four rules
-apply to overrides only. A run on the shipped models extracts what it did
-before; its exports differ in two ways that have nothing to do with these
-rules: they name the models the run was set to load in
-`extraction.settings.models`, and the text reading joins more of the URLs and
-DOIs that a line break split:
+### What `bibr setup` writes
 
-- **A model that cannot be loaded stops the run.** Whatever the reason (the
-  path is missing; the Hub has no such repo, revision or file; the Hub cannot
-  be reached and the files are not in the local Hub cache; a file is
-  unreadable or of the wrong kind; the bundle fails its contract check or does
-  not run on a sample input; the `torch` extra that `NER_SEG_CKPT` needs is
-  not installed), the run stops with an error naming the setting and the
-  reason, instead of going on without the model, so a comparison never
-  measures the shipped path, or no model, under the candidate's name. `bibr
-  chew` exits with status 1. `bibr batch` exits non-zero with `run_info.json`
-  `reason` `model_override_failed`, and marks the papers it was running
-  `model_override_failed` (a resumed run takes them again) rather than failed,
-  so no paper is recorded as `extraction_failed` or `parse_failed` for it. A
-  `bibr batch --serve-url` run stops the same way when the server answers
-  `model_override_failed`.
-- **An error at inference is recorded, and a repeated one stops the run.**
-  When a loaded override raises on one paper, the paper takes that tier's
-  error path (the path the code takes when that model raises: a failing text
-  segmenter, for instance, sends the paper on to the split on printed
-  reference markers, not to the CRF a run without the override would use),
-  and its export carries a `MODEL_OVERRIDE_INFERENCE_FAILED` processing
-  warning naming the setting.
-  When the same overridden model raises on three papers in a row on which it
-  ran (a paper it is not asked about neither counts nor ends the row; one it
-  runs on without an error ends it), the run stops as for a model that cannot
-  be loaded. The papers written with the
-  fallback before the stop are named in the run's summary and in
-  `run_info.json` under `override_fallbacks`, and a resumed `bibr batch` runs
-  them again without `--retry-failed`, so once the model is repaired their
-  exports hold its answers (a paper that keeps falling back waits for
-  `--retry-failed` after three runs). The summary counts the papers the stop
-  left unfinished as `not finished`, not as failed. `bibr serve` keeps one
-  count per overridden model for the life of the process, across requests:
-  the request of the third paper in a row the model raised on answers `500`
-  with `error_code` `model_override_failed`, and so does every later one it
-  raises on, until a paper it runs on without an error ends the row.
-- **Checked first.** `bibr chew` and `bibr batch` load every override this run
-  will use (given its mode, `--no-llm`, `--refs` and `--ref-seg`), local or
-  Hub, before the first paper, whatever the input (PDF, DOCX, XML or HTML),
-  `--dry-run` included. Every overridden ONNX model (the reference parser, the
-  text segmenter, the geometry tagger, the front-matter tagger, the section
-  and paper classifiers and the statement tagger) is also run at the preflight
-  and whenever the run loads it on inputs built as a paper's are (its
-  tokenizer, its feature layout, the tokenizer's last id), in the shapes the
-  run sends it: the longest window and a short one, and, for the models that
-  take a batch, a batch of several and a batch of one. An export fixed to one
-  batch size or one length fails there. Each output shape is checked against
-  the labels or tags its manifest lists (for the parser and the tagger, also
-  the size of the CRF's scores); a model that fails the probe has not loaded.
-  A shipped default is not probed. A problem stops the run with one line per
-  setting. A setting for a model the run does not ask (the classifiers, the
-  statement tagger and the reference models under `--no-llm`, the geometry
-  models without `--ref-seg geom`, any reference model under `--refs off`) is
-  neither checked nor loaded: the run warns once at the start, naming the
-  setting and why, and records it as `not used in this run`.
-  `bibr serve` checks the files of every local-path override at startup and
-  loads a model when a request first needs it; an override that fails there
-  answers `500` with `error_code` `model_override_failed`.
-- **Recorded per run.** Each loaded override logs the sha256 of every file it
-  read, and `bibr batch` writes one record per override to `run_info.json`
-  under `model_overrides`: setting, value, revision (null for a local model),
-  `loaded` (`true` with each file's path, size and sha256, or `false` with a
-  short `reason` such as `not used in this run` or `torch extra not
-  installed`). The key is absent
-  for a run on the shipped models. Every export, from `bibr chew`, `bibr
-  batch` or `bibr serve`, also names the models its run was set to load in
-  `extraction.settings.models`: the setting, the Hub repo id and revision, and
-  `override`; for a local model, instead of the path, a short name (the
-  directory's own name and `@` the first 12 hex digits of a hash over its
-  files, `local-model@...` when that name is a home directory or the user
-  name) and the sha256 of each file, so an export shared with others does not
-  show how the producing machine is laid out or who ran it.
+`bibr setup` writes `./.env`, or the last file `BIBR_ENV_FILE` lists, since
+that file's values win; it stops before asking anything when that file's
+folder does not exist. Every run writes `PIPELINE_MODE` (`fast` or `full`), so
+a key added or removed later cannot change the mode; a `.env` from an earlier
+version has no entry and stays on `auto` until you run setup again. Fully local
+runs can be slower, especially on weaker hardware and Apple Silicon, and first
+runs may download several GB of model weights. If your machine is too weak but privacy still matters, use the
+private-server path: run the Docker OCR/API stack on a GPU machine and point
+your laptop's `.env` at that server.
 
-`REF_GEOM_TAGGER_MODEL_ID` adds a tier to the geometry segmentation rather than
-replacing one; the shipped tagger that cannot be loaded leaves the paper to the
-shipped geometry segmenter. It takes a local directory or a Hub repo id (with
-`REF_GEOM_TAGGER_REVISION`; `gate.json` at the top, `tagger.onnx` and
-`tagger.json` in `onnx/`); a Hub-shaped id is never read from the working
-directory, so write a local copy as a path (`./org/name`). With
-`REF_SEG_STRATEGY=geom` the tagger is asked first, and its answer is taken when
-its calibrated paper confidence reaches the threshold in its `gate.json` and
-the geometry tier's own checks (alignment yield, segment count against the
-layout's reference onsets) pass. An answer it takes is final: the reference
-line stream does not replace it. Otherwise, including an error on one paper,
-the shipped geometry segmenter and the rest of the cascade run exactly as
-without the tagger: a declined answer has no effect on the references. It is
-not invisible, though: the export's reference diagnostics list each attempt,
-declined or not, in `reference_yield.attempts` as `geom_tagger`, with its
-reason (`final`, `low_confidence_or_empty`, `tagger_error`, ...), confidence
-and counts in `reason_flags`; a declined attempt carries no spans or credible
-starts. An error (`tagger_error`) also adds a `MODEL_OVERRIDE_INFERENCE_FAILED`
-warning to the paper, and errors on three papers in a row stop the run. The
-tagger reads the same 29 line features as the shipped geometry segmenter, in
-sorted name order, and needs only ONNX Runtime; loading it runs the graph on
-the features of two short reference sections of different lengths and checks
-that it returns two logits per line.
+Re-running `bibr setup` merges into an existing `.env` by default and keeps
+values it does not ask about. When you choose an LLM provider, it also writes
+`LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL` where you
+entered none, so that a key or server left by an earlier setup, in `./.env`
+or `~/.bibr/.env`, cannot override the one you entered.
 
-`REF_TEXT_SEG_MODEL_ID` replaces a tier: the CRF segmenter, the last resort of
-every segmentation strategy (and the whole of `REF_SEG_STRATEGY=crf`). While it
-is set the CRF is not loaded, unless the shipped segmenter cannot be loaded, in
-which case the CRF runs in its place. Setting `NER_SEG_CKPT` away from its
-default needs `REF_TEXT_SEG_MODEL_ID=null`; with both set the run stops. It takes a local directory or a Hub repo id (with
-`REF_TEXT_SEG_REVISION`; `segmenter.json`, `model.onnx` and `tokenizer.json`
-in `onnx/`) and needs only ONNX Runtime and `tokenizers`, not the `torch`
-extra. The model tags each token of the reference-section text, the same text
-the CRF reads, as outside a reference (`O`), opening one (`B-REF`) or inside
-one (`I-REF`), in windows and with the stride its `segmenter.json` names; a
-token read by two windows keeps the answer of the window it sits furthest
-from the edge of. A reference opens at every `B-REF` token and at the first
-character of the text, and runs to the next one. Its answer goes through the
-same receipt as the CRF's. Unlike the CRF, it answers for a reference
-list found by its heading whenever the list is not blank, and does not
-decline to the next tier (the split on printed reference markers): when it
-finds no reference start at all, the whole list comes back as one reference,
-with `no_reference_start` in its `reason_flags` and a `REF_SEG_NOT_SPLIT`
-warning on the paper, so one unsplit block is not read as a parsed list. A
-list that was only guessed from the layout (`REF_SECTION_INFERRED`) and holds
-no reference start is declined instead, with
-`inferred_list_without_reference_start` in the receipt: the text is not
-exported as a reference, the marker split runs, and the citations in the
-paper's notes can stand in for the list. The export's reference
-diagnostics list it as `text_tagger`, with its token and window counts, the
-references it opened, an uncalibrated `expected_entry_precision` and the
-lowest opening probability in `reason_flags`. When an override cannot be loaded, the Hub being out
-of reach included, the run stops. An error on one paper is
-a `segmentation_error` with a `REF_SEG_CRF_ERROR` warning, as for the CRF, and
-a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a row
-stop the run. The preflight checks the files, the manifest and the tokenizer,
-and runs the graph once on a full window of tokenised reference text,
-checking that it returns three label scores per token.
+Environment variables still override it: when your
+shell exports a setting the wizard writes (`LLM_API_KEY`, `LLM_BASE_URL`,
+`LLM_PROVIDER`, ...), or another name bibr reads it under (`GEMINI_API_KEY`
+for `GOOGLE_API_KEY`), with a different value, the wizard names it, so you
+can unset or update it before running bibr.
 
-`ML_STATEMENT_TAGGER_MODEL_ID` adds a source to statement resolution. It takes a local directory or a Hub repo id (with
-`ML_STATEMENT_TAGGER_REVISION`; `bibr_onnx.json`, `model.onnx` and
-`tokenizer.json` in `onnx/`) and needs only ONNX Runtime and `tokenizers`.
-The model reads the paper's paragraphs in order, each section heading a block
-of its own and the reference list left out, each block paired with the first
-200 characters of the block before it, and gives each block a probability per
-statement type; a block is of a type at or above that type's threshold in
-`bibr_onnx.json`, and neighbouring blocks of a type join into one statement.
-Where it finds a funding, competing interests, ethics or data availability
-statement, that field takes the tagger's statements (all of them, in reading
-order, each cut at the next statement label in its rows) instead of the
-rules'; a field it finds nothing for keeps the rules' value, and so does a
-field whose statements it reads exactly as the rules did (whitespace aside).
-Otherwise the field's source in `extraction.fields` is `statement_tagger`.
-When the paper has no acknowledgments or author contributions section and
-the tagger finds one, its paragraphs become that section: a section all of
-whose rows it tagged is retyped, unless its printed heading is one bibr's
-heading lookup reads as a body section (an introduction, methods, results,
-discussion or appendix heading; the section then stays as it is, and its
-rows still give the statement fields their values), otherwise the rows move
-to a new section with a synthetic heading right after the one they were in;
-`classification_source` is `statement_tagger` either way. Each field or section it supplied adds a
-`STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. When the shipped
-tagger cannot be loaded, the paper keeps the rules' statements; a bundle that
-replaces it is an override, and when that cannot be loaded, the Hub being out
-of reach included, the run stops. The preflight of an override
-(and `bibr serve` at startup, for a local directory) opens the bundle and runs
-the graph on a batch of three blocks that fills the manifest's `max_length`
-and holds the tokenizer's last id, and on one short block, checking that it
-returns one finite probability per type: a graph with fewer positions than
-`max_length`, a vocabulary smaller than the tokenizer's, or an export fixed to
-one batch size or one length is refused there. An error on one paper leaves that paper with the rules' statements
-and, for an override, a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors of an
-override on three papers in a row stop the run.
+### Namespaces
 
-### CPU threads
-
-On the CPU provider every ONNX model (layout, sentence segmenter, reference
-parser, line tagger, text segmenter, statement tagger, section and paper
-classifiers, front-matter tagger) opens its own
-onnxruntime session with its own thread pool. onnxruntime sizes each pool from
-the machine's CPU count and ignores a CPU affinity mask (`taskset`, Slurm, a
-cpuset container) and a container CPU quota (`docker --cpus`, Kubernetes
-limits), so a process pinned to four CPUs on a 16-thread machine still runs
-sixteen workers per session. Its idle workers also spin-wait for the next
-operator, which keeps cores busy between calls. bibr sizes each CPU session to
-the CPUs the process may use and lets idle workers block:
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `ML_ONNX_THREADS` | `0` | Intra-op threads per CPU session. `0` uses the CPUs this process may run on: the machine's CPU count cut by the affinity mask and by any cgroup CPU quota (rounded up). |
-| `ML_ONNX_SPINNING` | `false` | `true` restores onnxruntime's spin-wait. |
-
-Each session gets the whole CPU budget, and sessions can overlap: papers are
-parsed and post-processed concurrently, and with a hosted LLM one window's back
-half can run beside the next window's layout. Overlaps can briefly oversubscribe
-the budget. To run several `bibr batch` processes side by side, pin each one
-(`taskset -c 0-3 bibr batch …`) or set `ML_ONNX_THREADS` to its share of the
-machine. Neither setting
-changes a result: thread count and spinning only change how the same operators
-are scheduled. CUDA sessions are not touched.
-
-### CPU memory arenas
-
-onnxruntime gives each CPU session a memory arena that keeps the largest
-allocation the session has made for as long as the session lives. Every model
-sees inputs of many sizes in a batch, so with arenas a long batch grew from
-paper to paper: in a fast batch of 60 papers, the memory held between papers
-went from 3.3 GB to 5.3 GB, and the peak reached 7.8 to 9.5 GB (4.2 to 4.8 GB
-without arenas). bibr's CPU sessions therefore run without one:
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `ML_ONNX_CPU_ARENA` | `false` | `true` gives the CPU sessions onnxruntime's arena back. Layout and the sentence segmenter run without one either way: their arenas alone held gigabytes. |
-
-The setting does not change a result, only where tensors are allocated. CUDA
-sessions are not touched; they have their own arena, which bibr shrinks after
-every run.
-
-### Layout model generation
-
-bibr ships with PP-DocLayoutV3 and can also run PP-DocLayoutV4, which keeps
-V3's 25 region labels but predicts a quadrilateral per region (bibr uses the
-rectangle enclosing it) and decodes reading order from a successor head as well
-as V3's relative-order head. V4 is not the default: PaddlePaddle has not yet
-published its weights (`PaddlePaddle/PP-DocLayoutV4_safetensors`), and the
-downstream layout rules were tuned on V3, so switching goes through the
-evaluation gate like any other model change.
-
-Each runtime selects the generation on its own:
-
-- **ONNX** (the default runtime): the bundle's `bibr_onnx.json` names the
-  architecture it was exported from, and that picks the pre- and
-  post-processing. Point `LAYOUT_ONNX_MODEL_ID` / `LAYOUT_ONNX_REVISION` at a V4
-  export — `scripts/export_onnx_layout.py --model-id
-  PaddlePaddle/PP-DocLayoutV4_safetensors --revision <sha>` writes one and checks
-  it against transformers.
-- **PyTorch**: set `LAYOUT_MODEL_ID` and `LAYOUT_MODEL_REVISION` to the V4
-  checkpoint. This needs a transformers release that includes PP-DocLayoutV4.
-
-Under the ONNX runtime `LAYOUT_MODEL_ID` and `LAYOUT_MODEL_REVISION` are not
-used, and bibr logs a warning when they name a different checkpoint than the
-bundle was exported from. bibr refuses a V4 bundle or checkpoint whose label
-list differs from the one it maps, or a V4 bundle that declares none, since
-every downstream rule keys on the label names. The OCR disk cache keys on all
-four layout settings and on `ML_RUNTIME`, so switching either never replays
-cached regions of the other model.
+There's no global `BIBR_` prefix. Instead, each settings group has its own
+short prefix — `LLM_` for the LLM client, `OCR_` for the OCR backend,
+`CROSSREF_` for reference enrichment, `PIPELINE_` for orchestration, and so
+on (the full list is in the [Settings reference](../reference/settings.md)).

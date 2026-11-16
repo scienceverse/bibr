@@ -295,6 +295,7 @@ def test_main_runs_one_api_server_with_uvicorn_logging_off(monkeypatch, jobs_ena
         "port": 8123,
         "log_level": Settings.SERVE_LOG_LEVEL,
         "log_config": None,
+        "ready_line": app_mod._ready_line("http://127.0.0.1:8123"),
     }
 
 

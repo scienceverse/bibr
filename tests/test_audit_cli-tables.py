@@ -430,7 +430,7 @@ def test_ocr_fallback_reason_is_printed_literally():
     _print_actual_ocr_summary(console, resources)
 
     out = console.file.getvalue()
-    assert "OCR model: m [q4]" in out
+    assert "OCR used b · model m [q4] · profile p" in out
     assert "Fallback reason: RuntimeError: [/gpu] not found" in out
 
 

@@ -1,8 +1,10 @@
+import os
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import bibr.setup_wizard as _setup_wizard_module
 from bibr.clients.sdk_extras import module_installed
 from bibr.setup_wizard import (
     FAST_MODE_PROMPT,
@@ -18,6 +20,24 @@ from bibr.setup_wizard import (
     _select_model,
     _write_env_fresh,
 )
+
+# The real blocker check, before the autouse fixture below pins it.
+_REAL_PLAN_BLOCKER = _setup_wizard_module._plan_blocker
+
+
+@pytest.fixture(autouse=True)
+def _machine_probes_pinned(monkeypatch):
+    """Pin the probes that read this machine, so a plan is the same in every venv.
+
+    The local plan's blocker check reads PATH and the installed runtimes, the
+    gpu extra's driver check loads libcuda, and the OCR server check opens a
+    socket. Tests of those paths pin them again.
+    """
+    monkeypatch.setattr("bibr.setup_wizard._plan_blocker", lambda env: None)
+    monkeypatch.setattr("bibr.setup_wizard._driver_cuda_version", lambda: (12, 4))
+    monkeypatch.setattr("bibr.setup_wizard._ocr_server_answers", lambda url: True)
+    # pytest's stdin is not a terminal; the test of that refusal pins it again.
+    monkeypatch.setattr("bibr.setup_wizard._stdin_is_a_terminal", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -969,7 +989,7 @@ def test_easy_setup_decline_then_decline_advanced_exits_clean(monkeypatch):
     wizard.run()  # must not raise SystemExit
 
     assert wizard.env_vars == {}
-    assert "bibr setup --advanced" in wizard.console.export_text()
+    assert "bibr setup --advanced" in " ".join(wizard.console.export_text().split())
 
 
 def test_easy_private_server_prompts_for_urls(tmp_path, monkeypatch):
@@ -1098,7 +1118,7 @@ def test_step_external_services_accepts_automatic_paddle_and_explicit_glm():
     with (
         patch(
             "bibr.setup_wizard.Prompt.ask",
-            side_effect=["", "sat-6l-sm", "glm-http", "ner"],
+            side_effect=["", "sat-6l-sm", "glm-http", "http://localhost:8080", "ner"],
         ),
         patch("bibr.setup_wizard.Confirm.ask", return_value=True),
     ):
@@ -1143,7 +1163,9 @@ def test_external_services_auto_installs_ml_for_layout_with_llm_references(
 ):
     """Every advanced PDF/OCR backend installs layout ML even when references use an LLM."""
     wizard = _recording_wizard()
-    answers = ["", "sat-6l-sm", ocr_backend, "llm"]
+    # An OCR server of your own is asked for its URL.
+    url = ["http://localhost:8080"] if ocr_backend.endswith("-http") else []
+    answers = ["", "sat-6l-sm", ocr_backend, *url, "llm"]
     prompts = iter(answers)
     calls = []
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
@@ -1157,14 +1179,16 @@ def test_external_services_auto_installs_ml_for_layout_with_llm_references(
     assert calls == ["PDF layout detection runs fastest with the ml extra"]
 
 
-def test_step_external_services_no_longer_offers_glm_mlx():
+def test_step_external_services_no_longer_offers_glm_mlx(monkeypatch):
     """The disabled vllm-mlx backend must not be a pickable choice (nor ask its
     quantization question): every run following that choice failed at startup."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("bibr.setup_wizard.platform_lib.machine", lambda: "arm64")
     wizard = SetupWizard()
     seen: dict[str, list[str]] = {}
 
     def fake_ask(prompt, *args, **kwargs):
-        if prompt == "OCR backend":
+        if prompt == "OCR route":
             seen["choices"] = list(kwargs.get("choices") or [])
             return "glm-rapid-mlx"
         if prompt == "OCR quantization":
@@ -1188,9 +1212,12 @@ def test_step_external_services_no_longer_offers_glm_mlx():
 def test_step_external_services_ocr_quant_default_writes_nothing():
     """The default 8-bit quant must not clutter .env, and non-mlx backends skip it."""
     wizard = SetupWizard()
-    # glm-http has no quant prompt: email, wtpsplit, OCR backend, ref parsing
+    # glm-http has no quant prompt: email, wtpsplit, OCR backend, its URL, ref parsing
     with (
-        patch("bibr.setup_wizard.Prompt.ask", side_effect=["", "sat-6l-sm", "glm-http", "ner"]),
+        patch(
+            "bibr.setup_wizard.Prompt.ask",
+            side_effect=["", "sat-6l-sm", "glm-http", "http://localhost:8080", "ner"],
+        ),
         patch("bibr.setup_wizard.Confirm.ask", return_value=True),
     ):
         wizard._step_external_services()
@@ -1208,8 +1235,8 @@ def _quiet_wizard():
 
 def test_external_services_writes_enrich_consolidate_and_llm(monkeypatch):
     wizard = _quiet_wizard()
-    # Prompt order: crossref email, wtpsplit model, ocr backend, ref parsing
-    prompts = iter(["user@example.com", "sat-6l-sm", "glm-http", "llm"])
+    # Prompt order: crossref email, wtpsplit model, ocr backend, its URL, ref parsing
+    prompts = iter(["user@example.com", "sat-6l-sm", "glm-http", "http://localhost:8080", "llm"])
     # Confirm order: enrichment, consolidate, layout detection
     confirms = iter([True, True, True])
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
@@ -1226,7 +1253,7 @@ def test_external_services_enrich_declined_skips_consolidate_question(monkeypatc
     """Enrichment is opt-in; declining it leaves CROSSREF_ENRICH unset (off) and
     never asks about consolidation, which would have nothing to merge."""
     wizard = _quiet_wizard()
-    prompts = iter(["", "sat-6l-sm", "glm-http", "ner"])
+    prompts = iter(["", "sat-6l-sm", "glm-http", "http://localhost:8080", "ner"])
     questions: list[str] = []
 
     def confirm(question, *a, **k):
@@ -1247,7 +1274,7 @@ def test_external_services_enrich_declined_skips_consolidate_question(monkeypatc
 
 def test_external_services_consolidate_declined(monkeypatch):
     wizard = _quiet_wizard()
-    prompts = iter(["", "sat-6l-sm", "glm-http", "ner"])
+    prompts = iter(["", "sat-6l-sm", "glm-http", "http://localhost:8080", "ner"])
     # Confirm order: enrichment (yes), consolidate (no), layout detection
     confirms = iter([True, False, True])
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
@@ -1296,7 +1323,7 @@ def test_recommended_setup_cuda_uses_fully_local_defaults():
     # to bootstrap vLLM through ``uv tool run``.
     assert "vllm" in setup.extras
     assert "local" not in setup.extras
-    assert "demo" in setup.extras
+    assert "demo" not in setup.extras  # the web demo is not needed to extract
     # No torch: the default ONNX models run without the ml extra.
     assert "ml" not in setup.extras
     # onnxruntime-gpu, or layout, SaT and the NER parser run on the CPU.
@@ -1318,7 +1345,7 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
     assert setup.env["LLM_CHAT_TEMPLATE_KWARGS"] == '{"enable_thinking": false}'
-    assert "demo" in setup.extras
+    assert "demo" not in setup.extras  # the web demo is not needed to extract
     assert "ml" not in setup.extras
     # At 6 GB the automatic chain runs OCR and the LLM through llama.cpp, so the
     # vLLM runtime is not installed and the plan says what to install instead.
@@ -1433,8 +1460,9 @@ def test_recommended_setup_windows_uses_the_4b_gguf():
     )
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
-    # bibr cannot install llama.cpp itself, so the plan says how to get it.
-    assert "winget install llama.cpp" in setup.runtime_summary
+    # bibr cannot install llama.cpp itself, so the plan says so (and the blocker
+    # check, when it is missing, how to get it).
+    assert "bibr does not install" in setup.runtime_summary
     assert "llama-server" in setup.runtime_summary
     # No run with onnxruntime-gpu has been measured on Windows: left as it was.
     assert "gpu" not in setup.extras
@@ -1488,7 +1516,7 @@ def test_recommended_setup_apple_silicon_warns_about_runtime():
     # A 16 GB Mac resolves to balanced (OCR/LLM never coexist; models are small)
     # per the current _auto_memory_mode rule.
     assert setup.memory_mode == "balanced"
-    assert "demo" in setup.extras
+    assert "demo" not in setup.extras  # the web demo is not needed to extract
     assert "Apple Silicon" in setup.runtime_summary
     assert "slow" in setup.runtime_summary
     assert "gpu" not in setup.extras
@@ -1545,7 +1573,7 @@ def test_recommended_setup_weak_machine_stays_private_without_cloud_consent():
     assert setup.tier == "private_server"
     assert setup.env["OCR_BACKEND"] == "glm-http"
     assert "LLM_PROVIDER" not in setup.env
-    assert "demo" in setup.extras
+    assert "demo" not in setup.extras  # the web demo is not needed to extract
     assert "cloud" not in setup.privacy_summary.lower()
     assert "private_server_url" in setup.required_prompts
 
@@ -1565,7 +1593,7 @@ def test_recommended_setup_cloud_requires_explicit_consent():
     assert setup.env["LLM_MODEL"] == "claude-haiku-5-5"
     assert setup.env["OCR_BACKEND"] == "anthropic"
     assert setup.env["OCR_VISION_MODEL"] == "claude-haiku-5-5"
-    assert "demo" in setup.extras
+    assert "demo" not in setup.extras  # the web demo is not needed to extract
     assert "cloud_api_key" in setup.required_prompts
 
 
@@ -1591,23 +1619,29 @@ def test_print_done_points_to_demo_chew_and_help():
     wizard._print_done()
 
     text = wizard.console.export_text()
-    assert "Setup complete!" in text
+    assert "Setup complete." in text
     assert "bibr demo" in text
-    assert "bibr chew" in text
+    # Commands with output a user can open, not JSON on the terminal.
+    assert "bibr chew paper.pdf -o result.json" in text
+    assert "bibr chew --sample -o sample.json" in text
     assert "bibr doctor" in text
-    assert "bibr -h" in text
 
 
 def test_print_done_demo_hint_when_install_declined(monkeypatch):
     """Selecting the demo extra but declining the install must not suggest `bibr demo`."""
     monkeypatch.setattr("bibr.setup_wizard.importlib.util.find_spec", lambda _name: None)
 
+    monkeypatch.setattr(
+        "bibr.setup_wizard._install_command_for_extras",
+        lambda extras, **k: (["uv", "add", f"bibr[{','.join(sorted(extras))}]"], "label"),
+    )
     declined = _recording_wizard()
     declined.selected_extras = {"demo", "ml"}
     declined._print_done()
-    declined_text = declined.console.export_text()
+    declined_text = " ".join(declined.console.export_text().split())
     assert "needs the demo extra" in declined_text
-    assert "uv tool install 'bibr[demo]'" in declined_text
+    # The command for this install, not a hard-coded `uv tool install`.
+    assert "uv add 'bibr[demo]'" in declined_text
 
     installed = _recording_wizard()
     installed.selected_extras = {"demo", "ml"}
@@ -1790,6 +1824,7 @@ def test_smoke_test_success_prints_title_authors_refs():
 
     fake_data = _smoke_export(n_authors=2, n_refs=10)
     wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}  # the fast test reads the references
     with (
         patch("bibr.setup_wizard.Confirm.ask", return_value=True),
         patch("bibr.api.chew", return_value=Result(fake_data)) as mock_chew,
@@ -1801,6 +1836,21 @@ def test_smoke_test_success_prints_title_authors_refs():
     assert "Authors: 2" in text
     assert "References: 10" in text
     assert "succeeded" in text.lower()
+    assert not wizard.failed_checks
+
+
+def test_a_structure_only_test_extraction_prints_no_reference_count():
+    """The LLM tiers' test skips the references: "References: 0" would read as a failure."""
+    from bibr.api import Result
+
+    wizard = _recording_wizard()
+    with (
+        patch("bibr.setup_wizard.Confirm.ask", return_value=True),
+        patch("bibr.api.chew", return_value=Result(_smoke_export(n_authors=2, n_refs=0))),
+    ):
+        wizard._step_smoke_test()
+
+    assert "References" not in wizard.console.export_text()
 
 
 def test_smoke_test_uses_quick_no_llm_pipeline_options():
@@ -2117,7 +2167,7 @@ def test_cloud_consent_declined_offers_advanced_handoff(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 8.0)
     called = []
-    monkeypatch.setattr(wizard, "run_advanced", lambda: called.append(True))
+    monkeypatch.setattr(wizard, "run_advanced", lambda **k: called.append(True))
 
     def confirm(prompt, **k):
         # Decline the private-server and cloud prompts; accept only the
@@ -2230,15 +2280,21 @@ def test_help_text_describes_new_flow():
     """Help text must drop the false 'reads existing .env' claim and describe the flow."""
     from bibr.setup_wizard import _HELP_TEXT
 
-    assert "offers them as defaults" not in _HELP_TEXT
-    assert "plan preview" in _HELP_TEXT.lower()
-    assert "overwrite, merge, or skip" in _HELP_TEXT
-    assert "does not take its answers from your existing\n.env" in _HELP_TEXT
-    # The flow starts with fast mode, writes the mode, and no longer dead-ends.
-    assert "Offer fast mode, the default" in _HELP_TEXT
-    assert "PIPELINE_MODE=fast" in _HELP_TEXT and "PIPELINE_MODE=full" in _HELP_TEXT
-    assert "(or none, for fast mode)" in _HELP_TEXT
-    assert "stays on auto" in _HELP_TEXT
+    text = " ".join(_HELP_TEXT.split())
+    assert "offers them as defaults" not in text
+    # What setup is for, and that bibr works without it.
+    assert "bibr works without any setup" in text and "fast mode" in text
+    # Where the answers go and when they apply.
+    assert "saved to ./.env, which applies when you run bibr from this folder" in text
+    assert "--global saves them to ~/.bibr/.env" in text
+    assert 'Nothing is written before the "Save configuration" step' in text
+    assert "merge (the default), overwrite (the old file is kept as .env.bak) or skip" in text
+    # Options and the next commands, no implementation detail.
+    for option in ("--advanced", "--global", "-h, --help"):
+        assert option in text
+    assert "bibr chew paper.pdf -o result.json" in text
+    assert "LLM_BACKEND=cloud" not in text
+    assert len(_HELP_TEXT.splitlines()) < 30
 
 
 def test_plan_preview_shows_paddle_default_and_model(monkeypatch):
@@ -2257,12 +2313,16 @@ def test_plan_preview_shows_paddle_default_and_model(monkeypatch):
             sys_platform="darwin",
             machine="arm64",
         )
+    # The OCR row names the route the automatic chain starts on the machine.
+    from types import SimpleNamespace
+
+    chain = [SimpleNamespace(backend="paddle-mlx-vlm"), SimpleNamespace(backend="glm-rapid-mlx")]
+    monkeypatch.setattr("bibr.ocr.registry.resolve_backend_candidates", lambda *a, **k: chain)
     wizard._print_recommendation(setup)
-    text = wizard.console.export_text()
+    text = " ".join(wizard.console.export_text().split())
 
     assert "fully local" in text  # lowercase tier name, not "Fully Local"
-    assert "paddle" in text
-    assert "GLM fallback" in text
+    assert "PaddleOCR-VL on MLX-VLM, local; falls back to GLM-OCR on Rapid-MLX" in text
     assert "bibr extract 4B" in text
     assert "vllm-mlx" in text
 
@@ -2319,7 +2379,7 @@ def _drive_cloud_setup(monkeypatch, tmp_path, wizard, *, first_key, retry_key):
         return kwargs.get("default", "")
 
     def fake_confirm(prompt, *args, **kwargs):
-        if "extras now" in prompt:
+        if "recommended extras" in prompt:
             return False
         if "LLM connection" in prompt:
             return True
@@ -2378,7 +2438,7 @@ def test_cloud_retry_skipped_write_leaves_env_alone(tmp_path, monkeypatch):
         return prompts.get(prompt, kwargs.get("default", ""))
 
     def fake_confirm(prompt, *args, **kwargs):
-        if "extras now" in prompt:
+        if "recommended extras" in prompt:
             return False
         if "LLM connection" in prompt:
             return True
@@ -2444,7 +2504,7 @@ def test_advanced_step4_honours_the_step1_ml_decline(monkeypatch):
     assert "ml" not in wizard.selected_extras
     assert installs == []
     text = wizard.console.export_text()
-    assert "declined in step 1" in text
+    assert "declined in step 3" in text
     # The hint names the command that adds the extra later.
     assert "Add it later with: uv pip install 'bibr[ml]'" in text
 
@@ -2551,10 +2611,9 @@ def test_smoke_import_error_hint_keeps_brackets(monkeypatch):
         wizard._step_smoke_test()
 
     text = wizard.console.export_text()
-    # The message prints twice — the (always escaped) 'Test extraction failed'
-    # line and the hint. Without escape() in the hint branch, the second copy
-    # renders as "pip install 'bibr'".
-    assert text.count("bibr[torch]") == 2
+    # The message prints once, on the (escaped) 'Test extraction failed' line;
+    # unescaped it would render as "pip install 'bibr'".
+    assert text.count("bibr[torch]") == 1
     assert "uv sync --extra torch" in text
 
 
@@ -2681,6 +2740,7 @@ def _run_easy_setup(monkeypatch, probe, *, build=11282, wizard=None):
     """Run the easy wizard on an RTX 3080 10 GB up to the plan, then decline."""
     wizard = wizard or _recording_wizard()
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.platform_lib.machine", lambda: "x86_64")
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 10.0))
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
     monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", probe)
@@ -2814,7 +2874,7 @@ def test_windows_keeps_its_own_llama_cpp_plan_beside_a_qualifying_server():
         llama_server=SetupLlamaServer(command=(_LLAMA_SERVER,), build=11282),
     )
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
-    assert "winget install llama.cpp" in setup.runtime_summary
+    assert "llama-server" in setup.runtime_summary
     assert "--advanced" not in setup.runtime_summary
     assert setup.fallback_hint == ""
 
@@ -2908,7 +2968,7 @@ def test_fast_setup_is_the_same_plan_on_every_machine(machine, monkeypatch):
     assert not {k for k in setup.env if k.startswith(("LLM_", "OCR_")) or k.endswith("_API_KEY")}
     # Nothing to install beyond the demo (and the GPU build of ONNX Runtime).
     assert not setup.extras & {"ml", "vllm", "local", "local-mlx"}
-    assert "demo" in setup.extras
+    assert "demo" not in setup.extras  # the web demo is not needed to extract
     assert setup.required_prompts == ("install_extras", "smoke_test")
     assert "private" not in setup.privacy_summary and "Anthropic" not in setup.privacy_summary
 
@@ -2951,7 +3011,9 @@ def test_viable_local_gates_only_the_optional_llm_upgrade(machine, offers_local,
     assert setup.tier == "fast"
     assert ("a local model" in setup.note) is offers_local
     assert "a private server or Claude in the cloud" in setup.note
-    assert "`bibr chew --full`" in setup.note
+    # `--full` with nothing configured only reaches blockers: setup is the way to an LLM.
+    assert "--full" not in setup.note
+    assert "`bibr setup`" in setup.note
 
 
 @pytest.mark.parametrize(
@@ -2976,7 +3038,7 @@ def test_the_llm_tiers_write_full_mode_and_recommend_no_torch(machine, allow_clo
     assert setup.tier == tier
     assert setup.env["PIPELINE_MODE"] == "full"
     assert "ml" not in setup.extras
-    assert "demo" in setup.extras
+    assert "demo" not in setup.extras  # the web demo is not needed to extract
 
 
 def test_the_ml_extra_is_no_longer_called_recommended():
@@ -2998,6 +3060,7 @@ def _drive_easy_setup(
     typed=None,
     existing=None,
     log=None,
+    blocker=None,
 ):
     """Run ``SetupWizard.run`` on a described Linux machine and return the wizard.
 
@@ -3006,6 +3069,7 @@ def _drive_easy_setup(
     extras install and the smoke test are stubbed (the install would run uv, the
     test a real extraction); ``wizard.installed`` holds the extras the install was
     asked for. ``log`` collects every confirmation asked, with its default.
+    ``blocker`` is what the local plan's blocker check finds (none by default).
     """
     answers = answers or {}
     typed = typed or {}
@@ -3027,10 +3091,14 @@ def _drive_easy_setup(
         return kwargs.get("default", "")
 
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.platform_lib.machine", lambda: "x86_64")
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: hardware)
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
     monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", lambda: (None, None))
     monkeypatch.setattr("bibr.ocr.registry._nvidia_compute_capability", lambda: 8.6)
+    monkeypatch.setattr("bibr.setup_wizard._driver_cuda_version", lambda: (12, 4))
+    monkeypatch.setattr("bibr.setup_wizard._plan_blocker", lambda env: blocker)
+    monkeypatch.setattr("bibr.setup_wizard._ocr_server_answers", lambda url: True)
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", confirm)
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", prompt)
@@ -3091,14 +3159,16 @@ def test_pressing_enter_everywhere_finishes_setup_in_fast_mode(monkeypatch, tmp_
     assert settings.pipeline.mode == "fast"
     assert resolve_mode(settings) == "fast"
     assert not llm_configured(settings)
-    # The install is asked for the demo, and the GPU build on a card where bibr
-    # recommends it (not macOS or Windows); never torch.
+    # The GPU build is offered on a card where bibr recommends it (not macOS or
+    # Windows), never the demo or torch; Enter installs nothing, as it is large.
     import platform
 
     gpu = hardware[0] == "cuda" and _recommends_gpu_extra(sys.platform, platform.machine())
-    [extras] = wizard.installed
-    assert extras == ({"demo", "gpu"} if gpu else {"demo"})
-    assert "Setup complete" in wizard.console.export_text()
+    assert wizard.installed == []
+    text = " ".join(wizard.console.export_text().split())
+    assert ("Recommended extras: gpu" in text) is gpu
+    assert "Setup complete" in text
+    assert not wizard.failed_checks
 
 
 @pytest.mark.parametrize(
@@ -3203,7 +3273,7 @@ def test_a_user_who_declines_every_offer_saves_nothing(monkeypatch, tmp_path):
 def test_the_handoff_from_the_decline_path_still_reaches_the_advanced_wizard(monkeypatch, tmp_path):
     called = []
     monkeypatch.setattr(
-        "bibr.setup_wizard.SetupWizard.run_advanced", lambda self: called.append(True)
+        "bibr.setup_wizard.SetupWizard.run_advanced", lambda self, **k: called.append(True)
     )
     wizard = _drive_easy_setup(
         monkeypatch,
@@ -3385,15 +3455,16 @@ def test_smoke_test_runs_the_real_fast_pipeline_with_no_key(monkeypatch):
     assert not kwargs.get("no_llm")
     assert "ref_parse_strategy" not in kwargs
     text = wizard.console.export_text()
-    assert "smoke test succeeded" in text
+    assert "Test extraction succeeded" in text
     assert "fast mode" in text
 
 
 def test_smoke_test_options_follow_the_mode_setup_chose():
     wizard = _recording_wizard()
 
+    # The whole sample: page 1 alone has no reference section.
     wizard.env_vars = {"PIPELINE_MODE": "fast"}
-    assert wizard._smoke_test_options() == {"pages": "1", "mode": "fast"}
+    assert wizard._smoke_test_options() == {"mode": "fast"}
 
     # The LLM tiers keep the structure-only check: a full run starts the LLM server,
     # which has its own test.
@@ -3401,15 +3472,44 @@ def test_smoke_test_options_follow_the_mode_setup_chose():
     assert wizard._smoke_test_options() == {"pages": "1", "no_llm": True, "refs": "off"}
 
 
-def test_fast_smoke_test_note_names_the_downloads_and_not_an_ocr_server():
+def test_fast_smoke_test_note_names_the_downloads_and_not_an_ocr_server(monkeypatch):
+    monkeypatch.setattr(
+        "bibr.setup_wizard._fast_mode_download_summary",
+        lambda: "downloads 9 models (about 1.5 GB) on first use, once",
+    )
     wizard = _recording_wizard()
     wizard.env_vars = {"PIPELINE_MODE": "fast"}
 
     note = " ".join(wizard._smoke_test_note().split())
 
     assert "fast mode" in note
-    assert "about 2-3 GB" in note
+    assert "downloads 9 models (about 1.5 GB) on first use, once" in note
     assert "skips" not in note  # the structure-only note says it skips LLM/reference extraction
+
+
+def test_the_fast_download_size_is_the_one_the_dry_run_counts(monkeypatch, tmp_path):
+    """On an empty cache the plan's figure is the dry run's: same models, same sizes."""
+    from pathlib import Path
+
+    from bibr.local.cli.dry_run import _download_total, pending_downloads
+    from bibr.local.cli.run_config import ResolvedRunConfig
+    from bibr.setup_wizard import _fast_mode_download_summary
+
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hub"))
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "empty-hub"))
+    config = ResolvedRunConfig(
+        ocr_backend="text-layer",
+        memory_mode="balanced",
+        llm_backend="cloud",
+        mode="fast",
+        ocr_requested=False,
+    )
+    pending = pending_downloads(config, [Path("paper.pdf")])
+    assert pending, "an empty cache downloads every model"
+
+    summary = _fast_mode_download_summary()
+
+    assert summary == f"downloads {_download_total([s for *_, s in pending])} on first use, once"
 
 
 # --- never a wrong .env ----------------------------------------------------------
@@ -3484,6 +3584,8 @@ def test_fast_over_an_old_env_with_an_llm_and_no_mode_stays_fast(monkeypatch, tm
 
 
 _OLD_CLOUD_ENV = (
+    "# bibr environment configuration\n"
+    "# Generated by bibr setup\n"
     "PIPELINE_MODE=full\n"
     "LLM_PROVIDER=anthropic\n"
     "ANTHROPIC_API_KEY=sk-ant-old-key-000000\n"
@@ -3642,7 +3744,8 @@ def test_no_mode_change_is_announced_when_the_mode_stays_the_same(monkeypatch, t
 
 
 def test_a_mode_exported_in_the_shell_is_named_because_it_beats_the_file(monkeypatch, tmp_path):
-    """``PIPELINE_MODE=full`` in the shell overrides a ``fast`` .env; setup says so."""
+    """``PIPELINE_MODE=full`` in the shell overrides a ``fast`` .env; setup says so, once,
+    and counts it as a failed check: what it saved does not apply."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
     monkeypatch.setenv("PIPELINE_MODE", "full")
@@ -3653,9 +3756,14 @@ def test_a_mode_exported_in_the_shell_is_named_because_it_beats_the_file(monkeyp
         wizard._step_write_env()
 
     assert "PIPELINE_MODE=fast" in wizard.env_path.read_text()
-    assert "Your shell exports PIPELINE_MODE with a different value." in " ".join(
-        wizard.console.export_text().split()
-    )
+    text = " ".join(wizard.console.export_text().split())
+    assert "Your shell exports PIPELINE_MODE=full, which overrides .env" in text
+    # Not also the contradicting "saving this switches it to fast", nor a second warning.
+    assert "switches it to" not in text
+    assert "with a different value" not in text
+    assert [what for what, _fix in wizard.failed_checks] == [
+        "Your shell exports PIPELINE_MODE=full, so the fast mode saved here does not apply"
+    ]
     from bibr.config import GlobalSettings
 
     # The reason it matters: what bibr reads is the exported value.
@@ -3721,3 +3829,600 @@ def test_an_answer_written_over_any_earlier_file_carries_its_own_mode(
     # A fast answer written over a file with no earlier LLM settings configures none.
     if mode == "fast" and existing in (None, _OLD_FAST_ENV, _OLD_ENV_WITHOUT_LLM):
         assert not llm_configured(settings)
+
+
+# --- the UX pass: honest plans, honest endings ----------------------------------
+
+
+def test_a_failed_check_makes_the_closing_screen_say_so(tmp_path):
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    wizard.env_vars = {"PIPELINE_MODE": "full"}
+    wizard._env_written = True
+    wizard._record_failure("LLM connection test", "Check that the server at http://x is running")
+
+    wizard._print_done()
+
+    text = " ".join(wizard.console.export_text().split())
+    flat = "".join(text.split())  # a long path wraps at the console width
+    assert "Setup saved, but 1 check failed." in text
+    assert "".join(f"Saved to {tmp_path / '.env'} (full mode).".split()) in flat
+    assert "LLM connection test" in text and "Check that the server at http://x is running" in text
+    assert "Setup complete" not in text
+    # Where it applies, and what to run next.
+    assert "".join(f"It applies when you run bibr from {tmp_path}".split()) in flat
+    assert "bibr doctor — check what failed above" in text
+
+
+def test_a_clean_run_ends_with_one_success_line_naming_the_file_and_mode(tmp_path):
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+    wizard._env_written = True
+
+    wizard._print_done()
+
+    text = " ".join(wizard.console.export_text().split())
+    flat = "".join(text.split())  # a long path wraps at the console width
+    assert "".join(f"Setup complete. Saved to {tmp_path / '.env'} (fast mode).".split()) in flat
+    assert "failed" not in text
+    assert "bibr setup --global saves to ~/.bibr/.env for every folder instead" in text
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_main_exits_non_zero_only_when_a_check_failed(monkeypatch, tmp_path, failed):
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setattr("bibr.setup_wizard.sys.argv", ["bibr"])
+
+    def run(self):
+        if failed:
+            self._record_failure("Test extraction failed", "Run bibr doctor")
+
+    monkeypatch.setattr("bibr.setup_wizard.SetupWizard.run", run)
+    from bibr.setup_wizard import main
+
+    if failed:
+        with pytest.raises(SystemExit) as exited:
+            main()
+        assert exited.value.code == 1
+    else:
+        main()
+
+
+def test_setup_without_a_terminal_says_how_to_configure_and_exits_2(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setattr("bibr.setup_wizard.sys.argv", ["bibr"])
+    monkeypatch.setattr("bibr.setup_wizard._stdin_is_a_terminal", lambda: False)
+    ran = []
+    monkeypatch.setattr("bibr.setup_wizard.SetupWizard.run", lambda self: ran.append(self))
+    from bibr.setup_wizard import main
+
+    with pytest.raises(SystemExit) as exited:
+        main()
+
+    assert exited.value.code == 2
+    assert ran == []  # no plan, no question
+    captured = capsys.readouterr()
+    lines = captured.err.strip().splitlines()
+    assert 2 <= len(lines) <= 3
+    assert "needs a terminal" in lines[0]
+    assert "fast mode" in captured.err
+    assert "bibr config set KEY VALUE" in captured.err
+    assert "bibr config example > .env" in captured.err
+    assert captured.out == ""
+
+
+def test_an_unknown_option_points_to_the_help(monkeypatch, capsys):
+    monkeypatch.setattr("bibr.setup_wizard.sys.argv", ["bibr", "--bogus"])
+    from bibr.setup_wizard import main
+
+    with pytest.raises(SystemExit) as exited:
+        main()
+
+    assert exited.value.code == 2
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Unknown option: --bogus" in out and "bibr setup --help" in out
+
+
+def test_ctrl_c_after_the_save_says_the_settings_are_saved(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setattr("bibr.setup_wizard.sys.argv", ["bibr"])
+
+    def run(self):
+        self._env_written = True
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("bibr.setup_wizard.SetupWizard.run", run)
+    from bibr.setup_wizard import main
+
+    with pytest.raises(SystemExit):
+        main()
+
+    # Without whitespace: a long path wraps at the terminal width.
+    out = "".join(capsys.readouterr().out.split())
+    assert "".join(f"Aborted — settings already saved to {tmp_path / '.env'}.".split()) in out
+
+
+def test_declining_the_local_plan_still_offers_the_server_and_the_cloud(monkeypatch, tmp_path):
+    log: list = []
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        hardware=("cuda", 24.0),
+        answers={
+            FAST_MODE_PROMPT: False,
+            "Use this configuration?": False,
+            _ADVANCED_PROMPT: False,
+        },
+        log=log,
+    )
+
+    asked = [prompt for prompt, _default in log]
+    assert asked[:4] == [
+        FAST_MODE_PROMPT,
+        "Use this configuration?",
+        _PRIVATE_SERVER_PROMPT,
+        _CLOUD_PROMPT,
+    ]
+    # Then the old ending: advanced, else fast mode (the default).
+    assert asked[4:6] == [_ADVANCED_PROMPT, _FAST_INSTEAD_PROMPT]
+    assert _mode_lines(wizard.env_path) == ["PIPELINE_MODE=fast"]
+
+
+def test_a_private_server_after_the_local_plan_is_the_server_plan(monkeypatch, tmp_path):
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        hardware=("cuda", 24.0),
+        answers={
+            FAST_MODE_PROMPT: False,
+            "Use this configuration?": False,
+            _PRIVATE_SERVER_PROMPT: True,
+        },
+    )
+
+    text = wizard.env_path.read_text()
+    assert "OCR_BACKEND=glm-http" in text and "LLM_BASE_URL=" in text
+    assert "LLM_BACKEND=vllm" not in text
+
+
+def test_a_blocked_local_plan_says_why_and_defaults_to_no(monkeypatch, tmp_path):
+    log: list = []
+    blocker = ("llama.cpp (llama-server) is not installed", "Install it from https://x.")
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        hardware=("cuda", 6.0),
+        answers={FAST_MODE_PROMPT: False, _ADVANCED_PROMPT: False},
+        log=log,
+        blocker=blocker,
+    )
+
+    question = "Use this configuration anyway (it cannot run until that is fixed)?"
+    assert (question, False) in log
+    text = " ".join(wizard.console.export_text().split())
+    assert "Status blocked — llama.cpp (llama-server) is not installed" in text
+    assert "Install it from https://x." in text
+    # Enter declines it, so the user goes on to the other routes and ends in fast mode.
+    assert _PRIVATE_SERVER_PROMPT in [p for p, _d in log]
+    assert _mode_lines(wizard.env_path) == ["PIPELINE_MODE=fast"]
+    assert not wizard.failed_checks
+
+
+def test_a_blocked_plan_taken_anyway_is_a_failed_check(monkeypatch, tmp_path):
+    blocker = ("llama.cpp (llama-server) is not installed", "Install it from https://x.")
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        hardware=("cuda", 6.0),
+        answers={
+            FAST_MODE_PROMPT: False,
+            "Use this configuration anyway (it cannot run until that is fixed)?": True,
+        },
+        blocker=blocker,
+    )
+
+    assert "LLM_BACKEND=llama-cpp" in wizard.env_path.read_text()
+    assert wizard.failed_checks == [
+        ("This plan cannot start here: llama.cpp (llama-server) is not installed", blocker[1])
+    ]
+    assert "Setup saved, but 1 check failed." in " ".join(wizard.console.export_text().split())
+
+
+def test_the_plan_blocker_names_a_missing_llama_cpp_once_with_its_install_hint(monkeypatch):
+    from bibr.local import llama_cpp
+
+    monkeypatch.setattr(sys, "platform", "linux")  # the install hint is per platform
+    monkeypatch.setattr(llama_cpp, "find_llama_server", lambda: None)
+    monkeypatch.setattr(llama_cpp, "_which_llama_command", lambda name: None)
+    monkeypatch.setattr(
+        "bibr.ocr.registry.paddle_vllm_unavailable_reason", lambda **k: "needs 8 GB of VRAM"
+    )
+
+    blocked = _REAL_PLAN_BLOCKER({"LLM_BACKEND": "llama-cpp", "OCR_BACKEND": "paddle"})
+
+    assert blocked is not None
+    why, unblock = blocked
+    assert why == "llama.cpp (llama-server) is not installed, and bibr does not install it"
+    assert "https://github.com/ggml-org/llama.cpp/releases" in unblock
+    assert _REAL_PLAN_BLOCKER({"LLM_BACKEND": "cloud", "OCR_BACKEND": "anthropic"}) is None
+
+
+def test_the_fast_plan_says_it_reads_the_text_layer_and_offers_no_demo(monkeypatch, tmp_path):
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, hardware=("cuda", 24.0))
+    text = " ".join(wizard.console.export_text().split())
+
+    assert "OCR none — reads the PDF's text layer; scanned PDFs need an OCR route" in text
+    assert "demo" not in text.split("Next:")[0]
+    assert "automatic (bibr picks" not in text
+    # A proposed extra is not installed yet, and the Memory row does not count it.
+    assert "gpu: offered after saving (a large download), not installed yet" in text
+
+
+def test_a_large_extra_shows_its_command_and_defaults_to_no(monkeypatch):
+    wizard = _recording_wizard()
+    wizard.selected_extras = {"gpu"}
+    asked = []
+    monkeypatch.setattr(
+        "bibr.setup_wizard._install_command_for_extras",
+        lambda extras, **k: (["uv", "add", "bibr[gpu]"], "label"),
+    )
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Confirm.ask",
+        lambda prompt, **k: asked.append((prompt, k.get("default"))) or k.get("default"),
+    )
+    monkeypatch.setattr(
+        wizard, "_install_selected_extras", lambda *a, **k: pytest.fail("installed")
+    )
+
+    wizard._offer_extras_install()
+
+    assert asked == [("Install the recommended extras (gpu) now?", False)]
+    text = " ".join(wizard.console.export_text().split())
+    assert "Installs with: uv add 'bibr[gpu]'" in text
+    assert "A large download (NVIDIA CUDA and cuDNN libraries)." in text
+    assert "Skipped. Install them later with: uv add 'bibr[gpu]'" in text
+
+
+@pytest.mark.parametrize(("driver", "offered"), [((12, 4), True), ((11, 8), False), (None, True)])
+def test_the_gpu_extra_needs_a_driver_for_the_wheels_cuda(monkeypatch, driver, offered):
+    monkeypatch.setattr("bibr.ocr.registry._nvidia_compute_capability", lambda: 8.6)
+    monkeypatch.setattr("bibr.setup_wizard._driver_cuda_version", lambda: driver)
+
+    assert _recommends_gpu_extra("linux", "x86_64") is offered
+
+
+def test_an_empty_api_key_is_refused_with_where_to_get_one(monkeypatch):
+    wizard = _recording_wizard()
+    answers = iter(["", "  ", "sk-ant-typed-000000"])
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(answers))
+    setup = _build_recommended_setup(
+        platform_key=None,
+        accelerator_memory_gb=None,
+        system_memory_gb=16.0,
+        sys_platform="linux",
+        machine="x86_64",
+        allow_cloud=True,
+    )
+
+    wizard._collect_required_prompts(setup)
+
+    assert wizard.env_vars["ANTHROPIC_API_KEY"] == "sk-ant-typed-000000"
+    text = " ".join(wizard.console.export_text().split())
+    assert text.count("This route needs an API key") == 2
+    assert "https://platform.claude.com/settings/keys" in text
+
+
+def test_the_cloud_plan_shows_the_documented_cost():
+    setup = _build_recommended_setup(
+        platform_key=None,
+        accelerator_memory_gb=None,
+        system_memory_gb=16.0,
+        sys_platform="linux",
+        machine="x86_64",
+        allow_cloud=True,
+    )
+    wizard = _recording_wizard()
+    wizard._print_recommendation(setup)
+
+    text = " ".join(wizard.console.export_text().split())
+    assert "Cost about $0.004 a paper for the Claude Haiku 5.5 extraction" in text
+
+
+def test_a_private_server_that_does_not_answer_asks_for_the_url_not_a_key(monkeypatch):
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "openai",
+        "LLM_BASE_URL": "http://localhost:8000/v1",
+        "LLM_API_KEY": "local",
+        "LLM_MODEL": "m",
+    }
+    calls = iter([ConnectionError("Connection error."), "OK"])
+
+    def ping(settings):
+        outcome = next(calls)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    confirms = []
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", ping)
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Confirm.ask", lambda text, **k: confirms.append(text) or True
+    )
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: "http://gpu-box:8000/v1")
+
+    wizard._offer_llm_connection_test()
+
+    assert confirms == ["Test the LLM connection now?", "Retry with a different LLM server URL?"]
+    assert wizard.env_vars["LLM_BASE_URL"] == "http://gpu-box:8000/v1"
+    text = " ".join(wizard.console.export_text().split())
+    # bibr doctor's hint for this endpoint.
+    assert "Check that the server at http://localhost:8000/v1 is running and serves m" in text
+    assert not wizard.failed_checks
+
+
+def test_a_connection_test_given_up_is_a_failed_check(monkeypatch):
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-x",
+        "LLM_MODEL": "m",
+    }
+
+    def ping(settings):
+        raise ConnectionError("Connection error.")
+
+    answers = iter([True, False])
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", ping)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: next(answers))
+
+    wizard._offer_llm_connection_test()
+
+    assert [what for what, _fix in wizard.failed_checks] == ["LLM connection test"]
+
+
+def test_the_private_server_plan_checks_the_ocr_server_too(monkeypatch):
+    wizard = _recording_wizard()
+    wizard.env_vars = {"OCR_BACKEND": "glm-http", "OCR_BASE_URL": "http://localhost:8080"}
+    monkeypatch.setattr("bibr.setup_wizard._ocr_server_answers", lambda url: False)
+
+    wizard._check_ocr_server()
+
+    text = " ".join(wizard.console.export_text().split())
+    assert "No OCR server answers at http://localhost:8080" in text
+    assert "sglang.launch_server --model-path zai-org/GLM-OCR" in text
+    assert wizard.failed_checks[0][0] == "No OCR server answers at http://localhost:8080"
+
+
+def test_the_test_extraction_keeps_logs_and_warnings_off_the_screen(monkeypatch, capsys):
+    import logging
+    import warnings
+
+    from bibr.api import Result
+
+    def chew(*a, **k):
+        logging.getLogger("bibr.pipeline").error("OCR backend init failed")
+        logging.getLogger("instructor").error("API call failed on attempt 1")
+        warnings.warn("CUDA initialization: driver too old", UserWarning, stacklevel=1)
+        return Result(_smoke_export(n_authors=2, n_refs=3))
+
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+    monkeypatch.setattr("bibr.api.chew", chew)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        wizard._step_smoke_test()
+
+    captured = capsys.readouterr()
+    assert "OCR backend init failed" not in captured.out + captured.err
+    assert "API call failed" not in captured.out + captured.err
+    assert not seen
+    assert logging.root.manager.disable == logging.NOTSET  # logging is back on afterwards
+
+
+def test_a_failed_test_extraction_is_one_line_and_a_failed_check(monkeypatch):
+    from bibr.exceptions import UpstreamServiceError
+
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "full", "OCR_BACKEND": "glm-llama"}
+    err = UpstreamServiceError(
+        "llama.cpp is not installed. Install it from https://x.", "local inference"
+    )
+    monkeypatch.setattr("bibr.api.chew", lambda *a, **k: (_ for _ in ()).throw(err))
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+
+    wizard._step_smoke_test()
+
+    text = wizard.console.export_text()
+    assert text.count("llama.cpp is not installed") == 1
+    assert wizard.failed_checks == [("Test extraction failed", "Run bibr doctor")]
+
+
+def test_a_merge_does_not_blame_setup_for_hand_written_values(monkeypatch, tmp_path):
+    """A hand-written OCR route is the user's: asked about (Enter keeps it), never "an earlier setup"."""
+    existing = (
+        "# my notes\nOCR_BACKEND=gemini\nGOOGLE_API_KEY=FAKE-google\n"
+        "PIPELINE_MEMORY_MODE=aggressive\n"
+    )
+    log: list = []
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, existing=existing, log=log)
+
+    lines = wizard.env_path.read_text().splitlines()
+    assert "OCR_BACKEND=gemini" in lines
+    assert "PIPELINE_MEMORY_MODE=aggressive" in lines
+    assert ("Comment it out so fast mode reads the text layer?", False) in log
+    text = " ".join(wizard.console.export_text().split())
+    assert "earlier setup" not in text
+    assert (
+        "Your .env sets OCR_BACKEND=gemini (a cloud route: page images leave this machine)" in text
+    )
+    assert "Kept PIPELINE_MEMORY_MODE=aggressive from your .env" in text
+
+
+def test_a_merge_comments_out_a_hand_written_route_when_asked(monkeypatch, tmp_path):
+    existing = "OCR_BACKEND=gemini\nMY_OWN_SETTING=keep-me\n"
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        existing=existing,
+        answers={"Comment it out so fast mode reads the text layer?": True},
+    )
+
+    lines = wizard.env_path.read_text().splitlines()
+    assert "# OCR_BACKEND=gemini" in lines and "MY_OWN_SETTING=keep-me" in lines
+    assert "Commented out OCR_BACKEND, your OCR route" in " ".join(
+        wizard.console.export_text().split()
+    )
+
+
+def test_overwrite_keeps_a_backup_and_names_the_dropped_settings(monkeypatch, tmp_path):
+    import stat
+
+    env = tmp_path / ".env"
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        existing=_OLD_FULL_ENV,
+        typed={f"{env} already exists": "overwrite"},
+    )
+
+    backup = tmp_path / ".env.bak"
+    assert backup.read_text() == _OLD_FULL_ENV
+    if os.name != "nt":  # sys.platform is faked as linux above
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    text = " ".join(wizard.console.export_text().split())
+    assert "Overwriting drops ANTHROPIC_API_KEY" in text and "(still in .env.bak)" in text
+    # The choices are explained before the question.
+    assert "merge update the settings this setup chose" in text
+
+
+def test_an_exported_cloud_ocr_route_in_fast_mode_is_named_and_fails_a_check(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("OCR_BACKEND", "anthropic")
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=False):
+        wizard._step_write_env()
+
+    text = " ".join(wizard.console.export_text().split())
+    assert "Your shell exports OCR_BACKEND=anthropic, so fast runs use that OCR route" in text
+    assert "page images go to the cloud" in text
+    assert wizard.failed_checks == [
+        (
+            "Your shell exports OCR_BACKEND=anthropic: fast runs send page images to the cloud",
+            "Run: unset OCR_BACKEND",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "paddle_blocked", "default"),
+    [("fast", False, "text-layer"), ("full", True, "text-layer"), ("full", False, "paddle")],
+)
+def test_the_advanced_ocr_default_can_start_here(monkeypatch, mode, paddle_blocked, default):
+    monkeypatch.setattr(sys, "platform", "linux")
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": mode}
+    monkeypatch.setattr(
+        wizard,
+        "_ocr_route_blocker",
+        lambda backend: "no runtime" if paddle_blocked and backend == "paddle" else None,
+    )
+    seen = {}
+
+    def ask(prompt, **kwargs):
+        seen["choices"] = kwargs["choices"]
+        seen["default"] = kwargs["default"]
+        return kwargs["default"]
+
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", ask)
+
+    wizard._step_ocr_route()
+
+    assert seen["default"] == default
+    assert "text-layer" in seen["choices"]
+    # Apple-only backends are not offered on Linux.
+    assert not {"paddle-rapid-mlx", "glm-rapid-mlx", "paddle-mlx-vlm"} & set(seen["choices"])
+    # The fast text layer writes no route, as the easy flow; a full run names it.
+    assert wizard.env_vars.get("OCR_BACKEND") == (None if mode == "fast" else default)
+    assert not wizard.failed_checks
+    assert "requires OCR smoke" not in wizard.console.export_text()
+
+
+def test_picking_an_ocr_route_that_cannot_start_is_a_failed_check(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "full"}
+    monkeypatch.setattr(
+        wizard,
+        "_ocr_route_blocker",
+        lambda b: "glm-llama: no llama-server" if b == "glm-llama" else None,
+    )
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: "glm-llama")
+
+    wizard._step_ocr_route()
+
+    assert wizard.failed_checks == [
+        ("OCR route glm-llama cannot start here", "glm-llama: no llama-server")
+    ]
+
+
+def test_global_writes_the_user_wide_file(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.delenv("BIBR_ENV_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    wizard = SetupWizard(global_env=True)
+    wizard.console = _recording_wizard().console
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=False):
+        wizard._step_write_env()
+    wizard._print_done()
+
+    written = home / ".bibr" / ".env"
+    assert wizard.env_path == written
+    assert "PIPELINE_MODE=fast" in written.read_text()
+    assert not (tmp_path / ".env").exists()
+    text = " ".join(wizard.console.export_text().split())
+    assert "bibr reads it wherever you run it" in text
+
+
+def test_global_names_a_folder_env_that_overrides_it(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.delenv("BIBR_ENV_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("PIPELINE_MODE=full\n")
+    wizard = SetupWizard(global_env=True)
+    wizard.console = _recording_wizard().console
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=False):
+        wizard._step_write_env()
+    wizard._print_done()
+
+    assert [what for what, _fix in wizard.failed_checks] == [
+        f"{tmp_path / '.env'} sets PIPELINE_MODE differently, and it wins when bibr runs "
+        "from this folder"
+    ]
+
+
+def test_global_is_refused_while_bibr_env_file_replaces_the_chain(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setattr("bibr.setup_wizard.sys.argv", ["bibr", "--global"])
+    from bibr.setup_wizard import main
+
+    with pytest.raises(SystemExit) as exited:
+        main()
+
+    assert exited.value.code == 2
+    assert "--global saves to ~/.bibr/.env, which bibr does not read" in " ".join(
+        capsys.readouterr().out.split()
+    )

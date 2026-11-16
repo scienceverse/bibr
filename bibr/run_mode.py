@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 #: What a fast run leaves undone, for the one-line summaries (``bibr chew``, ``bibr doctor``,
 #: ``--dry-run``). It mirrors :func:`fast_settings`: the local models answer alone.
-FAST_SKIPS = "implicit sections and every LLM fallback for metadata, sections and references"
+FAST_SKIPS = "the LLM's check of uncertain titles, authors, sections and references"
 
 # Reference-parse strategies that call an LLM. A per-run ``--refs`` or
 # ``--ref-seg`` that names one is refused by the entry points; only the

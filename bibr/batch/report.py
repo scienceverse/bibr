@@ -12,10 +12,64 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from bibr.batch.ledger import MAX_UNSETTLED_FAILURES, MODEL_OVERRIDE_FAILED, fell_back_on_override
+from bibr.batch.ledger import (
+    INTERRUPTED,
+    MAX_UNSETTLED_FAILURES,
+    MODEL_OVERRIDE_FAILED,
+    fell_back_on_override,
+)
 from bibr.pipeline.stages.export import _OVERLAPPED_TIMINGS
 
 TOP_WARNINGS = 10
+
+# Warning codes that describe the run, not a problem with the paper: a fast run
+# records LLM_SKIPPED on every paper (what an LLM would have added). They stay in
+# the report JSON under warnings.expected and out of the warnings row and count.
+EXPECTED_WARNINGS = frozenset({"LLM_SKIPPED"})
+
+# What the warnings row says for the codes a batch meets most; any other code is
+# shown as it is. ``bibr batch --json`` and ``bibr batch report --json`` keep the codes.
+WARNING_PHRASES = {
+    "OCR_REGION_FAILED": "OCR region failed",
+    "OCR_PAGE_FAILED": "OCR page failed",
+    "OCR_OUTPUT_TRUNCATED": "OCR output cut off",
+    "OCR_TABLE_DROPPED": "table dropped",
+    "OCR_TEXT_LAYER_FALLBACK": "OCR fell back to the text layer",
+    "OCR_BACKEND_UNAVAILABLE": "no OCR backend, text layer only",
+    "TEXT_LAYER_PAGE_UNUSABLE": "page without a usable text layer",
+    "TEXT_LAYER_REGION_UNREAD": "regions not in the text layer",
+    "TEXT_LAYER_TABLE_REBUILT": "table rebuilt from the text layer",
+    "TEXT_LAYER_FORMULA_TEXT": "formula read as plain text",
+    "TEXT_LAYER_GLYPHS_UNMAPPED": "unmapped glyphs",
+    "TEXT_LAYER_PRIVATE_USE_DROPPED": "private-use characters dropped",
+    "LOW_TEXT_QUALITY": "low text quality",
+    "SECTION_CLASSIFIER_FAILED": "section classifier failed",
+    "PAPER_CLASSIFICATION_FAILED": "paper classification failed",
+    "AUTHORS_EMPTY": "no authors",
+    "FRONT_TAGGER_UNAVAILABLE": "front matter not read",
+    "FRONT_TAGGER_FLAGGED": "front matter flagged",
+    "FRONT_MATTER_NOT_READ": "front matter not read (no layout)",
+    "SELF_CITATION_FILLED": "title/authors from the paper's own citation",
+    "REF_SECTION_NOT_FOUND": "no reference section",
+    "REF_SECTION_INFERRED": "reference section inferred",
+    "REF_FOOTNOTE_CITATIONS": "references read from footnotes",
+    "REF_SEG_GEOM_CASCADE": "reference split: geometry declined",
+    "REF_SEG_REGION_CASCADE": "reference split: regions declined",
+    "REF_SEG_REGION_RECOVERY": "reference split: recovered from regions",
+    "REF_SEG_CRF_FALLBACK": "reference split without the LLM",
+    "REF_SEG_MARKER_SPLIT_RECOVERY": "reference split: on printed markers",
+    "REF_SEG_FAILED": "no references split",
+    "REF_SEG_NOT_SPLIT": "reference list not split",
+    "REF_SEG_MERGE_SPLIT": "merged references split",
+    "REF_PARSE_TRUNCATED": "long reference parsed in part",
+    "REF_PARSE_LOST": "references lost",
+    "REF_UNDER_EXTRACTION_SUSPECTED": "fewer references than cited",
+    "CROSSREF_ENRICHMENT_TIMEOUT": "Crossref timed out",
+    "CROSSREF_ENRICHMENT_FAILED": "Crossref failed",
+    "ROR_MATCHING_TIMEOUT": "ROR timed out",
+    "ROR_MATCHING_FAILED": "ROR failed",
+    "MODEL_OVERRIDE_INFERENCE_FAILED": "overridden model failed",
+}
 
 
 def _percentile(values: Sequence[float], pct: float) -> float | None:
@@ -73,10 +127,16 @@ def compute_report(
         for r in latest.values()
         if r.get("status") != "ok" and r.get("error_code") == MODEL_OVERRIDE_FAILED
     ]
+    # Interrupted (Ctrl-C, SIGTERM) before it finished: no verdict either, and a
+    # resumed run processes it again.
+    interrupted = [
+        r for r in latest.values() if r.get("status") != "ok" and r.get("error_code") == INTERRUPTED
+    ]
     failed_latest = [
         r
         for r in latest.values()
-        if r.get("status") != "ok" and r.get("error_code") != MODEL_OVERRIDE_FAILED
+        if r.get("status") != "ok"
+        and r.get("error_code") not in (MODEL_OVERRIDE_FAILED, INTERRUPTED)
     ]
     ok_attempts = [r for r in rows if r.get("status") == "ok"]
 
@@ -137,20 +197,26 @@ def compute_report(
             by_stage[str(stage)] = by_stage.get(str(stage), 0) + 1
 
     warning_counts: dict[str, int] = {}
+    expected_counts: dict[str, int] = {}
     papers_with_warnings = 0
     for row in ok_latest:
         warnings = row.get("warnings")
         if not isinstance(warnings, Mapping):
             continue
-        if (_number(warnings.get("count")) or 0) > 0:
-            papers_with_warnings += 1
+        count = _number(warnings.get("count")) or 0
         codes = warnings.get("codes")
+        expected = 0
         if isinstance(codes, Mapping):
-            for key, count in codes.items():
-                n = _number(count)
+            for key, value in codes.items():
+                n = _number(value)
                 if n is None:
                     continue
-                warning_counts[str(key)] = warning_counts.get(str(key), 0) + int(n)
+                target = expected_counts if str(key) in EXPECTED_WARNINGS else warning_counts
+                target[str(key)] = target.get(str(key), 0) + int(n)
+                if str(key) in EXPECTED_WARNINGS:
+                    expected += int(n)
+        if count - expected > 0:
+            papers_with_warnings += 1
     top_warnings = sorted(warning_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_WARNINGS]
 
     return {
@@ -159,6 +225,8 @@ def compute_report(
             "total": len(latest),
             "ok": len(ok_latest),
             "failed": len(failed_latest),
+            # Interrupted before it finished; a resume runs them.
+            "interrupted": len(interrupted),
             # Not finished because the run stopped on a model override; a resume runs them.
             "stopped_on_model_override": len(not_finished),
             # ok, but an overridden model raised on them and they fell back; a resume runs
@@ -203,8 +271,14 @@ def compute_report(
             "by_failed_stage": dict(sorted(by_stage.items(), key=lambda kv: (-kv[1], kv[0]))),
         },
         "warnings": {
+            # Papers with a warning other than an EXPECTED_WARNINGS one.
             "papers_with_warnings": papers_with_warnings,
             "top": [{"warning": key, "count": count} for key, count in top_warnings],
+            # EXPECTED_WARNINGS codes (a fast run's LLM_SKIPPED): not counted above.
+            "expected": [
+                {"warning": key, "count": count}
+                for key, count in sorted(expected_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            ],
         },
     }
 
@@ -242,12 +316,15 @@ def render_report(report: Mapping[str, Any], *, title: str = "bibr batch report"
     stopped = papers.get("stopped_on_model_override") or 0
     capped = papers.get("fell_back_capped") or 0
     fell_back = (papers.get("fell_back_on_model_override") or 0) - capped
+    interrupted = papers.get("interrupted") or 0
+    attempts = papers["attempts"]
     rows.append(
         (
             "papers",
             f"{papers['ok']} ok · {papers['failed']} failed · "
+            + (f"{interrupted} interrupted · " if interrupted else "")
             + (f"{stopped} not finished · " if stopped else "")
-            + f"{papers['total']} total ({papers['attempts']} attempts)",
+            + f"{papers['total']} total ({attempts} {'attempt' if attempts == 1 else 'attempts'})",
         )
     )
     if stopped or fell_back:
@@ -291,7 +368,8 @@ def render_report(report: Mapping[str, Any], *, title: str = "bibr batch report"
             f"max {_fmt_seconds(latency['max'])} (n={latency['n']})",
         )
     )
-    shares = report["stage_shares_pct"]
+    # Stages under half a percent (a text-layer run's ocr) would print as 0%.
+    shares = {stage: pct for stage, pct in report["stage_shares_pct"].items() if pct >= 0.5}
     rows.append(
         (
             "stage share",
@@ -320,11 +398,19 @@ def render_report(report: Mapping[str, Any], *, title: str = "bibr batch report"
     if failures["by_failed_stage"]:
         failure_text += f" | stage: {_fmt_counts(failures['by_failed_stage'])}"
     rows.append(("failures", failure_text))
+    n_warned = warnings["papers_with_warnings"]
     rows.append(
         (
             "warnings",
-            f"{warnings['papers_with_warnings']} papers · "
-            + _fmt_counts({w["warning"]: w["count"] for w in warnings["top"]}),
+            f"{n_warned} {_papers(n_warned)}"
+            + (
+                " · "
+                + _fmt_counts(
+                    {WARNING_PHRASES.get(w["warning"], w["warning"]): w["count"] for w in top}
+                )
+                if (top := warnings["top"])
+                else ""
+            ),
         )
     )
 

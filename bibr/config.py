@@ -1315,7 +1315,11 @@ class OcrVisionOptions(_BibrSettings):
         "google",
         description='Vision LLM provider for OCR: "google" (default), "openai", "anthropic".',
     )
-    model: str = Field("gemini-3-flash-preview", description="Vision LLM model for OCR.")
+    model: str = Field(
+        "gemini-3-flash-preview",
+        description="Vision LLM model for OCR. Unset, the anthropic OCR backend uses "
+        "claude-haiku-5-5 instead of this Gemini default; set it for the openai backend.",
+    )
     base_url: str | None = Field(None, description="Vision LLM base URL override.")
     rate_limit_rpm: int = Field(
         30, ge=1, description="Vision LLM rate limit in requests per minute."

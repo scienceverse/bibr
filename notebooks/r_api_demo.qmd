@@ -12,7 +12,9 @@ This notebook demonstrates how to call the bibr REST API from R.
 
 **Prerequisites:**
 
-- bibr API server running (`uv run bibr serve` or via Docker)
+- bibr API server running (`bibr serve`, `uv run bibr serve` in a project or
+  source checkout, or via Docker). With nothing configured it serves in fast
+  mode and needs no API key or OCR server.
 - R packages: `httr2`, `jsonlite`
 
 ## Configuration
@@ -39,13 +41,14 @@ add_auth <- function(req) {
 Verify the server is running and ready.
 
 ```{r}
+# /health answers with plain text ("ok"), not JSON
 health <- request(BASE_URL) |>
   req_url_path_append("health") |>
   add_auth() |>
   req_perform() |>
-  resp_body_json()
+  resp_body_string()
 
-cat("Health:", health$status, "\n")
+cat("Health:", health, "\n")
 
 ready <- request(BASE_URL) |>
   req_url_path_append("ready") |>
@@ -101,11 +104,16 @@ cat("Xrefs:      ", length(data$xref), "\n")
 ### Authors
 
 ```{r}
+# Affiliations are their own table; each row lists the author_ids it belongs to.
+affiliation_of <- function(author_id) {
+  rows <- Filter(function(af) author_id %in% unlist(af$author_ids), data$affiliation)
+  paste(vapply(rows, function(af) af$text %||% "", character(1)), collapse = "; ")
+}
 authors <- do.call(rbind, lapply(data$author, function(a) {
   data.frame(
     given = a$given %||% "",
     family = a$family %||% "",
-    affiliation = a$affiliation %||% "",
+    affiliation = affiliation_of(a$author_id),
     email = a$email %||% NA_character_,
     orcid = a$orcid %||% NA_character_,
     corresponding = a$corresponding %||% FALSE,

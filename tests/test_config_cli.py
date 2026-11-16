@@ -255,10 +255,17 @@ def test_validate_value_literal_accepts_valid_choice():
 # ---------------------------------------------------------------------------
 
 
-def test_render_env_example_minimal_has_four_keys():
+def test_render_env_example_minimal_has_the_starter_keys():
     text = config_cli.render_env_example(full=False)
-    for key in ("LLM_PROVIDER", "GOOGLE_API_KEY", "CROSSREF_API_EMAIL", "OCR_BACKEND"):
-        assert key in text
+    for key in (
+        "PIPELINE_MODE",
+        "LLM_PROVIDER",
+        "GOOGLE_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CROSSREF_API_EMAIL",
+        "OCR_BACKEND",
+    ):
+        assert f"# {key}=" in text
     # Minimal template must not blow up into the full settings surface.
     assert "LLM_RATE_LIMIT_RPM" not in text
     assert "REDIS_PASSWORD" not in text
@@ -269,8 +276,34 @@ def test_render_env_example_minimal_never_prints_fake_secret_value():
     assert "GOOGLE_API_KEY=" in text
     assert "GOOGLE_API_KEY=your-google-api-key-here" not in text
     # Bare key=, nothing trailing on that line.
-    line = next(line for line in text.splitlines() if line.startswith("GOOGLE_API_KEY="))
-    assert line == "GOOGLE_API_KEY="
+    line = next(line for line in text.splitlines() if line.startswith("# GOOGLE_API_KEY="))
+    assert line == "# GOOGLE_API_KEY="
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_render_env_example_is_a_file_that_changes_nothing(full, tmp_path, capsys):
+    """``bibr config example > .env`` must parse cleanly and set no value.
+
+    The template used to be printed through Rich, which folded long description
+    lines at the terminal width: the continuation had no ``#``, python-dotenv
+    reported it on every later command, and the minimal template's uncommented
+    ``OCR_BACKEND=paddle`` switched a fast run off its text-layer default.
+    """
+    import argparse
+
+    from dotenv import dotenv_values
+
+    code = config_cli.run_config_command(argparse.Namespace(config_command="example", full=full))
+    text = capsys.readouterr().out
+
+    assert code == 0
+    assert text == config_cli.render_env_example(full=full)
+    for line in text.splitlines():
+        assert line == "" or line.startswith("#"), line
+        assert len(line) <= 88 or " " not in line[2:], line
+    env_file = tmp_path / ".env"
+    env_file.write_text(text, encoding="utf-8")
+    assert dotenv_values(env_file) == {}
 
 
 def test_render_env_example_full_covers_every_setting_grouped_by_section():

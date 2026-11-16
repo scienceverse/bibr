@@ -19,8 +19,14 @@ def run_references(args: Any) -> int:
     from rich.console import Console
 
     from bibr.export.citations import format_for_path, render_references, write_references
-    from bibr.export.tables import _payloads
-    from bibr.local.cli.tables import export_files
+    from bibr.export.tables import NoExportsError, _payloads
+    from bibr.local.cli.tables import (
+        export_files,
+        papers_given,
+        plural,
+        warn_papers,
+        warn_skipped,
+    )
 
     console = Console(stderr=True)
     out = args.out if args.out not in (None, "-") else None
@@ -38,6 +44,11 @@ def run_references(args: Any) -> int:
     files, missing = export_files(list(args.inputs or []))
     for raw in missing:
         ui.warn(console, f"not found: {escape(raw)}")
+    papers, files = papers_given(files)
+    warn_papers(console, papers)
+    if papers and not files:
+        ui.error(console, "No bibr exports to read; nothing written.")
+        return 1
     if out:
         # A CSL-JSON file written into a directory of exports is not an input.
         resolved_out = Path(out).resolve()
@@ -49,9 +60,14 @@ def run_references(args: Any) -> int:
     try:
         if out:
             report = write_references(
-                files, out, format=fmt, prefer=args.prefer, check_note=check_note
+                files,
+                out,
+                format=fmt,
+                prefer=args.prefer,
+                check_note=check_note,
+                require_exports=True,
             )
-            skipped, count, papers = report.skipped, report.references, report.papers
+            skipped, count, n_papers = report.skipped, report.references, report.papers
         else:
             exports, skipped_list = [], []
             for label, payload, reason in _payloads(files):
@@ -59,16 +75,25 @@ def run_references(args: Any) -> int:
                     skipped_list.append((label, reason or "skipped"))
                 else:
                     exports.append(payload)
+            if not exports:
+                raise NoExportsError(tuple(skipped_list))
             text, count = render_references(exports, fmt, prefer=args.prefer, check_note=check_note)
-            skipped, papers = tuple(skipped_list), len(exports)
+            skipped, n_papers = tuple(skipped_list), len(exports)
             # Bytes, so RIS's CRLF line endings pass through unchanged.
             sys.stdout.buffer.write(text.encode("utf-8"))
             sys.stdout.flush()
+    except NoExportsError as exc:
+        warn_skipped(console, exc.skipped)
+        ui.error(console, "No bibr exports among the inputs; nothing written.")
+        return 1
     except (OSError, ValueError) as exc:
         ui.error(console, escape(str(exc).splitlines()[0]))
         return 1
-    for source, reason in skipped:
-        ui.warn(console, f"skipped {escape(str(source))}: {escape(str(reason))}")
+    warn_skipped(console, skipped)
     target = escape(out) if out else "standard output"
-    ui.ok(console, f"{count} references from {papers} papers {ui.ARROW} {target} ({fmt})")
+    ui.ok(
+        console,
+        f"{plural(count, 'reference')} from {plural(n_papers, 'paper')} {ui.ARROW} "
+        f"{target} ({fmt})",
+    )
     return 0

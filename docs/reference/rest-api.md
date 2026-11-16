@@ -8,7 +8,10 @@ surface — endpoints, request/response shapes, caching, and error codes.
 
 The server binds to `127.0.0.1:8000` by default. Interactive docs are at
 `/docs` (Swagger UI) and `/redoc`; these and `/openapi.json` require the same
-bearer token as extraction when authentication is enabled.
+bearer token as extraction when authentication is enabled. `GET /` answers with
+the paths to start from: `{"service": "bibr", "docs": "/docs", "openapi":
+"/openapi.json", "health": "/health", "ready": "/ready", "extract": "POST
+/papers/extract"}` (also behind the token when one is set).
 
 ## Endpoints
 
@@ -40,7 +43,7 @@ fields; the `file` bytes within it are limited to 50 MiB (with `MCP_ENABLED`
 the body cap grows to fit a 50 MiB file in base64 form — see the MCP guide).
 At most 1 MiB of the upload remains in API memory before the multipart spool
 rolls to disk.
-Exactly one `file` part is accepted. The nine optional fields below must each
+Exactly one `file` part is accepted. The ten optional fields below must each
 appear at most once and are capped at 64 bytes; duplicate parts, a second file,
 a file part under another name or more than 25 text parts in all return `400`.
 A text field the route does not know is ignored, and up to 16 of them fit
@@ -58,8 +61,14 @@ alongside every field below.
 | `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `ref-llm` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
+| `mode` | `auto` \| `fast` \| `full` | No | Run mode for this request: `fast` makes no LLM call, `full` uses the server's LLM, `auto` (or omitted) follows the server's mode. `full` on a server with no LLM configured is refused with `400`. |
 
 **Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 and later from earlier versions), `source` (input-file identity: file name, SHA-256, format); what the paper says — `metadata` (scalar paper-level metadata), `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match` (matches for the paper's own identity), `affiliation_match` and `funding_match` (ROR organizations), `bib_match`; how the output was produced — `extraction` (engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, qualification provenance, the output-validation result (`extraction.validation`: error/warning counts, promotion disposition and issue list), diagnostics receipts, the state of each tracked field (`extraction.fields`, since 12.1: whether `title`, `author`, `abstract`, `keywords`, `doi`, `published`, `journal`, `funding_statement`, `funding`, `paper_type` and `bib` were `extracted`, `absent`, `abstained`, `failed` or `not_attempted`, with the producing step, the rule of the field's decision and the codes that explain the state), figure/table piece locations and warnings (`{code, message}` objects); `regions` is added there when `include_regions=true`, and `text_regions` when `include_region_meta=true`). Every key is always present, and content rows carry no processing fields. Figure and table rows describe the whole object.
+
+`paper_id` is the first 16 hex characters of the file's SHA-256 (`source.sha256`),
+so the same file gets the same id whatever it is called. `bibr chew`, `bibr batch`
+and `bibr.chew()` use the file name without its extension instead: join their
+results with this API's by `source.sha256`.
 
 `metadata` is scalar-only by design — pipeline telemetry lives under `extraction` and the input file's identity under `source` — so R consumers can call `as.data.frame(metadata)` cleanly.
 
@@ -72,9 +81,16 @@ on parsing its value — pre-v11 responses have no such key at all. See
 **Example:**
 
 ```bash
+curl -X POST http://localhost:8000/papers/extract -F "file=@paper.pdf" -o paper.json
+```
+
+Form fields go beside the file. `crossref=true` also checks the references
+against Crossref, which needs outbound network access from the server:
+
+```bash
 curl -X POST http://localhost:8000/papers/extract \
   -F "file=@paper.pdf" \
-  -F "include_regions=false" \
+  -F "include_figures=true" \
   -F "crossref=true"
 ```
 

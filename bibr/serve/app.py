@@ -8,6 +8,7 @@ Builds a FastAPI app in this process and one spawned inference worker
   - ``GET  /papers/jobs/{id}/result``  — fetch the paper_json once succeeded
   - ``GET  /papers/jobs/{id}/references`` — its reference list (CSL-JSON, BibTeX, RIS)
   - ``DELETE /papers/jobs/{id}``       — cancel a job that is still queued
+  - ``GET  /``                         — where the docs, probes and extract route are
   - ``GET  /health``                   — liveness: ``ok`` once the inference worker is ready
   - ``GET  /ready``                    — custom readiness probe (OCR + Redis + job store)
 
@@ -22,6 +23,7 @@ import functools
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -235,12 +237,14 @@ class BibrServer:
         port: int = 8000,
         log_level: str = "info",
         log_config=None,
+        ready_line: str | None = None,
     ) -> None:
         """Bind, start the worker, serve until a signal or a fatal worker exit.
 
         The socket is bound before the worker loads its models, so a port in
         use fails at once. A worker that exits with ``PIPELINE_RESTART_WORKERS``
         off stops the server (exit status 1) after its waiters are answered.
+        *ready_line*, when given, is printed to stderr once the worker is ready.
         """
         import uvicorn
 
@@ -274,6 +278,8 @@ class BibrServer:
         self.worker.on_fatal = _fail_stop
         try:
             self.worker.start()
+            if ready_line:
+                print(ready_line, file=sys.stderr, flush=True)
             server.run(sockets=[sock])
         finally:
             self.worker.stop()
@@ -393,6 +399,7 @@ def _build_server(upload_stores):
     app.state.inference_worker = worker
     register_extract_route(app, upload_store, inference_tracker)
     _register_health_route(app, worker)
+    _register_index_route(app)
 
     # Gate every other route too (/openapi.json, /docs, …) — FastAPI's
     # metadata endpoints leak deployment details. Middleware so
@@ -569,6 +576,49 @@ def _build_server(upload_stores):
 
     _compose_lifespan_cleanup(app, _close_ingress_resources)
     return server
+
+
+#: What ``GET /`` answers: where to go next. Paths only, so it says nothing
+#: about the deployment.
+INDEX_PAYLOAD = {
+    "service": "bibr",
+    "docs": "/docs",
+    "openapi": "/openapi.json",
+    "health": "/health",
+    "ready": "/ready",
+    "extract": "POST /papers/extract",
+}
+
+
+def _register_index_route(app) -> None:
+    """Answer ``GET /`` with :data:`INDEX_PAYLOAD`.
+
+    Left out of the OpenAPI schema. The auth gate middleware treats ``/`` like
+    any other route: it is not one of the public probe paths.
+    """
+    from fastapi.responses import JSONResponse
+
+    async def index() -> JSONResponse:
+        return JSONResponse(INDEX_PAYLOAD)
+
+    app.add_api_route("/", index, methods=["GET"], include_in_schema=False)
+
+
+def _display_base_url(host: str, port: int) -> str:
+    """The URL to open for a server bound to *host*:*port*."""
+    if host == "0.0.0.0":  # noqa: S104 — a display name, not a bind address
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "[::1]"
+    return f"http://{host}:{port}"
+
+
+def _ready_line(base_url: str) -> str:
+    """The line ``bibr serve`` prints once the inference worker is ready."""
+    return (
+        f"bibr serve is ready: {base_url}  (API docs {base_url}/docs, "
+        f"health {base_url}/health; Ctrl-C stops it)"
+    )
 
 
 def _register_health_route(app, worker) -> None:
@@ -913,10 +963,12 @@ def main():
     # One API process: upload-root ownership, dispatch tracking, admission,
     # readiness state and optional jobs are process-local. log_config=None
     # keeps uvicorn from installing its own handlers, so its records propagate
-    # to the serve sink (formatted, scrubbed) instead.
+    # to the serve sink (formatted, scrubbed) instead. uvicorn handles SIGTERM
+    # as it does Ctrl-C, and the worker is stopped once it has shut down.
     server.run(
         host=args.host,
         port=args.port,
         log_level=Settings.SERVE_LOG_LEVEL,
         log_config=None,
+        ready_line=_ready_line(_display_base_url(args.host, args.port)),
     )

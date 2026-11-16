@@ -42,10 +42,11 @@ Checks MIME type, file corruption, and encryption. Refuses unsupported formats (
 - DOCX and JATS XML files are parsed natively (python-docx, and a JATS `<article>` parser respectively) to extract headings and text structure, skipping OCR entirely
 - HTML (`.html`/`.htm`) and ePub (`.epub`) files are also parsed natively — `HtmlHandlingStage` (`bibr/pipeline/stages/html.py`), backed by `bibr/input/html_native.py` and `bibr/input/epub_native.py` — skipping OCR the same way as DOCX/JATS
 - PP-DocLayoutV3 detects PDF regions (headings, body text, tables, formulas, figures, and more); regions then flow through native-text inspection and recognition
-- `OCR_BACKEND=paddle` selects one Paddle-first OCR runtime transactionally at startup; explicit `paddle-*`, `glm-*`, and cloud backends remain available through `OcrOptions`
+- A fast run that names no OCR route reads PDFs with the text-layer backend and starts no OCR model (see below). Otherwise `OCR_BACKEND=paddle`, the default, selects one Paddle-first OCR runtime transactionally at startup; explicit `paddle-*`, `glm-*`, and cloud backends remain available through `OcrOptions`
 
 **PDF limits.** `PIPELINE_MAX_PAGES` limits the processed page count
-(default 200). Pages beyond the cap are dropped without a warning in the
+(default 200), counted from the first page processed (the start of `--pages`,
+or page 1). Pages beyond the cap are dropped without a warning in the
 console or the export; for a long document, compare the length of the export's
 `extraction.pages` list with the PDF's page count. Render-pixel and dimension
 limits reject oversized pages before rasterization. Size memory for the
@@ -303,7 +304,9 @@ instead of copying them. The superseded
 
 ### OCR selection and evidence
 
-PDF OCR starts with PP-DocLayoutV3 regions. `OCR_BACKEND=paddle` then selects a
+PDF OCR starts with PP-DocLayoutV3 regions. A fast run that names no OCR route
+reads them from the text layer and starts no OCR runtime. Otherwise
+`OCR_BACKEND=paddle` (the default) selects a
 concrete runtime transactionally at startup: Linux x86_64 tries
 `paddle-vllm` (PaddleOCR-VL-1.6) when an NVIDIA GPU with at least 8 GB VRAM
 is detected, then `glm-llama`; without that GPU it uses `glm-llama` directly.
@@ -390,7 +393,7 @@ IMRaD+ section classification enum:
 
 | Service | Purpose | Required |
 |---|---|---|
-| OCR runtime (`paddle-*` default; `glm-*` explicit/fallback) | PDF recognition after layout detection | `bibr chew` selects a local runtime; `bibr serve` proxies to an explicit external OCR service |
+| OCR runtime (`paddle-*` by default in full mode; `glm-*` explicit/fallback; none for the text layer, which a fast run with no OCR setting uses) | PDF recognition after layout detection | `bibr chew` selects a local runtime; `bibr serve` proxies to an explicit external OCR service |
 | LLM API (Google/OpenAI/Anthropic/Groq/Ollama or managed local server) | Metadata extraction and fallback tasks | Standard extraction path; `no_llm=True` disables these tasks |
 | Crossref API | Reference enrichment (DOI lookup + search) | Optional |
 | Redis | Response caching (`bibr serve` mode) | Optional |
@@ -492,7 +495,7 @@ Key settings:
 | `LLM_REASONING_EFFORT` | Default reasoning effort for OpenAI models | `minimal` |
 | `LLM_REASONING_EFFORT_AUTHORS` | Reasoning effort override for author extraction | `low` |
 | `LLM_REASONING_EFFORT_CITATIONS` | Reasoning effort override for citation resolution | `low` |
-| `OCR_BACKEND` | OCR runtime selector/backend | `paddle` |
+| `OCR_BACKEND` | OCR runtime selector/backend | `paddle` (a fast run with no OCR setting uses `text-layer`) |
 | `OCR_BASE_URL` | Base URL for an external HTTP OCR server | `http://localhost:8080` |
 | `CROSSREF_ENRICH` | Enable Crossref/resolver reference enrichment (per-run override: `--crossref`/`--no-crossref`, `chew(crossref=...)`, serve `crossref` field) | `false` |
 | `EQUATION_EXTRACTION` | Enable equation extraction | `true` |

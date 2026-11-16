@@ -8,19 +8,21 @@ page-layout: full
 toc: true
 ---
 
-This notebook demonstrates how to read and work with bibr's v11 JSON exports
+This notebook demonstrates how to read and work with bibr's v12 JSON exports
 in R. bibr outputs structured JSON — this is the integration format for
 downstream R tools like [Metacheck](https://github.com/scienceverse/metacheck).
 
 **Prerequisites:**
 
 - A JSON export from bibr (a `.json` file)
-- R packages: `jsonlite`, `dplyr`
+- R packages: `jsonlite`, `dplyr` (and `reticulate` for Section 1)
+- A clone of the bibr repository: the notebook reads its R helper from
+  `../scripts/read_json_response.R`, so run it from the `notebooks/` folder
 
 To generate an export, run bibr from the command line:
 
 ```bash
-uv run bibr chew paper.pdf -o result.json
+bibr chew paper.pdf -o result.json      # or: uv run bibr chew ... in a project
 ```
 
 …or use the Python library or REST API (see companion notebooks).
@@ -43,8 +45,9 @@ from R using reticulate. Otherwise, skip to Section 2 and provide your own
 ```{r}
 library(reticulate)
 
-# Use the project's virtual environment (created by `uv sync`)
-use_virtualenv("../.venv", required = TRUE)
+# A source checkout's virtual environment (created by `uv sync`) when there is
+# one; otherwise reticulate's own Python, which must have bibr installed.
+if (dir.exists("../.venv")) use_virtualenv("../.venv", required = TRUE)
 
 bibr <- import("bibr")
 FILE_PATH <- Sys.getenv("PAPER_PATH", "paper.pdf")
@@ -82,7 +85,7 @@ read_bibr <- read_bibr_json
 
 ```{r}
 result <- read_bibr(JSON_PATH)
-cat("bibr version:", result$extraction$bibr_version, "\n")
+cat("bibr version:", result$extraction$producer$version, "\n")
 cat("Tables:      ", paste(names(result), collapse = ", "), "\n")
 ```
 

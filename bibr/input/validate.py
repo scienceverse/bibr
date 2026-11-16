@@ -19,6 +19,7 @@ from bibr.input.supported_files import (
     SUPPORTED_EXTENSIONS,
     UNSUPPORTED_EXTENSIONS,
     SupportedFileType,
+    UnsupportedFileType,
 )
 
 logger = logging.getLogger(__name__)
@@ -415,7 +416,11 @@ def validate_input_file(
 
     # Fail fast for known-unsupported types
     if extension in UNSUPPORTED_EXTENSIONS:
-        raise InputValidationError(f"File type '{extension}' is explicitly unsupported")
+        formats = ", ".join(file_type.value for file_type in SupportedFileType)
+        hint = " (save it as .docx)" if extension == UnsupportedFileType.DOC else ""
+        raise InputValidationError(
+            f"File type '{extension}' is explicitly unsupported{hint}; bibr reads {formats} files"
+        )
 
     # Check extension support
     input_file.is_supported = extension in SUPPORTED_EXTENSIONS

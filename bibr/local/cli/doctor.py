@@ -1,5 +1,7 @@
 """``bibr doctor`` — validate the local setup and environment."""
 
+import logging
+import re
 import sys
 
 from bibr.exceptions import ConfigurationError
@@ -723,15 +725,38 @@ def _check_llm_connection(settings, console, ok, fail) -> None:
     from bibr.clients.llm import ping_llm
     from bibr.config import snapshot_settings
 
+    # The client's retry logger repeats the provider's raw error body for each
+    # attempt; the one line below is the report.
+    retry_log = logging.getLogger("instructor")
+    retry_level = retry_log.level
+    retry_log.setLevel(logging.CRITICAL)
     try:
         with console.status(f"  [dim]contacting {settings.llm.provider}…[/dim]"):
             ping_llm(snapshot_settings(settings))
         ok("LLM connection OK")
     except Exception as e:
         fail(
-            f"LLM connection failed: {_redact_llm_keys(str(e), settings)}",
+            f"LLM connection failed: {_provider_message(_redact_llm_keys(str(e), settings))}",
             hint=_llm_connection_hint(settings),
         )
+    finally:
+        retry_log.setLevel(retry_level)
+
+
+_ERROR_BODY_MESSAGE = re.compile(r"""['"]message['"]:\s*(['"])(?P<message>.+?)\1\s*[,}]""")
+
+
+def _provider_message(text: str) -> str:
+    """The provider's own sentence from an SDK error that quotes the whole response body.
+
+    ``400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'API key not valid…', …}}``
+    becomes ``400 INVALID_ARGUMENT: API key not valid…``; anything else is returned as it is.
+    """
+    found = _ERROR_BODY_MESSAGE.search(text)
+    if found is None:
+        return text
+    head = text[: text.find("{")].strip(" .:") if "{" in text else ""
+    return f"{head}: {found['message']}" if head else found["message"]
 
 
 def _check_redis(ok, warn) -> None:
@@ -745,9 +770,9 @@ def _check_redis(ok, warn) -> None:
         elif redis_url:
             warn("Redis: configured (no password)", hint="Set REDIS_PASSWORD for production")
         else:
-            warn("Redis: not configured", hint="Only needed for bibr serve with caching")
+            ok("Redis: not configured (only the bibr serve cache uses it)")
     except Exception:
-        warn("Redis: not configured", hint="Only needed for bibr serve with caching")
+        ok("Redis: not configured (only the bibr serve cache uses it)")
 
 
 def _check_run_mode(settings, backend_setting: str, ok, fail) -> str | None:
@@ -831,9 +856,10 @@ def _run_doctor() -> None:
     elif env_files := bibr.config.dotenv_files_present():
         ok(".env: " + ", ".join(str(path) for path in env_files))
     else:
-        warn(
-            "No .env file found; settings come from the environment and defaults",
-            hint="Run bibr setup, or bibr config example > .env and edit it",
+        # Not a warning: bibr runs on its defaults, and nothing is missing.
+        ok(
+            "No .env file: settings come from the environment and bibr's defaults "
+            "(bibr setup writes one)"
         )
 
     # Settings validity — a bad .env value would otherwise crash every check

@@ -4,6 +4,9 @@ Use `chew()` to extract a paper or a batch, and `Chewer` to reuse a pipeline
 across calls. `import bibr` stays light: pipeline stages and their ML
 dependencies are loaded lazily.
 
+In Jupyter, or anywhere else an event loop is already running, call
+`await bibr.achew(...)` instead of `bibr.chew(...)` (see [Async](#async)).
+
 ## One file
 
 ```python
@@ -16,12 +19,37 @@ result.references        # list of dicts (alias for the schema's "bib" table)
 result.save("paper.json")
 ```
 
+## Fast mode and the text layer
+
+With nothing configured, `chew()` runs in fast mode: local models only, no LLM
+call and no API key. A PDF is read from its own text layer, so no OCR model,
+GPU or OCR server is needed (the export records this as
+`extraction.ocr.backend == "text-layer"`). That works for born-digital PDFs.
+A scanned PDF has no usable text layer and fails with the error code
+`scan_needs_ocr` until you choose an OCR backend with `ocr=` or `ocr_url=`
+(see [Errors](#errors)).
+
+An LLM key already set in the environment (`GOOGLE_API_KEY`, or the `LLM_*`
+settings that `bibr setup` writes) makes the default full mode, which also
+asks the LLM. Pass `mode="fast"` to pin fast mode whatever is configured, or
+`mode="full"` to require the LLM. `ocr="text-layer"` reads the text layer in
+either mode. `bibr setup` is optional: it adds an LLM, an OCR backend or both.
+
+```python
+result = bibr.chew("paper.pdf", mode="fast")
+result.extraction["ocr"]["backend"]    # "text-layer"
+```
+
+## What a Result holds
+
 `chew()` returns a `Result`, an attribute-based view over the export dict
 with a validated v12 `PaperExport` model available as `result.model`.
 Table-shaped keys (`author`, `affiliation`, `funding`, `text`, `section`,
-`url`, `bib`, `xref`, `figure`, `table`, `eq`, `metadata_match`, `bib_match`)
-come back as `Records`, a `list` subclass
-with a `.df` convenience property for pandas:
+`url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`, `metadata_match`,
+`affiliation_match`, `funding_match`, `bib_match`) come back as `Records`, a
+`list` of row dicts with a `.df` convenience property for pandas. Its
+`repr()` is one line (the row count and the column names), and Jupyter shows
+the rows as a table:
 
 ```python
 result.references.df    # bib rows as a pandas DataFrame
@@ -30,11 +58,19 @@ result.data              # the raw export dict backing the Result
 result.model.metadata.title  # typed Pydantic model access
 ```
 
-`references`, `authors`, and `sections` are friendly aliases for the
-schema's `bib`, `author`, and `section` tables; `metadata` fields (`title`,
-`doi`, …), `source` fields (`file_name`, `sha256`, `input_format`), and
-remaining top-level keys (`paper_id`, `extraction`, …) resolve as attributes
-too.
+The friendly aliases are `references` (`bib`), `authors` (`author`),
+`affiliations` (`affiliation`), `sections` (`section`), `footnotes`
+(`footnote`), `figures` (`figure`), `tables` (`table`), `urls` (`url`) and
+`equations` (`eq`). `result.text` is the sentence table, one row per sentence
+of the body, not the paper as one string. `metadata` fields (`title`, `doi`,
+…), `source` fields (`file_name`, `sha256`, `input_format`), and remaining
+top-level keys (`paper_id`, `extraction`, …) resolve as attributes too.
+
+`result.paper_id` is the input file's name without its extension
+(`paper.pdf` gives `paper`), as in `bibr chew` and `bibr batch`, unless you
+pass `paper_id=`. bibr serve gives a paper the first 16 characters of its
+SHA-256 instead (see the [REST API](../reference/rest-api.md#post-papersextract)), so
+join results from the two by `source.sha256`, not by `paper_id`.
 
 `bibr.Result(data)` also wraps a saved export dict, such as
 `json.loads(Path("paper.json").read_text())`. It accepts an export from any
@@ -78,7 +114,7 @@ For a list input, results keep the input order. For a directory input,
 files are processed in sorted order and anything that isn't
 {{ supported_extensions }} is skipped. An empty list returns `[]`; a directory
 with no supported files raises `ValueError`. Single-file failures
-raise an exception instead of returning `ChewFailure`.
+raise an exception instead of returning `ChewFailure` (see [Errors](#errors)).
 
 For a fixed return type, use `chew_file()` and `chew_many()`:
 
@@ -127,12 +163,13 @@ chew` CLI flags:
 
 | Option | CLI equivalent | Description |
 |---|---|---|
-| `ocr` | `--ocr` | OCR backend, e.g. `"paddle"` (default selector), `"paddle-http"`, `"paddle-vllm"`, or an explicit `"glm-*"` compatibility backend |
+| `mode` | `--fast` / `--full` | `"fast"`: local models only, no LLM call and no key; `"full"`: the configured LLM too (raises when none is configured); `"auto"` / omitted: `PIPELINE_MODE`, which is fast when no LLM is configured |
+| `ocr` | `--ocr` | OCR backend: `"text-layer"` (the PDF's own text, no OCR model; what a fast run uses when no OCR backend is set), `"paddle"` (picks a local PaddleOCR-VL or GLM-OCR runtime, see [OCR runtime selection](#ocr-runtime-selection-and-diagnostics)), `"paddle-http"`, `"paddle-vllm"`, an explicit `"glm-*"` backend, or a cloud vision backend (`"gemini"`, `"openai"`, `"anthropic"`). An unknown name raises `InvalidOptionError` at once |
 | `llm` | `--llm` | LLM backend: `"cloud"`, or a managed local server (`"local"`, `"vllm"`, `"vllm-mlx"`, `"rapid-mlx"`, `"llama-cpp"`, `"llmster"`) |
 | `memory` | `--memory` | Memory mode: `"aggressive"`, `"balanced"`, `"keep_all"` (default: selected from hardware) |
 | `refs` | `--refs` | Reference parser: `"ner"` (default), `"llm"` (batched LLM), `"llm-chunked"` (region-aligned chunk parsing), `"ref-llm"` (dedicated fine-tuned parser), or `"off"` / `False` to skip references |
 | `ref_seg` | `--ref-seg` | Reference segmentation strategy: `"geom"` (default), `"region"`, `"llm"`, `"crf"` |
-| `no_llm` | `--no-llm` | Skip metadata LLM calls, equation extraction, citation linking, and Crossref; native metadata survives. OCR still uses the selected backend |
+| `no_llm` | `--no-llm` | Structure only: no LLM call, and no authors or references for a PDF or DOCX; equation extraction, citation linking and Crossref are off too. A PDF still needs an OCR backend. To avoid the LLM and keep the metadata, use `mode="fast"` |
 | `device` | `--device` | Force compute device: `"cuda"`, `"mps"`, `"cpu"` |
 | `crossref` | `--crossref` / `--no-crossref` | Tri-state: `True` runs Crossref/resolver reference enrichment for this call, `False` skips it, omitted/`None` follows `CROSSREF_ENRICH` (off by default) |
 | `equations` | `--no-equations` (inverted) | Enable/disable equation extraction |
@@ -149,8 +186,13 @@ chew` CLI flags:
 | `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI (a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one); `False` forces it off |
 | `settings` | `.env` / environment | A `GlobalSettings` instance copied into the pipeline at construction |
 
+`ocr_backend`, `llm_backend` and `memory_mode` are accepted as other names for
+`ocr`, `llm` and `memory`. An option name `chew()` does not know raises
+`TypeError` listing the valid ones; a value it does not accept (`refs="x"`,
+`mode="fastest"`) raises `InvalidOptionError`, also a `ValueError`.
+
 ```python
-result = bibr.chew("paper.pdf", ocr="paddle", refs="off", pages="1-5")
+result = bibr.chew("paper.pdf", refs="off", pages="1-5")
 ```
 
 `refs="off"` is equivalent to `bibr chew paper.pdf --refs off`. It keeps
@@ -279,18 +321,20 @@ models) every time. For repeated calls over time — notebooks, queue workers
 — `Chewer` keeps a pipeline warm across calls instead:
 
 ```python
-with bibr.Chewer(ocr="paddle") as chewer:
+with bibr.Chewer() as chewer:
     r1 = chewer.chew("a.pdf")
     r2 = chewer.chew("b.pdf")   # reuses the pipeline and retained models
 ```
 
-`Chewer` takes the same options as `chew()`, except `paper_id` and
-`batch_size`, which move to `.chew()` / `.achew()` per call. The pipeline is
-built lazily on the first call and released on `close()` / context exit; you
-can also manage it explicitly:
+`Chewer` takes the same options as `chew()`, but fixes them when you create it:
+every call uses them, `pages` included (`chewer.chew("a.pdf", pages="1-2")`
+raises `TypeError`). The only per-call arguments are `paper_id` and
+`batch_size` (and `progress`). Create another `Chewer` for other options. The
+pipeline is built lazily on the first call and released on `close()` /
+context exit; you can also manage it explicitly:
 
 ```python
-chewer = bibr.Chewer(ocr="paddle")
+chewer = bibr.Chewer(refs="off")
 try:
     r1 = chewer.chew("a.pdf")
     r2 = chewer.chew("b.pdf")
@@ -324,10 +368,62 @@ result = await bibr.achew("paper.pdf")
 input (`await bibr.achew(["a.pdf", "b.pdf"])`) and per-call `paper_id` /
 `batch_size`.
 
-### OCR runtime selection and diagnostics
+## Errors
 
-`ocr="paddle"` is the default automatic selector. It chooses one runtime at
-startup. Linux x86_64 tries `paddle-vllm` when an NVIDIA GPU with at least
+A single-file call raises; in a batch the same failures become `ChewFailure`
+slots with the same `error_code`. Every bibr exception is a `bibr.BibrError`,
+and the ones you are most likely to catch are importable from `bibr`:
+
+| Exception | Raised when | Also a |
+|---|---|---|
+| `bibr.InputFileNotFoundError` | the path does not exist (`error_code` `"file_not_found"`), before any model loads | `InputValidationError`, `FileNotFoundError` |
+| `bibr.InputValidationError` | the file is refused as input, such as a legacy `.doc` (`error_code` `"invalid_input"`) | |
+| `bibr.ProcessingError` | the file could not be processed; `error_code` says why, `failed_stage` where | |
+| `bibr.InvalidOptionError` | an option value is not accepted, such as an unknown `ocr=` backend, before any model loads | `ConfigurationError`, `ValueError` |
+| `bibr.ConfigurationError` | a setting in `.env` or the environment is invalid, or a local LLM backend cannot start | |
+| `bibr.UpstreamServiceError` | an OCR server, LLM or other service the run needs failed | |
+
+`ProcessingError.error_code` values you can act on:
+
+| `error_code` | Meaning |
+|---|---|
+| `unsupported_format` | Not a file type bibr reads ({{ supported_extensions }}), or content that does not match its extension |
+| `corrupted_file` | The file could not be read |
+| `encrypted_file` | The PDF is password-protected |
+| `scan_needs_ocr` | A scanned PDF (no usable text layer) in a run without an OCR backend: pass `ocr=` or `ocr_url=` |
+| `ocr_failed`, `ocr_mostly_failed` | The OCR backend failed, or returned too little text |
+| `chunk_error` | The pipeline crashed on this file (batch slots only) |
+
+Other codes name the stage that failed (`layout_failed`, `parse_failed`,
+`export_failed`, …). `ProcessingError.outage` (and `ChewFailure.outage`) is
+`True` when a service or model the run needs was down: the same file may well
+succeed later.
+
+```python
+import bibr
+
+try:
+    result = bibr.chew("paper.pdf")
+except FileNotFoundError as e:
+    print("no such file:", e.filename)
+except bibr.ProcessingError as e:
+    if e.error_code == "scan_needs_ocr":
+        print("a scanned PDF: pass an OCR backend, e.g. ocr='anthropic'")
+    else:
+        print(f"failed at {e.failed_stage}: {e}")
+```
+
+These expected errors log no traceback. bibr logs to the `bibr` logger and adds
+no handler of its own beyond a `NullHandler`, so a script or notebook that
+configures no logging prints nothing extra; the notes a run records are in
+`result.extraction["warnings"]`. To see bibr's log, configure logging, for
+example `logging.basicConfig(level=logging.INFO)`.
+
+## OCR runtime selection and diagnostics
+
+`ocr="paddle"` asks for a local OCR model and lets bibr pick the runtime. It
+is what a full run uses when no OCR backend is set; a fast run reads the text
+layer instead. It chooses one runtime at startup. Linux x86_64 tries `paddle-vllm` when an NVIDIA GPU with at least
 8 GB VRAM is detected, followed by `glm-llama`; other Linux machines go
 directly to `glm-llama`. Apple Silicon tries `paddle-rapid-mlx`,
 `paddle-mlx-vlm`, `glm-rapid-mlx`, then `glm-llama`.

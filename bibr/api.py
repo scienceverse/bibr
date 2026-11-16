@@ -4,7 +4,7 @@
 
     import bibr
 
-    result = bibr.chew("paper.pdf", ocr="glm")
+    result = bibr.chew("paper.pdf")
     result.title             # from the metadata block
     result.references        # list of dicts (alias for the schema's "bib")
     result.references.df     # the same rows as a pandas DataFrame
@@ -21,7 +21,7 @@ a batch on one pipeline (models load once) and return an order-aligned
 For repeated calls over time (notebooks, queue workers), :class:`Chewer`
 keeps the pipeline warm across calls instead of reloading models each time::
 
-    with bibr.Chewer(ocr="glm-rapid-mlx") as chewer:
+    with bibr.Chewer() as chewer:
         r1 = chewer.chew("a.pdf")
         r2 = chewer.chew("b.pdf")
 """
@@ -82,6 +82,9 @@ _TABLE_KEYS = (
     "funding_match",
     "bib_match",
 )
+
+# Column names a Records repr lists before it counts the rest.
+_REPR_COLUMNS = 8
 
 # Friendly attribute → schema key.
 _ALIASES = {
@@ -150,13 +153,46 @@ class ChewOptions(TypedDict, total=False):
 
 
 class Records(list):
-    """A list of row dicts with a ``.df`` pandas convenience view."""
+    """The rows of one export table: a list of dicts with a ``.df`` pandas view.
+
+    Index and iterate it like any list (``records[0]["title"]``,
+    ``list(records)``). Its ``repr()`` is a one-line summary, the row count and
+    the column names, so a notebook cell ending in ``result.references`` does not
+    print every row; Jupyter shows the rows as a table instead.
+    """
 
     @property
     def df(self) -> pd.DataFrame:
+        """The rows as a pandas DataFrame: one row per dict, one column per key."""
         import pandas as pd
 
         return pd.DataFrame(list(self))
+
+    def _columns(self) -> list[str]:
+        columns: dict[str, None] = {}
+        for row in self:
+            if isinstance(row, Mapping):
+                columns.update(dict.fromkeys(str(key) for key in row))
+        return list(columns)
+
+    def __repr__(self) -> str:
+        n = len(self)
+        rows = f"{n} row" if n == 1 else f"{n} rows"
+        columns = self._columns()
+        if not columns:
+            return f"<bibr.Records: {rows}>"
+        shown = ", ".join(columns[:_REPR_COLUMNS])
+        if len(columns) > _REPR_COLUMNS:
+            shown += f", … (+{len(columns) - _REPR_COLUMNS})"
+        return f"<bibr.Records: {rows} × {len(columns)} columns: {shown}>"
+
+    def _repr_html_(self) -> str | None:
+        """Jupyter's table view of the rows (pandas' HTML)."""
+        try:
+            html = getattr(self.df, "_repr_html_")()  # noqa: B009 — not in the pandas stubs
+        except ImportError:
+            return None
+        return None if html is None else str(html)
 
 
 class ChewFailure:
@@ -363,7 +399,7 @@ def _pipeline_kwargs(options: Mapping[str, Any]) -> dict[str, Any]:
             if value is None:
                 continue
             if value not in ("geom", "region", "llm", "crf"):
-                raise ValueError(
+                raise _invalid_option(
                     f"ref_seg must be 'geom', 'region', 'llm', or 'crf', got {value!r}"
                 )
             kwargs["ref_seg_strategy"] = value
@@ -378,14 +414,16 @@ def _pipeline_kwargs(options: Mapping[str, Any]) -> dict[str, Any]:
             elif value is None:
                 continue
             if value not in ("off", "fill", "replace"):
-                raise ValueError(f"consolidate must be a bool, 'fill' or 'replace', got {value!r}")
+                raise _invalid_option(
+                    f"consolidate must be a bool, 'fill' or 'replace', got {value!r}"
+                )
             kwargs["consolidate"] = value
             continue
         if name == "mode":
             # "fast" makes no LLM call and needs no key, "full" uses the configured
             # LLM, "auto"/None (PIPELINE_MODE) is fast when none is configured.
             if value not in (None, "auto", "fast", "full"):
-                raise ValueError(f"mode must be 'auto', 'fast' or 'full', got {value!r}")
+                raise _invalid_option(f"mode must be 'auto', 'fast' or 'full', got {value!r}")
             if value is not None:
                 kwargs["mode"] = value
             continue
@@ -398,8 +436,20 @@ def _pipeline_kwargs(options: Mapping[str, Any]) -> dict[str, Any]:
                 )
             )
             raise TypeError(f"unknown chew() option {name!r}; valid options: {valid}")
+        if arg == "ocr_backend":
+            # A misspelt backend used to fail only when the OCR stage started,
+            # after the layout models had loaded, with a logged traceback.
+            from bibr.ocr.registry import check_backend_request
+
+            check_backend_request(value, option=name)
         kwargs[arg] = value
     return kwargs
+
+
+def _invalid_option(message: str) -> Exception:
+    from bibr.exceptions import InvalidOptionError
+
+    return InvalidOptionError(message)
 
 
 def _collect_batch(path: Any) -> list[Path] | None:
@@ -466,11 +516,30 @@ async def _release_heap_after_chunk(pipeline: Any) -> None:
     await trim_after_chunk(getattr(pipeline, "settings", None))
 
 
+def _require_input(path: object) -> None:
+    """Refuse a single input path that does not exist, before any model loads."""
+    if isinstance(path, str | Path) and not Path(path).exists():
+        from bibr.exceptions import InputFileNotFoundError
+
+        raise InputFileNotFoundError(path)
+
+
+def _library_wording(message: str, error_code: str | None) -> str:
+    """A scanned-PDF refusal with the library's option names in place of CLI flags."""
+    if error_code != "scan_needs_ocr":
+        return message
+    from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES, SCAN_NEEDS_OCR_ROUTES_LIBRARY
+
+    return message.replace(SCAN_NEEDS_OCR_ROUTES, SCAN_NEEDS_OCR_ROUTES_LIBRARY)
+
+
 async def _process_batch(
     pipeline: Any,
     files: list[Path],
     batch_size: int | None,
     progress: ProgressTracker | None = None,
+    *,
+    library_wording: bool = True,
 ) -> list[Result | ChewFailure]:
     """Run *files* through one pipeline in chunks; order-aligned results.
 
@@ -549,7 +618,9 @@ async def _process_batch(
             results.append(
                 ChewFailure(
                     path=fs.path,
-                    error=fs.error,
+                    error=_library_wording(fs.error, fs.error_code)
+                    if library_wording
+                    else fs.error,
                     error_code=fs.error_code,
                     failed_stage=fs.failed_stage,
                     outage=fs.error_outage or is_service_outage(fs.original_error),
@@ -567,17 +638,32 @@ async def _chew_on(
     paper_id: str | None = None,
     batch_size: int | None = None,
     progress: ProgressTracker | None = None,
+    library_wording: bool = True,
 ) -> Result | list[Result | ChewFailure]:
-    """chew() path semantics (single vs batch) on an already-built pipeline."""
+    """chew() path semantics (single vs batch) on an already-built pipeline.
+
+    ``library_wording`` puts the library's option names (``ocr="..."``) in place
+    of the command-line flags in a scanned PDF's refusal; ``bibr batch`` turns it off.
+    """
     batch = _collect_batch(path)
     if batch is not None and paper_id is not None:
         raise TypeError("paper_id only applies to single-file calls")
     if batch is not None and not batch:
         return []
     if batch is None:
-        data = await pipeline.process_file(path, paper_id=paper_id, progress=progress)
+        _require_input(path)
+        from bibr.exceptions import ProcessingError
+
+        try:
+            data = await pipeline.process_file(path, paper_id=paper_id, progress=progress)
+        except ProcessingError as exc:
+            if library_wording and exc.args:
+                exc.args = (_library_wording(str(exc.args[0]), exc.error_code), *exc.args[1:])
+            raise
         return Result(data)
-    return await _process_batch(pipeline, batch, batch_size, progress)
+    return await _process_batch(
+        pipeline, batch, batch_size, progress, library_wording=library_wording
+    )
 
 
 def _llm_only_options(pipeline_kwargs: Mapping[str, Any]) -> list[str]:
@@ -662,7 +748,7 @@ def _refs_kwargs(refs: str | bool | None) -> dict[str, Any]:
     if refs is False:
         refs = "off"
     if refs not in ("ner", "llm", "llm-chunked", "ref-llm", "off"):
-        raise ValueError(
+        raise _invalid_option(
             f"refs must be 'ner', 'llm', 'llm-chunked', 'ref-llm', or 'off', got {refs!r}"
         )
     return {"ref_parse_strategy": refs}
@@ -684,6 +770,8 @@ async def achew(
     if batch is not None and not batch:
         return []
     kwargs = {**_pipeline_kwargs(options), **_refs_kwargs(refs)}
+    if batch is None:
+        _require_input(path)
 
     from bibr.local.pipeline import LocalPipeline
 
@@ -706,7 +794,7 @@ class Chewer:
 
     .. code-block:: python
 
-        with bibr.Chewer(ocr="glm-rapid-mlx") as chewer:
+        with bibr.Chewer() as chewer:
             r1 = chewer.chew("a.pdf")
             r2 = chewer.chew("b.pdf")
 
@@ -740,6 +828,8 @@ class Chewer:
         self._runner: asyncio.Runner | None = None
         self._loop_lock = threading.Lock()
         self._closed = False
+        # ``bibr batch`` sets False: its failures are read on the command line.
+        self._library_wording = True
 
     def _ensure_pipeline(self) -> Any:
         if self._closed:
@@ -764,9 +854,16 @@ class Chewer:
         (e.g. ``RichProgress``) to observe stage transitions and per-region
         OCR progress; default is silent.
         """
+        if _collect_batch(path) is None:
+            _require_input(path)  # before a cold Chewer loads its models
         pipeline = self._ensure_pipeline()
         return await _chew_on(
-            pipeline, path, paper_id=paper_id, batch_size=batch_size, progress=progress
+            pipeline,
+            path,
+            paper_id=paper_id,
+            batch_size=batch_size,
+            progress=progress,
+            library_wording=self._library_wording,
         )
 
     async def achew_file(
@@ -935,7 +1032,9 @@ def chew(
     Directories and lists of paths run as a batch on one pipeline (models
     load once) and return an order-aligned ``list[Result | ChewFailure]``.
     Options mirror the ``bibr chew`` CLI flags / ``LocalPipeline`` arguments:
-    ``ocr`` (backend), ``llm`` (backend), ``memory`` (mode), ``refs``
+    ``ocr`` (backend; ``"text-layer"`` reads a PDF's own text and runs no OCR
+    model, a name no backend has raises :class:`~bibr.exceptions.InvalidOptionError`),
+    ``ocr_profile``, ``llm`` (backend), ``memory`` (mode), ``refs``
     (``"llm"``/``"ner"``/``"llm-chunked"``/``"ref-llm"``, or ``"off"``/``False`` to skip
     reference extraction entirely), ``ref_seg`` (segmentation strategy:
     ``"geom"``/``"region"``/``"llm"``/``"crf"``), ``no_llm`` (structure only),
@@ -946,11 +1045,17 @@ def chew(
     enrichment for this call, ``False`` skips it, ``None``/omitted follows
     the ``CROSSREF_ENRICH`` setting, which is off by default),
     ``equations``, ``pages`` (1-based, e.g. ``"1-5"``), ``figure_images``,
-    ``include_regions``, ``ocr_url``, ``ocr_model``, ``paper_id``
-    (single-file only), ``batch_size`` (files per chunk, batch only),
+    ``include_regions``, ``include_region_meta``, ``ocr_url``, ``ocr_model``,
+    ``paper_id`` (single-file only), ``batch_size`` (files per chunk, batch only),
     ``consolidate`` (``True``/``"fill"``/``"replace"`` — merge Crossref
     enrichment into bib rows before export; ``False`` forces it off even
     when the ``CROSSREF_CONSOLIDATE`` setting enables it).
+
+    A single path that does not exist raises
+    :class:`~bibr.exceptions.InputFileNotFoundError` (also a ``FileNotFoundError``);
+    a file bibr cannot process raises :class:`~bibr.exceptions.ProcessingError`
+    or :class:`~bibr.exceptions.InputValidationError`, each with an
+    ``error_code``. In a batch the same failures become :class:`ChewFailure` slots.
     """
     try:
         asyncio.get_running_loop()

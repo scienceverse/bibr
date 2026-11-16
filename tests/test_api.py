@@ -12,6 +12,18 @@ import bibr
 from bibr.api import Records, Result, _pipeline_kwargs
 
 
+@pytest.fixture(autouse=True)
+def _paper_in_cwd(tmp_path, monkeypatch):
+    """The PDFs these tests name, in the working directory: chew() refuses a path that does
+    not exist before it builds a pipeline, and these tests stub the pipeline.
+    Kept in a subdirectory, so a test that chews ``tmp_path`` sees only its files."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    for name in ("paper.pdf", "a.pdf", "b.pdf", "first.pdf", "second.pdf"):
+        (cwd / name).write_bytes(b"%PDF-1.4\n%%EOF")
+    monkeypatch.chdir(cwd)
+
+
 def _export_fixture() -> dict:
     return {
         "paper_id": "10.1234/example",

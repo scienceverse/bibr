@@ -88,7 +88,7 @@ def test_apply_runtime_settings_unknown_preset_exits():
 # ---- _write_chunk_results -------------------------------------------------
 
 
-def test_format_run_summary_shows_backend_model_and_profile():
+def test_format_run_summary_shows_mode_route_then_model_and_profile():
     from bibr.local.cli.process import _format_run_summary
     from bibr.local.cli.run_config import ResolvedRunConfig
 
@@ -102,9 +102,46 @@ def test_format_run_summary_shows_backend_model_and_profile():
         )
     )
 
-    assert "OCR backend:[/dim] paddle-http" in summary
-    assert "OCR model:[/dim] paddle-ocr-vl-1.6" in summary
-    assert "OCR profile:[/dim] paddle" in summary
+    mode_line, model_line = summary.splitlines()
+    assert "[dim]OCR[/dim] paddle-http" in mode_line
+    assert "mode[/dim] full" in mode_line
+    assert "[dim]llm[/dim] cloud" in mode_line
+    assert "[dim]memory[/dim] balanced" in mode_line
+    assert "OCR model[/dim] paddle-ocr-vl-1.6" in model_line
+    assert "profile[/dim] paddle" in model_line
+
+
+def test_format_run_summary_is_one_line_on_the_text_layer_route():
+    """No OCR model runs there, so there is no model/profile line to print."""
+    from bibr.local.cli.process import _format_run_summary
+    from bibr.local.cli.run_config import ResolvedRunConfig
+
+    summary = _format_run_summary(
+        ResolvedRunConfig(
+            ocr_backend="text-layer", mode="fast", memory_mode="balanced", llm_backend="cloud"
+        )
+    )
+
+    assert "\n" not in summary
+    assert "mode[/dim] fast" in summary
+    assert "local models only, no LLM call" in summary
+    assert "OCR[/dim] text-layer (no OCR model; reads the PDF's own text)" in summary
+    assert "profile" not in summary
+
+
+def test_format_run_summary_names_the_unresolved_model_at_startup():
+    from bibr.local.cli.process import _format_run_summary
+    from bibr.local.cli.run_config import ResolvedRunConfig
+
+    summary = _format_run_summary(
+        ResolvedRunConfig(
+            ocr_backend="paddle", mode="full", memory_mode="balanced", llm_backend="cloud"
+        )
+    )
+
+    assert "[dim]OCR[/dim] paddle (automatic)" in summary
+    assert "OCR model[/dim] resolved at startup" in summary
+    assert "profile[/dim] resolved at startup" in summary
 
 
 @pytest.mark.asyncio
@@ -144,9 +181,7 @@ async def test_run_process_reports_actual_ocr_identity_and_fallback(tmp_path, mo
     await _run_process(args)
 
     err = capsys.readouterr().err
-    assert "OCR backend: glm-rapid-mlx" in err
-    assert "OCR model: mlx-community/GLM-OCR-8bit" in err
-    assert "OCR profile: glm" in err
+    assert "OCR used glm-rapid-mlx · model mlx-community/GLM-OCR-8bit · profile glm" in err
     assert "Fallback reason: paddle-rapid-mlx: startup smoke failed" in err
 
 

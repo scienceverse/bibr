@@ -113,12 +113,17 @@ class RichProgress:
         Ordered stage names for this run.  If *None*, uses the full
         ``STAGES`` list.  Pass a filtered list when some stages are
         skipped (e.g. native input needs no OCR, no enrichment).
+    labels : dict[str, str] | None
+        Stage labels that differ from the defaults for this run (the
+        text-layer route reads the PDF's text in the ``ocr`` stage and runs
+        no OCR model, so calling it "OCR" would mislead).
     """
 
-    def __init__(self, stages: list[str] | None = None):
+    def __init__(self, stages: list[str] | None = None, labels: dict[str, str] | None = None):
         from rich.console import Console
 
         self._console = Console(stderr=True)
+        self._labels = dict(labels or {})
         self._stages = STAGES if stages is None else stages
         self._stage_index: dict[str, int] = {s: i for i, s in enumerate(self._stages)}
         self._total_stages = len(self._stages)
@@ -139,7 +144,7 @@ class RichProgress:
         if idx is None:
             return
         num = idx + 1
-        label = _stage_label(name)
+        label = self._labels.get(name) or _stage_label(name)
         suffix = f"  {detail}" if detail else ""
         self._console.print(f"  [dim]\\[{num}/{self._total_stages}][/dim] {label}...{suffix}")
         self._stage_start_time = time.monotonic()

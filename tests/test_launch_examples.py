@@ -23,7 +23,7 @@ def _no_request(*_args, **_kwargs):
 
 
 def _notebook_code(path: str):
-    notebook = json.loads((ROOT / path).read_text())
+    notebook = json.loads((ROOT / path).read_text(encoding="utf-8"))
     return ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
 
 
@@ -36,7 +36,7 @@ def _notebook_code(path: str):
     ],
 )
 def test_public_notebooks_have_no_saved_extractions(path):
-    notebook = json.loads((ROOT / path).read_text())
+    notebook = json.loads((ROOT / path).read_text(encoding="utf-8"))
     for cell in notebook["cells"]:
         if cell["cell_type"] == "code":
             assert not cell.get("outputs")
@@ -52,7 +52,7 @@ def test_platform_notebook_requires_key_before_client(monkeypatch):
         exec(_notebook_code("examples/platform/python_platform_demo.ipynb")[0], {})  # noqa: S102 - repository notebook under test
 
 
-def test_local_api_notebook_sends_bearer_and_reads_current_export(monkeypatch, tmp_path):
+def test_local_api_notebook_sends_bearer_and_reads_current_export(monkeypatch, tmp_path, capsys):
     paper = tmp_path / "paper.pdf"
     paper.write_bytes(b"synthetic upload")
     monkeypatch.setenv("PAPER_PATH", str(paper))
@@ -63,7 +63,8 @@ def test_local_api_notebook_sends_bearer_and_reads_current_export(monkeypatch, t
     export = {
         "paper_id": "synthetic",
         "metadata": {"title": "Example", "doi": None, "keywords": []},
-        "author": [{"given": "Ada", "family": "Example"}],
+        "author": [{"author_id": 1, "given": "Ada", "family": "Example"}],
+        "affiliation": [{"affiliation_id": 1, "text": "Example University", "author_ids": [1]}],
         "section": [{"section_id": 1, "header": "Methods", "section_type": "method"}],
         "bib": [{"bib_id": 1, "authors": "Example A", "year": 2026, "title": "Reference"}],
         "extraction": {
@@ -87,6 +88,8 @@ def test_local_api_notebook_sends_bearer_and_reads_current_export(monkeypatch, t
         # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
         exec(code, namespace)  # noqa: S102 - repository notebook with mocked HTTP
     assert namespace["data"] == export
+    # Affiliations are joined to their authors through author_ids.
+    assert "Ada Example — Example University" in capsys.readouterr().out
     assert len(requests) == 3
     assert all(
         kwargs["headers"] == {"Authorization": "Bearer synthetic-test-key"}

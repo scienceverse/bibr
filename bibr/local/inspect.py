@@ -35,6 +35,7 @@ from typing import Any
 # needs. cli.py is a light import (argparse/json/stdlib + a couple of lazy
 # in-function imports), so importing it here doesn't pull in heavy deps.
 from bibr.local.cli import _format_validation_line
+from bibr.local.cli.process import processing_notes, validation_issues, validation_subject
 from bibr.validation import payload_validation
 
 
@@ -219,7 +220,27 @@ def _validation_lines(data: dict) -> list[str]:
     line = _format_validation_line(data)
     if line is None:
         return ["  clean (0 errors, 0 warnings)"]
-    return [f"  {line.strip()}"]
+    lines = [f"  {line.strip()}"]
+    # Every finding, errors first: what it is about, what was found, and the
+    # code to look up or search for.
+    for issue in validation_issues(data):
+        glyph = "✗" if issue.get("severity") == "error" else "!"
+        subject = validation_subject(issue.get("code"))
+        about = f"{subject}: " if subject else ""
+        lines.append(
+            f"  {glyph} {about}{issue.get('message') or '?'}  [{issue.get('code') or '?'}]"
+        )
+    return lines
+
+
+def _processing_note_lines(data: dict) -> list[str]:
+    """``extraction.warnings`` (``ExtractionInfo.warnings``): what the run did
+    differently from the plain path — a fallback taken, a field recovered, what
+    fast mode left out."""
+    notes = processing_notes(data)
+    if not notes:
+        return ["  none"]
+    return [f"  · {note.get('message') or '?'}  [{note.get('code') or '?'}]" for note in notes]
 
 
 def _print_report(console, data: dict, source: str) -> None:
@@ -253,7 +274,12 @@ def _print_report(console, data: dict, source: str) -> None:
 
     console.print("[bold]Validation[/bold]")
     for line in _validation_lines(data):
-        console.print(line)
+        console.print(line, markup=False, soft_wrap=True)
+    console.print()
+
+    console.print("[bold]Processing notes[/bold]")
+    for line in _processing_note_lines(data):
+        console.print(line, markup=False, soft_wrap=True)
     console.print()
 
     console.print("[bold]LLM usage[/bold]")
@@ -270,6 +296,13 @@ def run_inspect(json_file: str) -> int:
     from rich.console import Console
 
     path = Path(json_file)
+    if path.is_dir():
+        print(
+            f"bibr inspect: {json_file} is a directory; name one export, "
+            f"for example {path / '<paper>.json'}",
+            file=sys.stderr,
+        )
+        return 1
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as e:

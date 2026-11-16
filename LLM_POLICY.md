@@ -13,8 +13,8 @@ control over how their papers are processed.
 bibr 🦫 was developed together with AI agentic tools and workflows. Still,
 it took me months to iteratively develop and manually validate as much of
 the pipeline as possible. Without these tools, building something of this
-scope on my own would probably have taken years—a real testament to the
-GROBID team.
+scope on my own would probably have taken years. GROBID's long-standing work
+set the bar bibr measures itself against.
 
 ## Extraction
 
@@ -31,10 +31,13 @@ Claude Haiku 5.5, is within a point of the 27B. These are development-set result
 [choosing an extraction model](docs/guides/extraction-models.md) has the
 numbers and their limits.
 
+- With nothing configured, bibr runs in fast mode and makes no LLM call: its
+  own local models read the paper. `--fast` keeps a run that way even when an
+  LLM is configured.
 - OCR and extraction models can run locally or through cloud providers.
-- `--no-llm` disables downstream LLM extraction, with reduced output. PDF OCR
-  is configured separately and may still use vision-language models or remote
-  services.
+- `--no-llm` is a structure-only run, with reduced output (no authors or
+  references for PDF and DOCX). PDF OCR is configured separately and may still
+  use vision-language models or remote services.
 
 See [configuration](docs/guides/configuration.md) for options,
 [evaluation guidance](docs/contributing/evaluation.md) for checking your own outputs, and
