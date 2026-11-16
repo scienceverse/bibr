@@ -3127,7 +3127,9 @@ class ReferenceExtractor:
     def _record_warning(self, code: WarningCode, message: str) -> None:
         """Log and persist a segmentation/parse fallback, recovery or loss so
         eval tooling can count it."""
-        logger.warning("Reference extraction warning %s: %s", code, message)
+        # INFO, not WARNING: the note is kept in the export (extraction.warnings),
+        # where the CLI summary, ``bibr inspect`` and the batch report count it.
+        logger.info("Reference extraction note %s: %s", code, message)
         # Also called from asyncio.to_thread workers (geom/CRF segmentation,
         # the NER parse); a single list.append is atomic under the GIL.
         # Mock(spec=PaperContents) doubles don't expose default_factory

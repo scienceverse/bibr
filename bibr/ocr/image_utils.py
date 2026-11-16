@@ -151,7 +151,10 @@ def iter_pdf_pages_with_index(
             # library API had no such gate.
             # Same guard the sibling renderer in ``bibr.ocr.utils`` already has.
             if start < 0 or start > end:
-                raise ValueError(f"Invalid page range: start={start}, end={end}, total={total}")
+                raise ValueError(
+                    f"Invalid page range: it starts at page {start + 1}, "
+                    f"and the document has {total}"
+                )
 
             for page_idx in range(start, end + 1):
                 page = doc[page_idx]

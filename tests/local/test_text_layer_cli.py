@@ -249,7 +249,7 @@ async def test_chew_falls_back_with_one_warning(tmp_path, monkeypatch, capsys, a
     assert "llama.cpp not installed" in printed
     assert "Alternatives" not in printed
     # The run summary names the backend the run will use, not paddle.
-    assert "text-layer (no OCR backend can start here)" in printed
+    assert "text-layer (no OCR backend can start here; reads the PDF's own text)" in printed
     assert "paddle (automatic" not in printed
 
 
@@ -266,7 +266,7 @@ async def test_chew_summary_comes_before_the_fallback_warning(tmp_path, monkeypa
         await _run_process(_build_parser().parse_args(["chew", str(pdf), "--no-llm"]))
 
     printed = capsys.readouterr().err
-    assert printed.index("text-layer (no OCR backend can start here)") < printed.index(
+    assert printed.index("text-layer (no OCR backend can start here;") < printed.index(
         "No OCR backend can start on this machine"
     )
 

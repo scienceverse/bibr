@@ -1,12 +1,12 @@
-"""Tests for validation-warning summaries in ``bibr chew`` run output.
+"""Tests for validation-review summaries in ``bibr chew`` run output.
 
 The export JSON carries a top-level ``validation = {"errors": int,
 "warnings": int, "issues": [...]}`` block (absent when the output-validation
 gate was skipped) plus ``extraction.warnings`` ``{code, message}`` objects
 (``processing_warnings`` strings before v11). After each file's
-✓ line, ``_write_chunk_results`` should print a dim one-liner summarizing any
-validation errors/warnings — and print nothing extra for a clean payload, so
-existing golden output for clean runs is unaffected. The batch summary
+✓ line, ``_write_chunk_results`` prints an indented dim one-liner ("2 errors
+and 3 warnings to review (title, authors)") — and nothing extra for a clean
+payload. The codes and messages are ``bibr inspect``'s job, not this line's. The batch summary
 additionally gains an aggregate "X files clean, Y with warnings, Z with
 errors" line, computed in ``_run_process`` (not ``_write_chunk_results``,
 whose ``(processed, errors)`` return signature other tests rely on).
@@ -23,7 +23,7 @@ def _printed(console: MagicMock) -> str:
     return "\n".join(str(c) for c in console.print.call_args_list)
 
 
-# --- per-file ⚠ line: absence on clean payloads ------------------------------
+# --- per-file review line: absence on clean payloads ------------------------------
 
 
 def test_no_validation_key_prints_nothing_extra(tmp_path):
@@ -48,7 +48,7 @@ def test_no_validation_key_prints_nothing_extra(tmp_path):
     assert processed == 1
     assert errors == 0
     printed = _printed(console)
-    assert "⚠" not in printed
+    assert "to review" not in printed
     assert "Done" in printed  # the existing ✓ line is still there
 
 
@@ -75,10 +75,10 @@ def test_validation_present_but_zero_counts_prints_nothing_extra(tmp_path):
         total_t0=0,
     )
 
-    assert "⚠" not in _printed(console)
+    assert "to review" not in _printed(console)
 
 
-# --- per-file ⚠ line: presence + formatting ----------------------------------
+# --- per-file review line: presence + formatting ----------------------------------
 
 
 def test_validation_errors_and_warnings_prints_summary_line(tmp_path):
@@ -119,24 +119,31 @@ def test_validation_errors_and_warnings_prints_summary_line(tmp_path):
     )
 
     printed = _printed(console)
-    assert "⚠ 2 validation errors, 3 warnings" in printed
-    assert "top: VAL_PLACEHOLDER: 2 placeholder token(s) leaked" in printed
+    assert "2 errors and 3 warnings to review (title)" in printed
+    # Codes and messages moved to `bibr inspect`; the summary line is counts and subjects.
+    assert "VAL_PLACEHOLDER" not in printed
+    assert "placeholder token" not in printed
+    # Errors earn a yellow ! under the ✓ line; the result went to stdout, so no file to inspect.
+    assert "[yellow]![/yellow]" in printed
+    assert "details: bibr inspect" not in printed
 
 
-def test_top_issues_sorted_highest_severity_first_max_two(tmp_path):
-    """Highest severity first, capped at two issues, even when the issues
-    list has warnings ordered before errors."""
+def test_subjects_follow_severity_order_and_stop_at_three(tmp_path):
+    """The parenthesised subjects list errors' subjects first, even when the
+    issues list orders warnings before errors, and names at most three."""
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "dirty.pdf")
     fs.result_json = {
         "validation": {
             "errors": 1,
-            "warnings": 2,
+            "warnings": 4,
             "issues": [
                 {"code": "VAL_TITLE_GENERIC", "severity": "warning", "message": "warn one"},
                 {"code": "VAL_XREF_ZERO", "severity": "warning", "message": "warn two"},
-                {"code": "VAL_PLACEHOLDER", "severity": "error", "message": "err one"},
+                {"code": "VAL_DOI_BAD", "severity": "warning", "message": "warn three"},
+                {"code": "VAL_ABSTRACT_SHORT", "severity": "warning", "message": "warn four"},
+                {"code": "VAL_AUTHOR_EMPTY", "severity": "error", "message": "err one"},
             ],
         }
     }
@@ -153,15 +160,15 @@ def test_top_issues_sorted_highest_severity_first_max_two(tmp_path):
     )
 
     printed = _printed(console)
-    # error-severity issue must be shown, and only 2 issues total shown.
-    assert "VAL_PLACEHOLDER: err one" in printed
-    assert printed.count("VAL_TITLE_GENERIC") + printed.count("VAL_XREF_ZERO") == 1
+    # The error's subject leads, three subjects are named, the rest are elided.
+    assert "1 error and 4 warnings to review (authors, title, in-text citations, ...)" in printed
+    assert "abstract" not in printed
 
 
-def test_processing_warnings_folded_into_warnings_count(tmp_path):
-    """``extraction.warnings`` entries add a ``+ K processing warnings``
-    suffix. v11 stopped mirroring gate findings there, so every entry is a
-    genuine processing warning and nothing is double-counted."""
+def test_processing_warnings_become_a_processing_notes_suffix(tmp_path):
+    """``extraction.warnings`` entries add a "· K processing notes" suffix.
+    v11 stopped mirroring gate findings there, so every entry is a genuine
+    processing note and nothing is double-counted."""
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "dirty.pdf")
@@ -195,11 +202,12 @@ def test_processing_warnings_folded_into_warnings_count(tmp_path):
     )
 
     printed = _printed(console)
-    assert "1 warnings + 1 processing warnings" in printed
+    assert "1 warning to review (title) · 1 processing note" in printed
+    assert "STATEMENT_LEXICAL_FALLBACK" not in printed
 
 
-def test_processing_warnings_absent_no_plus_suffix(tmp_path):
-    """No ``extraction.warnings`` -> no '+ K processing warnings' suffix."""
+def test_processing_warnings_absent_no_notes_suffix(tmp_path):
+    """No ``extraction.warnings`` -> no '· K processing notes' suffix."""
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "dirty.pdf")
@@ -224,14 +232,15 @@ def test_processing_warnings_absent_no_plus_suffix(tmp_path):
     )
 
     printed = _printed(console)
-    assert "processing warnings" not in printed
-    assert "⚠ 1 validation errors, 0 warnings" in printed
+    assert "processing note" not in printed
+    assert "1 error to review (equations)" in printed
+    assert "warnings to review" not in printed
 
 
-# --- per-file ⚠ line appears across all three write paths -------------------
+# --- per-file review line appears across the write paths -------------------
 
 
-def test_batch_write_path_prints_warning_line_after_file_line(tmp_path):
+def test_batch_write_path_prints_review_line_with_inspect_pointer(tmp_path):
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "dirty.pdf")
@@ -252,10 +261,13 @@ def test_batch_write_path_prints_warning_line_after_file_line(tmp_path):
 
     printed = _printed(console)
     assert "dirty.pdf" in printed
-    assert "⚠ 1 validation errors, 0 warnings" in printed
+    assert "1 error to review" in printed
+    # A result written to a file ends with the command that lists every finding.
+    assert f"details: bibr inspect {out_dir / 'dirty.json'}" in printed
+    assert printed.index("dirty.pdf") < printed.index("1 error to review")
 
 
-def test_single_output_file_write_path_prints_warning_line(tmp_path):
+def test_single_output_file_write_path_prints_review_line_with_inspect_pointer(tmp_path):
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "dirty.pdf")
@@ -275,12 +287,13 @@ def test_single_output_file_write_path_prints_warning_line(tmp_path):
 
     printed = _printed(console)
     assert "Wrote" in printed
-    assert "⚠ 1 validation errors, 0 warnings" in printed
+    assert "1 error to review" in printed
+    assert f"details: bibr inspect {out_file}" in printed
 
 
-def test_processing_error_file_never_prints_warning_line(tmp_path):
+def test_processing_error_file_never_prints_review_line(tmp_path):
     """A file that failed processing entirely (``fs.error`` set) has no
-    ``result_json`` — must not blow up and must not print a ⚠ line."""
+    ``result_json`` — must not blow up and must not print a review line."""
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "corrupt.pdf")
@@ -299,7 +312,7 @@ def test_processing_error_file_never_prints_warning_line(tmp_path):
 
     assert processed == 0
     assert errors == 1
-    assert "⚠" not in _printed(console)
+    assert "to review" not in _printed(console)
 
 
 # --- batch summary aggregate -------------------------------------------------
@@ -425,17 +438,19 @@ def test_non_dict_issue_entries_skipped_not_crashed():
     }
     line = _format_validation_line(payload)
     assert line is not None
-    assert "C1: m" in line
+    assert line.startswith("1 error to review")
     assert "not-a-dict" not in line
+    assert "?" not in line
 
 
-def test_issue_dicts_missing_keys_render_placeholders():
+def test_issue_dicts_missing_keys_do_not_render_placeholders():
     from bibr.local.cli import _format_validation_line
 
     payload = {"validation": {"errors": 1, "warnings": 0, "issues": [{}]}}
     line = _format_validation_line(payload)
     assert line is not None
-    assert "?: ?" in line
+    # No code means no known subject: the counts stand alone, with no placeholder.
+    assert line == "1 error to review"
     assert "None" not in line
 
 
@@ -451,7 +466,7 @@ def test_non_list_processing_warnings_ignored():
         }
         line = _format_validation_line(payload)
         assert line is not None
-        assert "processing warnings" not in line
+        assert "processing note" not in line
 
 
 def test_malformed_validation_block_does_not_crash_write_path(tmp_path):
@@ -479,4 +494,4 @@ def test_malformed_validation_block_does_not_crash_write_path(tmp_path):
 
     assert processed == 1
     assert errors == 0
-    assert "⚠" not in _printed(console)
+    assert "to review" not in _printed(console)

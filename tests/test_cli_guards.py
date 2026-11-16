@@ -380,7 +380,7 @@ async def test_a_run_with_no_key_and_no_flag_runs_fast_without_asking_for_one(
     assert kwargs["ocr_requested"] is False
     err = capsys.readouterr().err
     assert "mode fast" in err
-    assert "no LLM calls" in err
+    assert "local models only, no LLM call" in err
 
 
 async def test_fast_flag_runs_fast_even_with_a_key(tmp_path, first_run, monkeypatch):
@@ -438,10 +438,11 @@ async def test_no_llm_does_not_ask_for_a_key_and_stays_structure_only(tmp_path, 
     assert kwargs["mode"] == "full"
 
 
-async def test_the_ocr_check_comes_before_the_credential_check(
+async def test_a_full_run_missing_both_reports_the_credential_first_then_the_ocr_runtime(
     tmp_path, first_run, monkeypatch, capsys
 ):
-    """A machine that cannot OCR at all hears that before it is asked for a key."""
+    """A full run with no LLM credential and no OCR runtime hears about both,
+    the LLM first: the OCR runtime is a problem this user may never have."""
     from bibr.local.cli import _build_parser, _run_process
 
     monkeypatch.setattr(
@@ -453,10 +454,13 @@ async def test_the_ocr_check_comes_before_the_credential_check(
         await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--full"]))
 
     assert exc_info.value.code == 1
-    assert first_run == []
+    assert first_run == ["asked"]
+    assert _RecordingPipeline.built == []
     err = capsys.readouterr().err
+    assert "Google API key required" in err
+    assert "--fast" in err
     assert "No local OCR runtime" in err
-    assert "API key" not in err
+    assert err.index("API key") < err.index("No local OCR runtime")
 
 
 async def test_fast_refuses_an_llm_only_option_before_doing_anything(tmp_path, first_run, capsys):
@@ -517,8 +521,10 @@ async def test_a_fast_run_with_no_chosen_ocr_route_reads_the_text_layer_on_a_gpu
     await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
 
     err = capsys.readouterr().err
-    assert "OCR backend: text-layer" in err
     assert "mode fast" in err and "OCR text-layer" in err
+    # The text-layer route has no OCR model, so the preamble has no second "OCR model" line.
+    assert not any(line.strip().startswith("OCR model") for line in err.splitlines())
+    assert "profile" not in err
     assert "paddle-vllm" not in err
     built = _RecordingPipeline.built[0]
     assert built["ocr_backend"] == "text-layer"

@@ -10,12 +10,18 @@ def parse_pages(pages_str: str) -> tuple[int | None, int | None]:
     0/negative pages (a 0 would silently wrap to the *last* page via negative
     indexing downstream) and for reversed ranges.
     """
-    if "-" in pages_str:
-        parts = pages_str.split("-", 1)
-        start = int(parts[0])
-        end = int(parts[1])
-    else:
-        start = end = int(pages_str)
+    try:
+        if "-" in pages_str:
+            parts = pages_str.split("-", 1)
+            start = int(parts[0])
+            end = int(parts[1])
+        else:
+            start = end = int(pages_str)
+    except ValueError:
+        raise ValueError(
+            f"pages must be one page or a range, counted from 1 (like '3' or '1-5'), "
+            f"got '{pages_str}'"
+        ) from None
 
     if start < 1 or end < 1:
         raise ValueError(f"pages are 1-based, got '{pages_str}'")

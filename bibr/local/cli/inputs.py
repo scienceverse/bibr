@@ -1,9 +1,17 @@
 """Input file collection and output path resolution for the ``chew`` command."""
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+
+def sample_paper_path() -> Path:
+    """The synthetic one-page paper that ships with bibr (``bibr chew --sample``)."""
+    from importlib import resources
+
+    return Path(str(resources.files("bibr").joinpath("data", "sample_paper.pdf")))
 
 
 def _resolve_single_output_path(output_path: Path, paper_path: Path) -> Path:
@@ -80,14 +88,16 @@ def _collect_files(inputs: list[str]) -> tuple[list[Path], int]:
         if inp == "-":
             data = sys.stdin.buffer.read()
             suffix = _suffix_for_stdin_payload(data)
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp.write(data)
-            tmp_path = Path(tmp.name)
+            # A private directory, so the file can carry a fixed name: the
+            # export's paper_id and source.file_name come from it, and a
+            # random ``tmpq5tm9tt6`` there says nothing to whoever reads it.
+            tmp_dir = Path(tempfile.mkdtemp(prefix="bibr-stdin-"))
+            tmp_path = tmp_dir / f"stdin{suffix}"
+            tmp_path.write_bytes(data)
             files.append(tmp_path)
-            # Schedule deletion at interpreter exit so the temp file doesn't
-            # leak — ``delete=False`` was needed because the path has to
-            # outlive the ``with`` block, but nothing else cleans it up.
-            atexit.register(lambda p=tmp_path: p.unlink(missing_ok=True))  # type: ignore[misc]
+            # Removed at interpreter exit: the path has to outlive this
+            # function, and nothing else cleans it up.
+            atexit.register(lambda d=tmp_dir: shutil.rmtree(d, ignore_errors=True))  # type: ignore[misc]
             continue
 
         p = Path(inp)
@@ -152,6 +162,24 @@ def _collect_files(inputs: list[str]) -> tuple[list[Path], int]:
             )
         sys.exit(1)
 
+    # A file named outright is taken whatever its extension, and the pipeline
+    # refuses it at its first stage. When nothing else was named, say so here,
+    # before the run summary and any model download.
+    unsupported = [f for f in files if f.suffix.lower() not in supported_exts]
+    if unsupported and len(unsupported) == len(files):
+        from rich.console import Console
+        from rich.markup import escape
+
+        from bibr.local.cli import ui
+
+        names = ", ".join(f.name for f in unsupported)
+        ui.error(
+            Console(stderr=True),
+            f"Unsupported file format: {escape(names)}",
+            hint="bibr accepts .pdf, .docx, .xml (JATS), .html/.htm, and .epub files.",
+        )
+        sys.exit(1)
+
     if missing_paths:
         from rich.console import Console
         from rich.markup import escape
@@ -209,6 +237,14 @@ def _output_path_problem(raw: str | None, *, is_batch: bool) -> str | None:
     if raw is None:
         return None
     output_path = Path(raw)
+    if is_batch and output_path.suffix.lower() == ".json" and not output_path.is_dir():
+        # Only this suffix: a dotted directory name (``Qwen3.5-4B``) is fine,
+        # but ``-o result.json`` for a folder of papers made a directory of
+        # that name and filed the exports inside it.
+        return (
+            f"Cannot write output {raw!r}: several papers write one JSON file each, "
+            "so -o must name a directory (for example -o results/)"
+        )
     if is_batch or raw.endswith(("/", "\\")) or output_path.is_dir():
         directory = output_path
     else:
