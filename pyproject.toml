@@ -23,20 +23,16 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "html5lib>=1.1",
     "httpx[http2]>=0.28.1",
-    "google-genai>=1.0.0",
-    # Claude is the hosted recommendation of `bibr setup` (LLM_PROVIDER and
-    # OCR_BACKEND=anthropic). Below 1.0: see the batch extra.
-    "anthropic>=0.40.0,<1",
+    # Instructor is the structured-output layer for every LLM provider, local
+    # OpenAI-compatible servers included; its own dependency is the openai SDK.
+    # The Google and Anthropic SDKs are the `google` and `anthropic` extras
+    # (bibr/clients/sdk_extras.py).
     "instructor>=1.7.0",
-    "jsonref>=1.1.0", # instructor's Gemini provider imports it to map response models to GenAI tool schemas (default LLM path)
     "tenacity>=8.0.0", # validation-retry policy for the LLM client (imported directly)
     "pandas>=2.3.3",
     "pyarrow>=23.0.1", # Parquet corpus tables (bibr tables, bibr batch); >=23.0.1 fixes PYSEC-2026-113
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2", # fixes GHSA-4xgf-cpjx-pc3j secrets-dir symlink escape
-    "python-magic>=0.4.27; sys_platform != 'win32'",
-    "python-magic-bin>=0.4.14; sys_platform == 'win32'",
-    "python-multipart>=0.0.31", # fixes CVE-2026-53538/53539/53540 parser smuggling/DoS
     "rapidfuzz>=3.6.0",
     "rich>=13.0.0",
     "questionary>=2.1.0",
@@ -45,18 +41,15 @@ dependencies = [
     "pypdfium2>=4.30.0",
     "wordfreq>=3.0.0",
     "python-dotenv>=0.21.0",
-    "litserve>=0.2.16,<0.3",
-    "uvicorn[standard]>=0.30.0",
     "python-docx>=1.1.0",
     # The torch-free ML runtime. Every bibr-owned model is served through ONNX
     # Runtime with its own `tokenizers` tokenizer, resolved from the Hub cache;
-    # scikit-learn/joblib carry the geom sentence segmenter's model bundle.
+    # the two gradient-boosted models (geom segmenter, front-role classifier)
+    # are bibr-gbm/1 bundles read with numpy (bibr/utils/gbm_bundle.py).
     # The `torch` extra adds the PyTorch fallback and training parity.
     "onnxruntime>=1.19.0",  # also pulled in transitively by wtpsplit-lite
     "tokenizers>=0.21.0",
     "huggingface-hub>=0.26.0",
-    "scikit-learn>=1.9.0",
-    "joblib>=1.3.0",
 ]
 
 [project.urls]
@@ -102,7 +95,10 @@ dev = [
     "pre-commit>=4.0.0",
     "pip-audit>=2.7.0",
     "requests>=2.28.0", # evaluation scripts only
+    # scripts/export_gbm_bundle.py converts a trained joblib bundle to bibr-gbm/1,
+    # and the tests check the converted models against scikit-learn.
     "scikit-learn>=1.9.0",
+    "joblib>=1.3.0",
     "sklearn-crfsuite>=0.5.0",
     "fakeredis[lua]>=2.30.0", # RedisJobStore tests (Lua scripts need the lua extra)
     # torch.onnx.export needs the `onnx` package to write the graph, and the
@@ -166,12 +162,30 @@ torch = [
 # and `bibr setup` plan asks for, and it still means "the local PyTorch stack".
 ml = ["bibr[torch]"]
 demo = ["gradio>=6.15.0"]  # fixes CVE-2026-48545 shared-client cookie injection
-# Offline batch LLM layer (Anthropic Message Batches) — see bibr/clients/batch.py.
-# Message Batches is not exposed by Instructor, so we use the official SDK directly.
-# The same SDK serves LLM_PROVIDER=anthropic. Below 1.0: anthropic 1.x dropped
+# The `bibr serve` HTTP API: FastAPI under uvicorn, with python-multipart for the
+# upload routes. bibr runs its own inference worker (bibr/serve/worker.py), so no
+# serving framework sits between the routes and the pipeline.
+serve = [
+    "fastapi>=0.136.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.31",  # fixes CVE-2026-53538/53539/53540 parser smuggling/DoS
+]
+# Cloud provider SDKs. `bibr setup` installs the one the chosen provider needs,
+# and a run that needs a missing one stops before any work with the extra to
+# install (bibr/clients/sdk_extras.py).
+# google: LLM_PROVIDER=google, which a run without a .env uses, and the gemini
+# vision OCR backend. jsonref: Instructor's Gemini path imports it to map
+# response models to GenAI tool schemas.
+google = ["google-genai>=1.0.0", "jsonref>=1.1.0"]
+# anthropic: LLM_PROVIDER=anthropic and the anthropic vision OCR backend, the
+# hosted recommendation of `bibr setup`. Below 1.0: anthropic 1.x dropped
 # `temperature` from `messages.create` and moved to httpx2, and every call through
 # the Anthropic adapter failed (bibr/clients/providers/anthropic.py).
-batch = ["anthropic>=0.40.0,<1"]
+anthropic = ["anthropic>=0.40.0,<1"]
+# Offline batch LLM layer (Anthropic Message Batches) — see bibr/clients/batch.py.
+# Message Batches is not exposed by Instructor, so it uses the official SDK
+# directly: the anthropic extra, under the name existing installs ask for.
+batch = ["bibr[anthropic]"]
 # NOTE: onnxruntime-gpu and the core onnxruntime dep are separate packages that
 # write the same `onnxruntime/` directory, and when one install writes both,
 # either build can end up loaded. After `uv sync --extra gpu`, reinstall the GPU
@@ -191,7 +205,7 @@ local = [
 # MCP server (`bibr mcp`) — agent-facing extraction tools over stdio.
 # Floor matches the constraint-dependencies security floor below.
 mcp = ["mcp>=2.2.0,<3"]
-all = ["bibr[batch,cache,demo,mcp,torch]"]
+all = ["bibr[anthropic,batch,cache,demo,google,mcp,serve,torch]"]
 
 [project.scripts]
 bibr = "bibr.local.cli:main"
@@ -320,6 +334,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "network: marks tests that intentionally reach the network (they opt out of the socket guard)",
+    "real_cloud_sdks: tests of the cloud-SDK extra check itself (they opt out of the conftest stand-in)",
 ]
 
 [tool.coverage.run]
@@ -367,10 +382,8 @@ disable_error_code = ["assignment"]
 [[tool.mypy.overrides]]
 module = [
     "wtpsplit.*",
-    "litserve.*",
     "instructor.*",
     "cv2.*",
-    "magic",
     "pypdfium2.*",
     "pypdfium2_raw.*",
     "gradio.*",

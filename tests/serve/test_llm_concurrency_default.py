@@ -10,7 +10,7 @@ honored.
 
 import pytest
 
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 
 from bibr.serve.deployments.pipeline import (  # noqa: E402
     SERVE_DEFAULT_LLM_CONCURRENCY,

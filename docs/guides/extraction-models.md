@@ -223,7 +223,8 @@ resolver took a wrong span of the paper text as the abstract without any
 warning, a resolver bug that the previous revision hits too.
 
 The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
-`OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252
+`OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key, and the
+`anthropic` extra, which `bibr setup` installs with it. The 221/252
 above was measured with bibr's local OCR; Claude's OCR has not been scored on
 these papers yet, and the per-paper cost excludes it.
 
@@ -233,7 +234,8 @@ for llama.cpp and MLX. On the same papers it passes 200/252, −9.1 points
 
 Run `bibr setup --advanced` to choose another model, or set `LLM_LOCAL_MODEL`
 (local) or `LLM_PROVIDER` and `LLM_MODEL` (hosted) yourself; see
-[configuration](configuration.md).
+[configuration](configuration.md). A hosted Gemini or Claude model needs the
+`google` or `anthropic` extra.
 
 ## How close small models get to a large one
 

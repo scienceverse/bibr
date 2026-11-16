@@ -180,6 +180,8 @@ async def test_crossref_failure_warning_and_detail_omit_the_request_url():
 )
 def test_serve_error_body_names_no_url(exc_type, kind, prefix):
     from bibr import exceptions
+
+    pytest.importorskip("fastapi")  # the serve extra
     from bibr.serve.deployments.pipeline import BibrPipelineAPI
 
     message = f"OCR failed: Client error '400 Bad Request' for url '{_OCR_URL}'"

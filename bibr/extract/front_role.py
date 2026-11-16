@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The bundle's file stem: front_role.json + .npz (bibr-gbm/1), or the legacy
-# front_role.joblib (bibr.utils.gbm_bundle.load_gbm_bundle).
+# The bundle's file stem: front_role.json + .npz (bibr-gbm/1,
+# bibr.utils.gbm_bundle.load_gbm_bundle).
 _BUNDLE_STEM = "front_role"
 MODEL_KIND_FRONT_ROLE_V1 = "front_role_v1"
 
@@ -127,9 +127,7 @@ class FrontRoleClassifier:
     def __init__(self, model_spec: str, revision: str | None = None) -> None:
         from bibr.utils.gbm_bundle import load_gbm_bundle
 
-        # The pickle-free bibr-gbm/1 bundle when the revision or path has one;
-        # otherwise the joblib bundle, which (as for the geom segmenter) only the
-        # gadget-restricted loader touches.
+        # A pickle-free bibr-gbm/1 bundle, read with numpy, as for the geom segmenter.
         path, bundle = load_gbm_bundle(model_spec, revision, stem=_BUNDLE_STEM)
         self.path = path
         self.model_kind = str(bundle.get("model_kind", MODEL_KIND_FRONT_ROLE_V1))

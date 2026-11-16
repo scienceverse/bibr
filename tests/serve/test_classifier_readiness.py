@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 def test_serve_image_prefetches_both_classifier_revisions():
     dockerfile = Path("Dockerfile.serve").read_text()
@@ -64,7 +66,7 @@ def test_missing_artifact_is_degraded_or_required_failure():
 
 
 def test_required_classifier_failure_is_fatal_to_serve_setup():
-    import pytest
+    pytest.importorskip("fastapi")  # the serve extra
 
     from bibr.pipeline.classifier_resources import ClassifierState, ClassifierStatus
     from bibr.serve.deployments.pipeline import _raise_for_required_classifier_failure
@@ -242,6 +244,7 @@ def _ready_client(monkeypatch, settings, snapshot_download):
 
 def test_ready_rechecks_a_failed_classifier_verdict(monkeypatch, tmp_path):
     """A probe that raced worker startup recovers without a restart."""
+    pytest.importorskip("fastapi")  # the serve extra
     from bibr.config import GlobalSettings
     from bibr.serve import app as app_mod
 
@@ -271,6 +274,7 @@ def test_ready_rechecks_a_failed_classifier_verdict(monkeypatch, tmp_path):
 
 def test_ready_caches_an_ok_classifier_verdict(monkeypatch):
     """A cached ok is never re-probed: no model load on the request path."""
+    pytest.importorskip("fastapi")  # the serve extra
     from bibr.config import GlobalSettings
 
     calls = {"n": 0}
@@ -291,6 +295,7 @@ def test_ready_caches_an_ok_classifier_verdict(monkeypatch):
 
 def test_ready_does_not_reprobe_a_failure_before_its_ttl(monkeypatch):
     """Failures are retried after a bounded interval, not on every probe."""
+    pytest.importorskip("fastapi")  # the serve extra
     from bibr.config import GlobalSettings
 
     calls = {"n": 0}

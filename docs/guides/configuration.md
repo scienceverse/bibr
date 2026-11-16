@@ -505,9 +505,11 @@ calls to them carry none and the model samples at its own default; the same
 paper can then come back slightly different between runs. They take adaptive
 thinking instead of a token budget, which bibr does not send yet, so
 `LLM_THINKING_BUDGET` is ignored for them and a warning is logged. The
-`anthropic` provider needs the anthropic SDK below 1.0, which every install
-of bibr includes. With 1.0 or later, bibr stops before the first call with an error
-that names the fix.
+`anthropic` provider needs the anthropic SDK below 1.0, which the `anthropic`
+extra installs (`uv add 'bibr[anthropic]'`; `bibr setup` installs it when you pick
+Anthropic). Without it, or with 1.0 or later, bibr stops before the first call
+with an error that names the fix. The `google` provider likewise needs the
+`google` extra (google-genai).
 
 `CACHE_LLM=true` keeps structured LLM responses on disk (`CACHE_LLM_DIR`,
 default `~/.cache/bibr/llm`), readable by your user only. An entry is reused
@@ -852,11 +854,11 @@ setting and once with it. No other setting changes:
 | Model | Setting | Candidate format |
 |---|---|---|
 | Reference parser | `NER_PARSER_CKPT` | ONNX bundle directory (`model: ner_parser`) |
-| Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `geom_segmenter.json` manifest (with its `.npz`), `.joblib` bundle file, or a directory holding either |
+| Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `geom_segmenter.json` manifest (with its `.npz`), or the directory holding them; `scripts/export_gbm_bundle.py` converts a `.joblib` bundle |
 | Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`), or a Hub repo id |
 | CRF reference segmenter | `NER_SEG_CKPT` | checkpoint file (`torch` extra) |
 | Text reference segmenter (replaces the CRF) | `REF_TEXT_SEG_MODEL_ID` | directory with `segmenter.json`, `model.onnx` and `tokenizer.json` (in it or in `onnx/`), or a Hub repo id |
-| Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `front_role.json` manifest (with its `.npz`), `.joblib` bundle file, or a directory holding either |
+| Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `front_role.json` manifest (with its `.npz`), or the directory holding them; `scripts/export_gbm_bundle.py` converts a `.joblib` bundle |
 | Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
 | Statement tagger (adds a source) | `ML_STATEMENT_TAGGER_MODEL_ID` | ONNX bundle directory (`model: statement_tagger`), or a Hub repo id |
 | Section classifier | `ML_SECTION_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: section_classifier`) |

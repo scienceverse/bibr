@@ -730,7 +730,7 @@ async def test_ocr_stage_reads_the_layer_only_when_ocr_returns_nothing(
         ]
         # Not a final answer: serve does not cache the export, and the OCR
         # cache does not keep the layer text for the next, healthy run.
-        from bibr.serve.deployments.pipeline import _is_final_result
+        from bibr.serve.final_results import is_final_result as _is_final_result
 
         payload = {"extraction": {"warnings": [w.to_dict() for w in fs.warnings]}}
         assert _is_final_result(payload) is False

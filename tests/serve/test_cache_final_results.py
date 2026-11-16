@@ -8,8 +8,11 @@ later request for the same PDF got the degraded export back.
 import pytest
 
 from bibr.pipeline.context import RunConfig
-from bibr.serve.deployments.pipeline import BibrPipelineAPI, _is_final_result
-from tests.serve.test_cache_singleflight import _inputs, _MemoryCache
+
+pytest.importorskip("fastapi")  # the serve extra
+
+from bibr.serve.deployments.pipeline import BibrPipelineAPI, _is_final_result  # noqa: E402
+from tests.serve.test_cache_singleflight import _inputs, _MemoryCache  # noqa: E402
 
 
 def _payload(**extraction) -> dict:

@@ -14,10 +14,8 @@ from bibr.serve.logsetup import (
     configure_metering_logging,
     configure_serve_logging,
     configure_worker_logging,
-    install_litserve_logging_hook,
     metering_logger,
 )
-from bibr.utils.redact import SecretScrubbingFilter
 
 _LEVELS = ("bibr", "bibr.serve.metering", "httpx", "httpcore", "urllib3", "google_genai")
 
@@ -200,22 +198,8 @@ def test_api_and_worker_handlers_keep_every_record_across_rotation(clean_logging
     assert kept == {"api": set(range(per_role)), "worker": set(range(per_role))}
 
 
-def test_litserve_hook_scrubs_the_handler_that_run_rebuilds(clean_logging):
-    pytest.importorskip("litserve")
-    import litserve.server as ls_server
-
-    install_litserve_logging_hook()
-    install_litserve_logging_hook()  # idempotent
-    ls_server.configure_logging("info")
-    library = logging.getLogger("litserve")
-    assert library.handlers
-    assert all(
-        any(isinstance(f, SecretScrubbingFilter) for f in h.filters) for h in library.handlers
-    )
-
-
 def test_worker_setup_configures_logging(tmp_path, monkeypatch):
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
     from bibr.config import Settings
     from bibr.serve.deployments import pipeline as pipeline_mod
     from bibr.serve.deployments.pipeline import BibrPipelineAPI
@@ -233,7 +217,7 @@ def test_worker_setup_configures_logging(tmp_path, monkeypatch):
 
 
 def test_serve_main_installs_the_sink_and_hands_uvicorn_no_log_config(clean_logging, monkeypatch):
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
     from bibr.config import Settings
     from bibr.serve import app as app_mod
 
@@ -250,4 +234,3 @@ def test_serve_main_installs_the_sink_and_hands_uvicorn_no_log_config(clean_logg
     assert len(_sinks()) == 1
     assert captured["log_config"] is None
     assert captured["log_level"] == Settings.SERVE_LOG_LEVEL
-    assert captured["num_api_servers"] == 1

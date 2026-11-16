@@ -570,9 +570,10 @@ def automatic_backend_names(*, llm_backend: str | None = None) -> tuple[str, ...
 def local_runtime_unavailable_reason(backend: str) -> str | None:
     """Cheap, start-nothing check that a managed local OCR runtime can launch.
 
-    Returns ``None`` for backends this function does not vet (HTTP and cloud
-    backends validate themselves at startup) and for runtimes whose launcher
-    and hardware are present. The ``bibr chew`` preflight, ``bibr doctor``
+    Returns ``None`` for backends this function does not vet (HTTP backends
+    validate themselves at startup; a cloud vision backend is vetted only for
+    its provider SDK extra) and for runtimes whose launcher and hardware are
+    present. The ``bibr chew`` preflight, ``bibr doctor``
     and the text-layer fallback (:func:`automatic_chain_blockers`) all ask
     here.
     """
@@ -604,7 +605,10 @@ def local_runtime_unavailable_reason(backend: str) -> str | None:
         return None
     if backend == "glm-mlx":
         return "this backend is disabled (vllm-mlx produced corrupted text); use glm-rapid-mlx"
-    return None
+    from bibr.clients.sdk_extras import missing_ocr_sdk
+
+    # A cloud vision backend starts nothing, but its provider SDK is an extra.
+    return missing_ocr_sdk(backend)
 
 
 def automatic_chain_blockers(

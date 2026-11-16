@@ -23,7 +23,6 @@ uv run bibr setup
 - Python 3.11–3.14 (3.12 is the primary CI version; optional serving runtimes
   may require a narrower version range)
 - [uv](https://docs.astral.sh/uv/) package manager
-- `libmagic` on Linux/macOS; see [Installation](https://bibr.org/getting-started/install/)
 - For live extraction: an OCR backend and a configured cloud or local LLM.
   The `local` extra installs Apple Silicon serving dependencies; it is not
   a universal OCR installation. Use the [setup wizard and Quickstart](https://bibr.org/getting-started/quickstart/)
@@ -165,7 +164,7 @@ for rehearsals, Trusted Publishing, and recovery from a partial release.
 - Global `Settings` mutations and `bibr.*` logger levels are restored after
   every test by autouse fixtures — no manual `model_fields_set` juggling
 - The torch-free ONNX bundles under `tests/fixtures/onnx` and the hermetic
-  LitServe/geometry fixtures are committed artifacts: regenerate them with
+  geometry fixtures are committed artifacts: regenerate them with
   `scripts/generate_onnx_test_bundles.py` and
   `scripts/generate_hermetic_test_fixtures.py` instead of editing by hand
 

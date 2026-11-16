@@ -1,7 +1,7 @@
 """Local single-machine pipeline for researchers.
 
 Provides ``bibr chew`` CLI — runs the full paper processing pipeline
-on a single machine without the LitServe API.
+on a single machine without the HTTP API.
 """
 
 __all__ = ["LocalPipeline"]

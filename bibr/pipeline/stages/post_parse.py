@@ -1648,7 +1648,7 @@ async def post_parse(
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
-    Shared between LitServe and local pipelines.
+    Shared between the serve and local pipelines.
 
     When ``enrichment_prefetch`` is set (the run will enrich references), the
     enrich stage's up-front network work starts as a task the moment the

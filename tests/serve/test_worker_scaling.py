@@ -1,7 +1,6 @@
 """`bibr serve` runs exactly one inference worker, and it is not configurable.
 
-One worker already serves many requests concurrently on the LitServe async
-loop, with the layout/segmenter `GpuBatcher` coalescing their GPU work into
+One worker already serves many requests concurrently on its async loop, with the layout/segmenter `GpuBatcher` coalescing their GPU work into
 single forward passes. A second worker would duplicate the models (~1.5 GB RSS
 each), give each its own batcher so batches shrink as workers rise, and
 parallelize only GIL-bound Python — torch/ONNX intra-op threads already use
@@ -12,32 +11,35 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 pytest.importorskip("torch")
 
 from bibr.config import Settings  # noqa: E402
 
 
-class _Captured(Exception):
-    """Stops build_server once LitServer's kwargs are in hand."""
-
-
 def test_build_server_pins_exactly_one_inference_worker(monkeypatch):
+    import asyncio
+
     from bibr.serve import app as app_mod
+    from bibr.serve import worker as worker_mod
 
-    captured = {}
+    built = []
+    real_worker = worker_mod.InferenceWorker
 
-    class _FakeServer:
-        def __init__(self, _api, **kwargs):
-            captured.update(kwargs)
-            raise _Captured
+    def counting_worker(api, **kwargs):
+        built.append(kwargs)
+        return real_worker(api, **kwargs)
 
-    monkeypatch.setattr("litserve.LitServer", _FakeServer)
-
-    with pytest.raises(_Captured):
-        app_mod.build_server()
-
-    assert captured["workers_per_device"] == 1
+    monkeypatch.setattr(worker_mod, "InferenceWorker", counting_worker)
+    server = app_mod.build_server()
+    try:
+        assert built == [
+            {"timeout": Settings.pipeline.timeout, "restart": Settings.pipeline.restart_workers}
+        ]
+        assert server.app.state.inference_worker is server.worker
+    finally:
+        asyncio.run(server.app.state.inference_tracker.close())
+        asyncio.run(server.app.state.upload_store.close())
 
 
 def test_worker_count_is_not_a_setting():

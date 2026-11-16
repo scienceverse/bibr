@@ -6,9 +6,12 @@ import stat
 import time
 
 import pytest
-from starlette.datastructures import UploadFile
 
-from bibr.serve.ingress import _FORM_OPTION_NAMES, _MAX_FORM_FIELDS
+pytest.importorskip("fastapi")  # the serve extra
+
+from starlette.datastructures import UploadFile  # noqa: E402
+
+from bibr.serve.ingress import _FORM_OPTION_NAMES, _MAX_FORM_FIELDS  # noqa: E402
 
 
 def _upload(content: bytes, filename: str = "paper.pdf") -> UploadFile:
@@ -454,9 +457,8 @@ def test_consumer_removes_canonical_file_when_descriptor_field_is_missing(tmp_pa
     assert not path.exists()
 
 
-def test_configure_multipart_spooling_restores_bound_after_litserve_import():
-    """Catches LitServe resetting Starlette's spool threshold during import."""
-    import litserve  # noqa: F401
+def test_configure_multipart_spooling_sets_starlettes_bound():
+    """Catches the spool threshold not following PIPELINE_UPLOAD_SPOOL_MEMORY_BYTES."""
     from starlette.formparsers import MultiPartParser
 
     from bibr.serve.ingress import configure_multipart_spooling
@@ -537,41 +539,6 @@ async def test_tracker_close_removes_upload_when_dispatch_task_never_started():
     finally:
         await tracker.close()
         await store.close()
-
-
-@pytest.mark.parametrize("route_count", [0, 2])
-def test_resolve_litserve_dispatch_requires_exactly_one_private_route(route_count):
-    """Catches silently binding no private endpoint or an ambiguous duplicate."""
-    from fastapi import FastAPI
-
-    from bibr.serve.ingress import INTERNAL_INFERENCE_PATH, resolve_litserve_dispatch
-
-    app = FastAPI()
-
-    async def endpoint(descriptor: dict):
-        return descriptor
-
-    for _ in range(route_count):
-        app.add_api_route(INTERNAL_INFERENCE_PATH, endpoint, methods=["POST"])
-
-    with pytest.raises(RuntimeError, match="LitServe private inference route"):
-        resolve_litserve_dispatch(app)
-
-
-def test_resolve_litserve_dispatch_returns_registered_private_endpoint():
-    """Catches wrapping or resolving a different route than LitServe registered."""
-    from fastapi import FastAPI
-
-    from bibr.serve.ingress import INTERNAL_INFERENCE_PATH, resolve_litserve_dispatch
-
-    app = FastAPI()
-
-    async def endpoint(descriptor: dict):
-        return descriptor
-
-    app.add_api_route(INTERNAL_INFERENCE_PATH, endpoint, methods=["POST"])
-
-    assert resolve_litserve_dispatch(app) is endpoint
 
 
 def test_extract_route_persists_descriptor_and_maps_upload_errors(monkeypatch):

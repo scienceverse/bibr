@@ -562,7 +562,7 @@ def ocr_page_regions(
     warning_sink: Callable[[ProcessingWarning], None] | None = None,
     layer_fallback_sink: Callable[[int], None] | None = None,
 ) -> Coroutine[None, None, list[dict]]:
-    """OCR all regions on a single page (shared between LitServe and local pipelines).
+    """OCR all regions on a single page (shared between the serve and local pipelines).
 
     ``ocr_fn`` is an async callable ``(cropped_image, prompt) -> str`` that runs
     OCR on a single cropped region image.

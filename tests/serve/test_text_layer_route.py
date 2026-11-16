@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 
 from bibr.config import GlobalSettings
 from bibr.serve.deployments.pipeline import BibrPipelineAPI
@@ -299,7 +299,6 @@ def test_serve_ocr_text_layer_reaches_the_workers_through_the_environment(bare, 
 
     monkeypatch.setattr(app_mod, "build_server", lambda: _Server())
     monkeypatch.setattr("bibr.serve.logsetup.configure_serve_logging", lambda *_a, **_k: None)
-    monkeypatch.setattr("bibr.serve.logsetup.install_litserve_logging_hook", lambda: None)
 
     app_mod.main()
 
