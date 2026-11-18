@@ -266,6 +266,12 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
             tid = row.get("text_id")
             if tid is not None and tid not in text_ids:
                 dangling += 1
+    # A link printed in a table cell points at its table.
+    for row in _as_list(payload, "url"):
+        if isinstance(row, dict):
+            table_id = row.get("table_id")
+            if table_id is not None and table_id not in table_ids:
+                dangling += 1
     for key in ("figure", "table"):
         for row in _as_list(payload, key):
             if not isinstance(row, dict):

@@ -258,6 +258,20 @@ def test_dangling_xref_target():
     assert "VAL_DANGLING_REF" in _codes(validate_export(p))
 
 
+def test_dangling_url_table_id():
+    p = _base()
+    p["url"] = [
+        {
+            "url_id": 1,
+            "href": "https://osf.io/abcde",
+            "link_text": None,
+            "text_id": None,
+            "table_id": 4,
+        }
+    ]
+    assert "VAL_DANGLING_REF" in _codes(validate_export(p))
+
+
 def test_dangling_text_section():
     p = _base()
     p["text"] = [{"text_id": 1, "section_id": 42, "text": "x"}]

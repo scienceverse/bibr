@@ -860,13 +860,18 @@ class RegionSummary:
 class PaperURLLink:
     url: str
     section_id: int  # originating section
-    paragraph_id: int  # originating paragraph
-    text_id: int  # originating sentence
+    # Originating paragraph and sentence; None for a link printed in a table
+    # cell, which is in no sentence (``table_id`` names its table).
+    paragraph_id: int | None = None
+    text_id: int | None = None
     link_text: str | None = None  # text of the hyperlink (None for plain-text URLs)
     # True when the paper prints no full URL here: bibr completed a URL printed
     # without its scheme, or a bare DOI. Such a link is left out of a reference
     # list (see bibr.export.json_export._links_outside_reference_entries).
     completed: bool = False
+    # ``PaperTable.table_id`` of the table whose cell prints the link (see
+    # bibr.structure.table_links); None for a link in a sentence.
+    table_id: int | None = None
 
 
 @dataclass

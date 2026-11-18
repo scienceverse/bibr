@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — export schema 12.5 (additive)
+
+- A link printed in a table cell is in the `url` list. A funder's DOI in a
+  funding table, a repository address in a resources table and a trial
+  registry number's link were in `table[].contents` only. The entry carries
+  the new key `url[].table_id`, the id of its `table[]` row, and `text_id`,
+  `start` and `end` are null: a table cell is no `text[]` row. `table_id` is
+  omitted for a link in running text, so those entries are unchanged.
+  In a PDF the link is read from the cell text and from the PDF's own link
+  annotations that lie on the table, which gives the whole address where the
+  cell wraps it over two lines.
+
+  The export moves to schema `12.5`. `url[].text_id` was never null before:
+  code that joins every `url` entry to a `text` row has to skip, or look up by
+  `table_id`, the entries where it is. A consumer that validates with the 12.4
+  strict schema needs the 12.5 schema.
+
 ### Fixed
 
 - A PDF's `url` list now holds links it used to miss:
@@ -24,6 +41,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
   `href` is the full target ("https://osf.io/s6bjp",
   "https://doi.org/10.5281/zenodo.1") and `link_text` the printed form.
+- A URL in a PDF's text that the line breaks damaged is repaired from the
+  PDF's own link annotations: "creativecom-mons.org/licenses/by/4.0" where a
+  hyphen was added at a line end, or an address cut at the end of a line.
+  `href` is then the annotation's target and `link_text` the printed form. It
+  happens only when exactly one of the PDF's link targets matches, and for a
+  cut address only when the sentence goes on to print the rest.
 - Two URLs printed with no space between them
   ("…/repo):https://doi.org/10.5281/…") are two `url` entries, in PDF, HTML,
   DOCX and JATS input. They were one entry with both addresses in its `href`.

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from bibr.exceptions import ModelOverrideError
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.structure.table_links import add_table_links, repair_links_from_targets
 from bibr.utils.link_targets import LinkTargets
 
 if TYPE_CHECKING:
@@ -321,6 +322,15 @@ class ParseSegmentStage:
                         all_segments = []
                     await asyncio.to_thread(parser.apply_segmentation, contents, all_segments)
                 await asyncio.to_thread(parser.create_content_sections, contents)
+
+                if contents is not None:
+                    # Links printed in table cells, which are in no sentence.
+                    # HTML, DOCX and JATS input reads only a URL printed in
+                    # full as a link from text, here as in its sentences.
+                    # Both run after segmentation: sentence links exist only
+                    # from there on.
+                    add_table_links(contents, bare=native_parser is None)
+                    repair_links_from_targets(contents)
 
                 fs.stage_times["parse_segment"] = time.monotonic() - fs_t0
             except Exception as e:  # noqa: BLE001

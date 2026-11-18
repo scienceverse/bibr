@@ -4458,11 +4458,24 @@
             "null"
           ]
         },
+        "table_id": {
+          "default": null,
+          "description": "table[].table_id of the table whose cell prints the link. Omitted for a link in a sentence, and before schema 12.5.",
+          "minimum": 1,
+          "title": "Table Id",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "text_id": {
-          "description": "text[].text_id of the sentence containing the link.",
+          "description": "text[].text_id of the sentence containing the link; null for a link printed in a table cell, which is in no sentence (see table_id).",
           "minimum": 1,
           "title": "Text Id",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "url_id": {
           "description": "Primary key; 1-based position.",
@@ -5066,7 +5079,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "12.4",
+      "const": "12.5",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 and later from all earlier versions.",
       "title": "Schema Version",
       "type": "string"
