@@ -67,8 +67,8 @@ from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import FIGURE_WORD, SUPPLEMENT_WORD, TABLE_WORD, caption_label
 from bibr.structure.html_table import rendered_size as _rendered_size
 from bibr.structure.section_tree import infer_level_from_numbering
-from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import YEARISH_RE, clean_extracted_url
+from bibr.structure.xref_utils import detect_xrefs
+from bibr.utils.text import YEARISH_RE, find_text_links
 
 logger = logging.getLogger(__name__)
 
@@ -1621,15 +1621,15 @@ class DocxParser:
         sent: PaperSentence,
         already_covered: set[tuple[str, int]] | None = None,
     ) -> None:
-        """Match URL_RE on the sentence and append PaperURLLink entries.
+        """Find the URLs written out in the sentence and append PaperURLLink entries.
 
         ``already_covered`` is an optional ``{(url, text_id)}`` guard set —
-        regex hits whose ``(url, text_id)`` is in the set are skipped so a
+        hits whose ``(url, text_id)`` is in the set are skipped so a
         ``w:hyperlink`` whose display text equals its URL doesn't produce a
         second link entry.
         """
-        for m in URL_RE.finditer(sent.text):
-            url = clean_extracted_url(m.group(0))
+        for found in find_text_links(sent.text, bare=False):
+            url = found.url
             if already_covered is not None and (url, sent.text_id) in already_covered:
                 continue
             self.links.append(

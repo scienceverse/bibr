@@ -30,7 +30,7 @@ from bibr.structure.assembler import DeferredText
 from bibr.structure.reference_boundaries import is_publisher_note_boundary
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.structure.xref_utils import URL_RE
-from bibr.utils.text import clean_extracted_url, normalize_text
+from bibr.utils.text import find_text_links, normalize_text
 
 if TYPE_CHECKING:
     from bibr.utils.link_targets import LinkTargets
@@ -371,23 +371,43 @@ class TextHandlersMixin:
         )
 
     def _detect_urls(self, sent: PaperSentence) -> None:
-        """Find plain-text URLs in a sentence and add as PaperURLLink."""
-        for match in URL_RE.finditer(sent.text):
-            url = match.group(0)
-            # Trim trailing prose delimiters the regex over-captures (sentence
-            # punctuation, an unbalanced ')'); keeps balanced DOI parens.
-            url = clean_extracted_url(url)
-            if not url:
-                continue
+        """Find the links printed in a sentence and add each as a PaperURLLink.
+
+        In the reference list only a URL with a scheme counts: an entry's bare
+        DOI is a field of the reference, not a link the authors put in the text.
+        """
+        bare = not self._is_reference_list_section(sent.section_id)
+        for link in find_text_links(sent.text, bare=bare):
             self.links.append(
                 PaperURLLink(
-                    url=url,
+                    url=link.url,
                     section_id=sent.section_id,
                     paragraph_id=sent.paragraph_id,
                     text_id=sent.text_id,
-                    link_text=None,  # plain-text URL, no anchor text
+                    # None for a URL printed in full; the printed form for a
+                    # scheme-less URL or a bare DOI.
+                    link_text=link.link_text,
+                    completed=link.link_text is not None,
                 )
             )
+
+    def _is_reference_list_section(self, section_id: int) -> bool:
+        """Whether *section_id* is a section headed as the reference list."""
+        known = self._reference_list_sections.get(section_id)
+        if known is not None:
+            return known
+        from bibr.structure.section_classifier import _classify_lookup
+
+        section = next((sec for sec in self.sections if sec.section_id == section_id), None)
+        if section is None:
+            # A caption or footnote section, made after the body was parsed.
+            return False
+        is_reference_list = section.section_type == CanonicalSection.REFERENCES
+        if not is_reference_list:
+            section_type, _score = _classify_lookup(normalize_text(section.header))
+            is_reference_list = section_type == CanonicalSection.REFERENCES
+        self._reference_list_sections[section_id] = is_reference_list
+        return is_reference_list
 
     def _can_cross_barrier(self, text: str, page_number: int) -> bool:
         """Whether *text* may join a carry-over across a barrier region.

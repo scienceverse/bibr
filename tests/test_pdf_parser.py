@@ -1087,6 +1087,85 @@ class TestURLDetection:
         assert url_links[0].url.startswith("https://example")
         assert url_links[0].link_text is None
 
+    @staticmethod
+    def _parse_unsplit(json_result):
+        """Parse with each text block as one sentence: the period-based test
+        splitter would cut a host name in two."""
+        from bibr.structure.pdf_parser import PDFParser
+
+        parser = PDFParser(json_result)
+        contents = parser.parse()
+        texts = [text for text, _, _, needs_seg, _ in parser._deferred_texts if needs_seg]
+        parser.apply_segmentation(contents, [[text] for text in texts])
+        parser.create_content_sections(contents)
+        return contents
+
+    def test_scheme_less_url_and_bare_doi_in_text(self):
+        text = "Materials are at osf.io/s6bjp and the data (doi:10.5281/zenodo.1234567) are open."
+        contents = self._parse_unsplit([[_region(0, "text", text)]])
+
+        assert [(link.url, link.link_text) for link in contents.links] == [
+            ("https://osf.io/s6bjp", "osf.io/s6bjp"),
+            ("https://doi.org/10.5281/zenodo.1234567", "10.5281/zenodo.1234567"),
+        ]
+
+    def test_urls_in_captions_and_footnotes(self):
+        """Caption and footnote rows are made after the body text; their links
+        are found all the same, each on its own text row."""
+        json_result = [
+            [
+                _region(0, "text", "Main body text."),
+                _region(1, "image", "", bbox=[0, 200, 100, 300]),
+                _region(
+                    2,
+                    "figure_title",
+                    "Figure 1. Drawn with the code at github.com/org/repo.",
+                    bbox=[0, 300, 100, 320],
+                ),
+                _region(
+                    3,
+                    "table_title",
+                    "Table 1. Rates from https://example.org/rates.",
+                    bbox=[0, 380, 100, 400],
+                ),
+                _region(4, "table", "| A |\n|---|\n| 1 |", bbox=[0, 400, 100, 500]),
+                _region(5, "footnote", "1 The survey is at https://example.org/survey."),
+            ]
+        ]
+        contents = self._parse_unsplit(json_result)
+
+        row_of = {sent.text_id: sent.text for sent in contents.sentences}
+        assert [(link.url, row_of[link.text_id]) for link in contents.links] == [
+            (
+                "https://github.com/org/repo",
+                "Figure 1. Drawn with the code at github.com/org/repo.",
+            ),
+            ("https://example.org/rates", "Table 1. Rates from https://example.org/rates."),
+            ("https://example.org/survey", "1 The survey is at https://example.org/survey."),
+        ]
+
+    def test_reference_list_keeps_only_urls_written_in_full(self):
+        """A reference's bare DOI is a field of that reference, not a link in
+        the text; a URL the entry prints in full still is one."""
+        json_result = [
+            [
+                _region(0, "paragraph_title", "References"),
+                _region(
+                    1, "reference", "Smith, J. (2020). A paper. Journal, 1, 2. doi:10.1234/abc.5"
+                ),
+                _region(
+                    2,
+                    "reference",
+                    "Jones, K. (2021). Code. github.com/jones/code. https://doi.org/10.1234/xyz.9",
+                ),
+            ]
+        ]
+        contents = self._parse_unsplit(json_result)
+
+        assert [(link.url, link.link_text) for link in contents.links] == [
+            ("https://doi.org/10.1234/xyz.9", None)
+        ]
+
 
 # ---------------------------------------------------------------------------
 # sections_text correctness
