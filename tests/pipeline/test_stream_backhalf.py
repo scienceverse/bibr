@@ -38,6 +38,18 @@ class _FakeLayout:
             fs.layout_results = [[]]
 
 
+class _AnnouncingLayout(_FakeLayout):
+    """Fake LayoutStage that sets a per-file event once the file is prepared."""
+
+    def __init__(self, prepared):
+        self._prepared = prepared
+
+    async def run(self, ctx):
+        await super().run(ctx)
+        for fs in ctx.alive():
+            self._prepared[fs.path.name].set()
+
+
 class _FakeNative:
     name = "native_text"
 
@@ -187,6 +199,7 @@ def _ctx(files, config, progress=None) -> PipelineContext:
 def _stage(
     events=None,
     *,
+    layout=None,
     ocr=None,
     parse=None,
     post_parse=None,
@@ -195,7 +208,7 @@ def _stage(
     export=None,
 ):
     return StreamingRenderOcrStage(
-        layout=_FakeLayout(),
+        layout=layout or _FakeLayout(),
         native_text=_FakeNative(),
         ocr=ocr or _EventOcr(events if events is not None else []),
         parse=parse or _FakeParse(events),
@@ -305,6 +318,32 @@ class TestStreamingOverlap:
         assert events.index("export:a.pdf") < events.index("ocr_end:b.pdf")
         assert a.result_json == {"paper_id": "a.pdf"}
         assert b.result_json == {"paper_id": "b.pdf"}
+
+    async def test_managed_vllm_ocr_prepares_the_next_file_while_ocr_runs(self):
+        # Each file's OCR waits until the following file has been laid out, as
+        # it can while the managed vLLM OCR server holds the current one. If
+        # the front half were strictly serial this would deadlock (caught by
+        # wait_for).
+        events: list[str] = []
+        files = [_mk("a.pdf"), _mk("b.pdf"), _mk("c.pdf")]
+        prepared = {fs.path.name: asyncio.Event() for fs in files}
+        gates = {"a.pdf": prepared["b.pdf"], "b.pdf": prepared["c.pdf"]}
+        stage = _stage(
+            events,
+            layout=_AnnouncingLayout(prepared),
+            ocr=_EventOcr(events, gates=gates),
+        )
+
+        await asyncio.wait_for(stage.run(_ctx(files, _cfg(ocr_backend="paddle-vllm"))), timeout=5)
+
+        # Files still reach OCR in order, and every back half ran.
+        assert [e for e in events if e.startswith("ocr_start:")] == [
+            "ocr_start:a.pdf",
+            "ocr_start:b.pdf",
+            "ocr_start:c.pdf",
+        ]
+        assert all(fs.result_json == {"paper_id": fs.path.name} for fs in files)
+        assert all(fs.page_images is None for fs in files)
 
     async def test_memory_freed_per_window(self):
         events: list[str] = []
