@@ -82,10 +82,19 @@ takes at most 0.85 of the card (see below); PaddleOCR-VL takes about 5 GB, so
 only when its whole share is free, and the rest of the card holds bibr's
 layout, sentence and reference models, which stay on the GPU between chunks
 when `onnxruntime-gpu` is installed. Unless the two shares leave at least 6 GB
-of the card for those models (with the LLM at 0.85, only on cards of about
-80 GB), bibr stops the server that is running before starting the other: in a
-batch, each chunk's OCR stops the LLM server and that chunk's LLM stage starts
-it again. The shares are sized from the card that `CUDA_VISIBLE_DEVICES`
+of the card for those models, bibr stops the server that is running before
+starting the other: in a batch, each chunk's OCR stops the LLM server and that
+chunk's LLM stage starts it again. With the LLM at 0.85 the shares fit only on
+cards of about 80 GB. So when you have not set the LLM's share, bibr lowers its
+cap to the largest that fits beside PaddleOCR-VL and those 6 GB (0.65 of a
+32 GB card, 0.76 of 48 GB), and both servers stay up for the run. It does so
+only where the LLM would then start with at least 1 GiB more than its minimum
+budget: on a 32 GB card the 4B student needs about 24.4 GiB free when the run
+starts. A 24 GB card would leave it about 11.4 GiB, so there, and on smaller
+cards, the two servers keep taking turns. They also do with a share you set
+that does not fit, in the aggressive memory mode, and for a model with no
+minimum budget (one bibr's registry does not list, without
+`LLM_LOCAL_MIN_VRAM_GB`). The shares are sized from the card that `CUDA_VISIBLE_DEVICES`
 exposes; when bibr cannot tell which card that is (cards of different sizes
 numbered in CUDA's default fastest-first order), PaddleOCR-VL keeps 0.92 and
 the servers take turns. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID` or select the card
@@ -102,9 +111,12 @@ does not leave the model its minimum budget (11.0 GiB for the 4B student,
 [speculative decoding](#speculative-decoding-on-vllm)), a server that takes
 turns with PaddleOCR-VL drops to the minimum while bibr's models keep at least
 1 GB, since it starts again beside them in the next chunk. A server that stays
-up for the run (with cloud OCR, an OCR server at `--ocr-url` or GLM-OCR) keeps
+up for the run (with cloud OCR, an OCR server at `--ocr-url` or GLM-OCR, or
+beside a managed PaddleOCR-VL server under the lower cap above) keeps
 that room: it usually starts in the first chunk, before bibr's models have
-grown to the 5 GB or so they reach in a batch. So on a 24 GB card that also
+grown to the 5 GB or so they reach in a batch. Beside its PaddleOCR-VL server
+on an RTX 5090 the 4B student started at 0.61 of the card, a 19.2 GiB budget.
+So on a 24 GB card that also
 runs a PaddleOCR-VL server at `--ocr-url` (about 5.4 GB), the 4B student just
 fits (it needs 17.25 GiB, and about 17.7 are free) with an 11.3 GiB budget,
 below MTP's minimum; with a desktop on the card as well it does not, and its
@@ -242,8 +254,10 @@ which always replaces bibr's choice.
 | `dflash` | DFlash (7 tokens drafted by [`z-lab/Qwen3.5-4B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-4B-DFlash), a separate 1.27 GB model pinned to revision `9a1996cc`), for the 4B student's bf16 build only, with a 13.5 GiB minimum. Other models start without it, with a warning. |
 
 The server stays up for the run when no managed PaddleOCR-VL server takes
-turns with it: with cloud OCR, an OCR server at `OCR_BASE_URL`, or OCR on
-llama.cpp. With the automatic OCR on a card of up to 64 GB, PaddleOCR-VL and
+turns with it: with cloud OCR, an OCR server at `OCR_BASE_URL`, OCR on
+llama.cpp, or the automatic OCR on a card where both servers
+[stay up together](#how-the-shares-are-sized) (32 GB or more for the 4B
+student). With the automatic OCR on a card of up to 24 GB, PaddleOCR-VL and
 the LLM take turns, the LLM restarting every chunk, and `auto` leaves MTP off.
 Both MTP and DFlash add `--no-async-scheduling`, which every measured run
 used.
@@ -267,6 +281,16 @@ What was measured, with vLLM 0.32.0 at 64 sequences:
   but each LLM start took 51 s instead of 37 s, and papers an hour fell 5.0%
   and 8.6%. On the 12 GB card three of its six starts fitted only after bibr
   released its own models. This is why `auto` leaves MTP off there.
+- **The default plan on an RTX 5090** (the bf16 build beside PaddleOCR-VL,
+  120 born-digital papers of 1,890 pages, no Crossref, bibr starting both
+  servers itself): with both servers up for the run the LLM server started at
+  0.61 and 0.60 of the card with MTP on, and the run took 713 s in chunks of 8 and
+  693 s as one chunk of 120 (606 and 624 papers an hour). bibr 0.9.1, where
+  the two took turns at 0.85 without MTP, took 1,616 s and 818 s on the same
+  card in the same session (267 and 529 papers an hour); 15 LLM starts in
+  place of one account for most of the difference in chunks of 8. All four
+  runs wrote 120 papers and 6,813 references. These runs measured speed, not
+  accuracy. The card's memory in use peaked at 30.4 of 31.8 GiB in chunks of 8.
 - Speculative decoding has not been measured on 24 GB cards in the swap plan,
   on the 2B student, or with DFlash on the W4A16 build.
 

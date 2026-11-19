@@ -158,3 +158,62 @@ async def test_interleaved_stage_keeps_cloud_vision_loaded():
     ctx, rm = _stage_ctx(ocr_backend="gemini")
     await stage.run(ctx)
     rm.shutdown_ocr.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# managed vLLM LLM beside managed PaddleOCR-VL: unload only when they take turns
+# ---------------------------------------------------------------------------
+
+
+def _pin_linux_card(monkeypatch, vram_gb):
+    import platform
+
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: vram_gb)
+
+
+def _settings_with_llm_share(share):
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.llm.local_mem_fraction = share
+    return settings
+
+
+@pytest.mark.parametrize("ocr_backend", ["paddle-vllm", "paddle"])
+def test_vllm_servers_that_fit_together_keep_ocr_loaded(monkeypatch, ocr_backend):
+    # 0.65 + PaddleOCR-VL's 0.16 + bibr's 6 GB fit on an RTX 5090: neither
+    # server needs the other's memory, so stopping OCR only costs a restart
+    # (about 60 s per chunk of 8 papers with the LLM's).
+    _pin_linux_card(monkeypatch, 31.84)
+    settings = _settings_with_llm_share(0.65)
+    assert _should_unload_ocr_after_chunk("balanced", "vllm", settings, ocr_backend) is False
+    assert _should_unload_ocr_after_chunk("balanced", "local", settings, ocr_backend) is False
+
+
+@pytest.mark.parametrize("ocr_backend", ["paddle-vllm", "paddle"])
+def test_vllm_servers_that_take_turns_unload_ocr(monkeypatch, ocr_backend):
+    _pin_linux_card(monkeypatch, 31.84)
+    settings = _settings_with_llm_share(0.85)
+    assert _should_unload_ocr_after_chunk("balanced", "vllm", settings, ocr_backend) is True
+
+
+def test_aggressive_unloads_vllm_servers_that_fit_together(monkeypatch):
+    _pin_linux_card(monkeypatch, 31.84)
+    settings = _settings_with_llm_share(0.65)
+    assert _should_unload_ocr_after_chunk("aggressive", "vllm", settings, "paddle-vllm") is True
+
+
+def test_other_local_ocr_still_unloads_beside_a_vllm_llm(monkeypatch):
+    # Only the managed PaddleOCR-VL server has a share the fit is worked out
+    # from; any other local engine keeps handing its memory to the LLM.
+    _pin_linux_card(monkeypatch, 31.84)
+    settings = _settings_with_llm_share(0.65)
+    assert _should_unload_ocr_after_chunk("balanced", "vllm", settings, "glm-llama") is True
+
+
+def test_other_local_llm_still_unloads_paddle_vllm(monkeypatch):
+    _pin_linux_card(monkeypatch, 31.84)
+    settings = _settings_with_llm_share(0.65)
+    assert _should_unload_ocr_after_chunk("balanced", "llama-cpp", settings, "paddle-vllm") is True

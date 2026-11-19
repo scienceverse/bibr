@@ -288,3 +288,101 @@ def test_llm_only_pipeline_keeps_the_configured_share_as_its_cap(monkeypatch, la
     assert launches == [
         {"mem_fraction": 0.85, "share_from_free_memory": True, "swaps_with_ocr": False}
     ]
+
+
+# -- a card both servers fit on under a smaller LLM cap keeps both up --------
+
+# An RTX 5090 as nvidia-smi totals it: 32,607 MiB.
+SMI_5090 = 31.84
+
+
+def _balanced_pipeline(ocr_backend="paddle-vllm", **kwargs):
+    from bibr.config import GlobalSettings
+    from bibr.local.pipeline import LocalPipeline
+
+    kwargs.setdefault("memory_mode", "balanced")
+    kwargs.setdefault("settings", GlobalSettings())
+    return LocalPipeline(llm_backend="vllm", ocr_backend=ocr_backend, **kwargs)
+
+
+def _unloads_ocr_after_chunk(pipe) -> bool:
+    from bibr.pipeline.stages.ocr import _should_unload_ocr_after_chunk
+
+    cfg = pipe._config
+    return _should_unload_ocr_after_chunk(
+        cfg.memory_mode, cfg.llm_backend, pipe.settings, cfg.ocr_backend
+    )
+
+
+@pytest.mark.parametrize("ocr_backend", ["paddle-vllm", "paddle"])
+def test_local_pipeline_plans_a_cap_both_servers_fit_under(monkeypatch, launches, ocr_backend):
+    """On a 32 GB card the default 0.85 and PaddleOCR-VL's 0.16 take turns, a
+    restart of both servers every chunk. Capped at 0.65 the LLM server stays up
+    beside the OCR server, and the OCR server is not stopped for it."""
+    import asyncio
+
+    _pin_linux(monkeypatch, vram_gb=SMI_5090)
+    pipe = _balanced_pipeline(ocr_backend)
+
+    assert pipe.settings.llm.local_mem_fraction == 0.65
+    assert pipe._resources._llm_swaps_with_ocr() is False
+    assert pipe._resources._llm_share_fixed is False
+    assert _unloads_ocr_after_chunk(pipe) is False
+    asyncio.run(pipe._resources.start_llm_server(backend="vllm"))
+    assert launches == [
+        {"mem_fraction": 0.65, "share_from_free_memory": True, "swaps_with_ocr": False}
+    ]
+
+
+def test_planned_cap_leaves_the_callers_settings_alone(monkeypatch):
+    from bibr.config import GlobalSettings
+
+    _pin_linux(monkeypatch, vram_gb=SMI_5090)
+    settings = GlobalSettings()
+    pipe = _balanced_pipeline(settings=settings)
+
+    assert pipe.settings.llm.local_mem_fraction == 0.65
+    assert settings.llm.local_mem_fraction == 0.85
+    assert "local_mem_fraction" not in settings.llm.model_fields_set
+
+
+def test_24gb_card_keeps_the_swap(monkeypatch):
+    """Under the largest cap that fits 24 GB the 4B model has no room to spare."""
+    _pin_linux(monkeypatch, vram_gb=24.0)
+    pipe = _balanced_pipeline()
+
+    assert pipe.settings.llm.local_mem_fraction == 0.85
+    assert pipe._resources._llm_swaps_with_ocr() is True
+    assert _unloads_ocr_after_chunk(pipe) is True
+
+
+def test_a_share_the_user_set_is_not_replanned(monkeypatch):
+    _pin_linux(monkeypatch, vram_gb=SMI_5090)
+    monkeypatch.setenv("LLM_LOCAL_MEM_FRACTION", "0.85")
+    pipe = _balanced_pipeline()
+
+    assert pipe.settings.llm.local_mem_fraction == 0.85
+    assert pipe._resources._llm_share_fixed is True
+    assert pipe._resources._llm_swaps_with_ocr() is True
+
+
+def test_aggressive_mode_keeps_the_swap(monkeypatch):
+    _pin_linux(monkeypatch, vram_gb=SMI_5090)
+    pipe = _balanced_pipeline(memory_mode="aggressive")
+
+    assert pipe.settings.llm.local_mem_fraction == 0.85
+    assert pipe._resources._llm_swaps_with_ocr() is True
+
+
+def test_an_ocr_server_of_the_users_is_not_planned_around(monkeypatch):
+    _pin_linux(monkeypatch, vram_gb=SMI_5090)
+    pipe = _balanced_pipeline(ocr_url="http://localhost:8774/v1")
+
+    assert pipe.settings.llm.local_mem_fraction == 0.85
+
+
+def test_other_ocr_is_not_planned_around(monkeypatch):
+    _pin_linux(monkeypatch, vram_gb=SMI_5090)
+    pipe = _balanced_pipeline("glm-llama")
+
+    assert pipe.settings.llm.local_mem_fraction == 0.85

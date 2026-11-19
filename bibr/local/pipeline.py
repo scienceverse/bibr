@@ -353,31 +353,68 @@ def _managed_gpu_fraction(
     Paddle OCR vLLM both managed, the barrier plan can run them at once (OCR
     kept resident under ``keep_all``, or a later chunk's OCR beside the LLM),
     so both shares are claimed when they fit together with bibr's ONNX reserve
-    (``managed_vllm_shares_fit``). When they do not (the defaults, 0.85 and
-    PaddleOCR-VL's ~5 GB, on cards up to 64 GB), one server stops for the
-    other and restarts every chunk beside bibr's resident ONNX sessions: the
-    larger share and that reserve are what the classifiers must leave free.
+    (``managed_vllm_shares_fit``). When they do not (a share the user set, or
+    the default 0.85 on a card ``_resident_llm_cap`` plans no smaller cap
+    for), one server stops for the other and restarts every chunk beside
+    bibr's resident ONNX sessions: the larger share and that reserve are what
+    the classifiers must leave free.
     """
     from bibr.ocr.registry import (
-        automatic_backend_names,
         managed_vllm_onnx_reserve_share,
         managed_vllm_shares_fit,
         paddle_vllm_gpu_memory_utilization,
+        requests_managed_paddle_vllm,
     )
 
     llm_share = settings.llm.local_mem_fraction if llm_backend in ("local", "vllm") else 0.0
     # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
     # can run it, so a small GPU keeps its room for the classifiers.
-    starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
-        ocr_backend == "paddle"
-        and "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
-    )
+    starts_paddle_vllm = requests_managed_paddle_vllm(ocr_backend, llm_backend=llm_backend)
     ocr_share = paddle_vllm_gpu_memory_utilization() if starts_paddle_vllm else 0.0
     if not (llm_share and ocr_share):
         return llm_share + ocr_share
     if managed_vllm_shares_fit(llm_share, ocr_share):
         return llm_share + ocr_share
     return min(1.0, max(llm_share, ocr_share) + managed_vllm_onnx_reserve_share())
+
+
+def _resident_llm_cap(
+    llm_backend: str,
+    ocr_backend: str,
+    ocr_url: str | None,
+    memory_mode: str,
+    settings: GlobalSettings,
+) -> float | None:
+    """A smaller LLM share cap that keeps both managed vLLM servers up, or None.
+
+    A managed vLLM LLM server and a managed PaddleOCR-VL server whose shares
+    do not fit together take turns: each chunk stops and restarts both, about
+    a minute of every two on a 32 GB card at eight papers a chunk. When the
+    user left the LLM share alone and the card has the room
+    (``bibr.local.vllm_share.resident_llm_cap``), capping the LLM share lower
+    lets both stay up for the run. None leaves the configured share and the
+    swap as they are: another LLM or OCR runtime, an OCR URL (someone else's
+    server), the aggressive memory mode (which frees everything between
+    stages), a share the user set, or a card too small or too full.
+    """
+    if llm_backend not in ("local", "vllm") or memory_mode == "aggressive" or ocr_url:
+        return None
+    from bibr.local import vllm_share
+    from bibr.ocr import registry
+
+    if vllm_share.llm_share_user_set(settings):
+        return None
+    if not registry.requests_managed_paddle_vllm(ocr_backend, llm_backend=llm_backend):
+        return None
+    model = vllm_share.managed_llm_model(settings)
+    return vllm_share.resident_llm_cap(
+        registry.managed_gpu_memory(),
+        configured=settings.llm.local_mem_fraction,
+        ocr_share=registry.paddle_vllm_gpu_memory_utilization(),
+        vram_gb=registry._managed_gpu_vram_gb(),
+        floor_gb=vllm_share.managed_llm_floor_gb(model, settings),
+        reserve_gb=vllm_share.overshoot_reserve_gb(model, settings.llm.vllm_extra_args),
+    )
 
 
 class LocalPipeline(Pipeline):
@@ -388,7 +425,10 @@ class LocalPipeline(Pipeline):
 
     - ``"aggressive"``: Load/unload each model per phase (8 GB machines)
     - ``"balanced"``: Keep layout + segmenter loaded; OCR engine stays
-      resident across chunks unless a local LLM server needs the VRAM.
+      resident across chunks unless a local LLM server needs the VRAM. A
+      managed vLLM LLM server and a managed PaddleOCR-VL server both stay up
+      when their shares fit together, under a smaller LLM cap bibr plans
+      where the card has the room (``_resident_llm_cap``).
       Resident RSS includes the models' ORT CPU arenas, which keep their
       peak allocation — CPU-only layout/SaT sessions opt out of the arena,
       but the weights stay resident across files by design.
@@ -555,6 +595,22 @@ class LocalPipeline(Pipeline):
             ref_parse_strategy=ref_parse_strategy,
             mode=cast("RunMode", run_mode),
         )
+        # Read the user's choice before the plan below writes a cap onto the
+        # snapshot, which would then read as one the user set.
+        llm_share_fixed = llm_share_user_set(settings_snapshot)
+        resident_cap = _resident_llm_cap(
+            llm_backend, ocr_backend, ocr_url, memory_mode, settings_snapshot
+        )
+        if resident_cap is not None:
+            logger.info(
+                "Keeping the vLLM LLM and PaddleOCR-VL servers up together: LLM share "
+                "capped at %.2f, not %.2f (set LLM_LOCAL_MEM_FRACTION to choose it)",
+                resident_cap,
+                settings_snapshot.llm.local_mem_fraction,
+            )
+            # On the snapshot, so the classifiers' claim, the server start and
+            # the per-chunk OCR teardown rule all see the same share.
+            settings_snapshot.llm.local_mem_fraction = resident_cap
         resources = ResourceManager(
             memory_mode=memory_mode,
             ocr_backend=ocr_backend,
@@ -568,7 +624,7 @@ class LocalPipeline(Pipeline):
                 else 0.0
             ),
             managed_gpu_fraction=_managed_gpu_fraction(llm_backend, ocr_backend, settings_snapshot),
-            managed_llm_share_fixed=llm_share_user_set(settings_snapshot),
+            managed_llm_share_fixed=llm_share_fixed,
             llm_backend=llm_backend,
             settings=settings_snapshot,
         )
