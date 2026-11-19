@@ -59,8 +59,8 @@ from bibr.structure.html_table import (
     _span,
     max_table_width,
 )
-from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws
+from bibr.structure.xref_utils import detect_xrefs
+from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws, find_text_links
 
 logger = logging.getLogger(__name__)
 
@@ -2055,13 +2055,13 @@ class JatsParser:
     def _detect_urls(
         self, sent: PaperSentence, covered: set[tuple[str, int]] | None = None
     ) -> None:
-        """Match URL_RE on the sentence and append PaperURLLink entries.
+        """Find the URLs written out in the sentence and append PaperURLLink entries.
 
         *(url, text_id)* pairs in *covered* (anchor targets collected while
         walking paragraphs) are skipped so one link is not recorded twice.
         """
-        for m in URL_RE.finditer(sent.text):
-            url = clean_extracted_url(m.group(0))
+        for found in find_text_links(sent.text, bare=False):
+            url = found.url
             if covered is not None and (url, sent.text_id) in covered:
                 continue
             self.links.append(

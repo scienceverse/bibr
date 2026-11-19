@@ -43,8 +43,8 @@ from bibr.paper_contents import (
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
 from bibr.structure.html_table import TableBudget, html_table_frame, is_hidden_table
-from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import YEARISH_RE, clean_extracted_url, collapse_ws
+from bibr.structure.xref_utils import detect_xrefs
+from bibr.utils.text import YEARISH_RE, clean_extracted_url, collapse_ws, find_text_links
 
 logger = logging.getLogger(__name__)
 
@@ -1216,8 +1216,10 @@ class HtmlParser:
         self._figure_counter += 1
 
     def _detect_urls(self, sent: PaperSentence, covered: set[tuple[str, int]]) -> None:
-        for match in URL_RE.finditer(sent.text):
-            url = clean_extracted_url(match.group(0))
+        # Only a URL written out in full: scheme-less URLs and bare DOIs are
+        # read from PDF text alone, where no anchor marks a link.
+        for found in find_text_links(sent.text, bare=False):
+            url = found.url
             if (url, sent.text_id) in covered:
                 continue
             self.links.append(

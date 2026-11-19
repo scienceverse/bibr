@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from typing import NamedTuple
 
 # Raw PDF/native extraction and OCR can occasionally emit C0 control bytes in
 # readable text. Keep whitespace controls intact; strip the rest before text is
@@ -229,6 +230,192 @@ def normalize_doi(doi: str | None) -> str | None:
         return None
 
     return cleaned
+
+
+class TextLink(NamedTuple):
+    """A link printed in running text: where it is and what it points to."""
+
+    start: int
+    end: int
+    # The link target. A URL printed without a scheme gets "https://"; a DOI
+    # printed bare ("doi:10.5281/zenodo.1234") becomes its doi.org URL.
+    url: str
+    # The printed form when it is not the target itself, else None.
+    link_text: str | None
+
+
+# A second URL printed straight after the first with no space between them
+# ("…/CompartmentShiny):https://doi.org/10.5281/…"). A scheme after "/" or "="
+# belongs to the first URL: an archived copy ("web.archive.org/web/2020/https://…")
+# or a query value ("?url=https://…", ";origin=https://…").
+_GLUED_URL_RE = re.compile(r"(?<![/=])https?://", re.IGNORECASE)
+
+# "host/path" printed without a scheme. What may not stand before it: a letter
+# or digit (the match would start inside a word), "@" (an email address), "/"
+# and "." (a file path or the rest of a longer host), the characters that join
+# the parts of a URL, and the invisible characters (zero-width space and joiners,
+# word joiner, BOM, soft hyphen) a typesetter puts inside a long URL to let it
+# wrap. The path is required: a bare "name.tld" is as often a company, a file
+# or two sentences with no space between them as it is a link.
+_SCHEMELESS_URL_RE = re.compile(
+    r"(?<![\w@/.:=~%+#&?\-\u200b\u200c\u200d\u2060\ufeff\u00ad])"
+    r"((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,6}([a-z]{2,24}))"
+    r"(/[^\s<>\"'\]},;@]+)",
+    re.IGNORECASE,
+)
+
+# Hosts papers print without a scheme, whatever their top-level domain: DOI and
+# short-link resolvers, and the repositories data and code are deposited in.
+# A subdomain of one counts too ("gist.github.com", "www.osf.io").
+_SCHEMELESS_KNOWN_HOSTS = (
+    "arxiv.org",
+    "aspredicted.org",
+    "bit.ly",
+    "bitbucket.org",
+    "doi.org",
+    "figshare.com",
+    "github.com",
+    "gitlab.com",
+    "hdl.handle.net",
+    "huggingface.co",
+    "openneuro.org",
+    "osf.io",
+    "psyarxiv.com",
+    "researchbox.org",
+    "zenodo.org",
+)
+
+# Top-level domains read as a link on any other host. Left out on purpose are
+# those that are also a file extension, an English word or a statistic's name
+# ("analysis.py/", "README.md/", "beta.se/", "is.it/", "train.dev/test"): a
+# missed link is cheaper than a made-up one.
+_SCHEMELESS_TLDS = frozenset(
+    {
+        "com",
+        "org",
+        "net",
+        "edu",
+        "gov",
+        "mil",
+        "int",
+        "io",
+        "info",
+        "eu",
+        "uk",
+        "de",
+        "fr",
+        "nl",
+        "ch",
+        "ca",
+        "au",
+        "jp",
+        "cn",
+        "dk",
+        "fi",
+        "es",
+        "pt",
+        "br",
+        "kr",
+        "nz",
+        "ie",
+    }
+)
+
+# A DOI printed without the doi.org URL, with or without a "doi:" label. The
+# characters that may not stand before it keep the match out of a longer number
+# or name; "/" may, because funders print their DOI after their name
+# ("MICIU/AEI/10.13039/501100011033"). The suffix class is DOI_CANDIDATE_RE's
+# plus the typeset hyphens DOI_HYPHENS reads as "-".
+_BARE_DOI_IN_TEXT_RE = re.compile(
+    r"(?<![\w.\-])(?:doi\s?:\s?)?(" + DOI_BODY + r"[-._;()/:A-Za-z0-9‐‑‒–−﹣－]+)",
+    re.IGNORECASE,
+)
+
+# A funder's DOI in the Open Funder Registry is its prefix and a number, nothing
+# more. Funders print it inside a longer string cut up by slashes
+# ("AEI/10.13039/501100011033/FEDER, UE"), so it ends where the digits do.
+_FUNDER_DOI_RE = re.compile(r"10\.13039/\d+")
+
+
+def _is_linkable_host(host: str, tld: str) -> bool:
+    """Whether a scheme-less *host* is read as a link (see the two lists above)."""
+    host = host.lower()
+    if any(host == known or host.endswith("." + known) for known in _SCHEMELESS_KNOWN_HOSTS):
+        return True
+    if tld.lower() not in _SCHEMELESS_TLDS:
+        return False
+    # The name before the top-level domain must hold a letter: "1.2.com" is not a host.
+    return any(ch.isalpha() for ch in host[: -len(tld) - 1])
+
+
+def find_text_links(text: str, *, bare: bool = True) -> list[TextLink]:
+    """Links printed in *text*, in reading order.
+
+    Always found: a URL with a scheme or a leading "www." (``URL_RE``), trimmed by
+    :func:`clean_extracted_url`. Two URLs printed with no space between them are
+    two links.
+
+    With *bare* (the default) also found, where no such URL already covers them:
+
+    - a URL printed without a scheme ("osf.io/s6bjp", "github.com/org/repo"), on a
+      host papers are known to print that way or under a common top-level domain,
+      and only with a path;
+    - a DOI printed without one ("doi:10.6084/m9.figshare.1", "(DOI: 10.15154/z563)").
+
+    Their ``url`` is the full target and ``link_text`` the printed form. Pass
+    ``bare=False`` for text where a DOI is not a link the author put in the prose
+    — a reference list, whose entries carry their DOI as a field of their own.
+    """
+    links: list[TextLink] = []
+    raw_ends: set[int] = set()
+    for match in URL_RE.finditer(text):
+        raw = match.group(0)
+        raw_ends.add(match.end())
+        cuts = [m.start() for m in _GLUED_URL_RE.finditer(raw) if m.start() > 0]
+        for lo, hi in zip([0, *cuts], [*cuts, len(raw)], strict=True):
+            # Trim trailing prose delimiters the regex over-captures (sentence
+            # punctuation, an unbalanced ')'); keeps balanced DOI parens.
+            url = clean_extracted_url(raw[lo:hi])
+            if url:
+                start = match.start() + lo
+                links.append(TextLink(start, start + len(url), url, None))
+    if not bare:
+        return links
+
+    def overlaps(start: int, end: int) -> bool:
+        return any(start < link.end and link.start < end for link in links)
+
+    schemed = len(links)
+    for match in _SCHEMELESS_URL_RE.finditer(text):
+        start = match.start()
+        if not _is_linkable_host(match.group(1), match.group(2)):
+            continue
+        # Straight after a URL that a line wrap cut short ("https://www.exam-
+        # ple.com/data"), this is the rest of that URL and not a second link.
+        if start and text[start - 1].isspace() and start - 1 in raw_ends:
+            continue
+        printed = clean_extracted_url(match.group(0))
+        path = printed[len(match.group(1)) :]
+        if not any(ch.isalnum() for ch in path) or overlaps(start, start + len(printed)):
+            continue
+        links.append(TextLink(start, start + len(printed), "https://" + printed, printed))
+
+    for match in _BARE_DOI_IN_TEXT_RE.finditer(text):
+        start = match.start(1)
+        funder = _FUNDER_DOI_RE.match(match.group(1))
+        if funder:
+            printed = funder.group(0)
+        else:
+            # No DOI ends on "/": one printed there separates it from what follows.
+            printed = clean_extracted_url(match.group(1).rstrip("/")).rstrip("/")
+        doi = normalize_doi(printed.translate(DOI_HYPHENS))
+        if doi is None or overlaps(start, start + len(printed)):
+            continue
+        links.append(TextLink(start, start + len(printed), "https://doi.org/" + doi, printed))
+
+    if len(links) > schemed:
+        links.sort(key=lambda link: link.start)
+    return links
 
 
 # Runs of any whitespace — spaces, tabs, newlines, CR, NBSP. ``\s`` (str mode)

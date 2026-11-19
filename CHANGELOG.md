@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A PDF's `url` list now holds links it used to miss:
+  - a URL printed without a scheme ("osf.io/s6bjp", "github.com/org/repo").
+    It is read as a link on a host papers print that way (DOI and short-link
+    resolvers, and the repositories data and code are deposited in) or under
+    a common top-level domain, and only with a path. A file name
+    ("data.csv/raw"), a version number, an email address and a top-level
+    domain that is also a word or a file extension (".py", ".md", ".se") are
+    left alone;
+  - a DOI printed without its doi.org URL in the text ("doi:10.5281/zenodo.1",
+    a funder's "10.13039/501100011033"). A reference's own DOI in the
+    reference list is not a link, as before;
+  - a URL in a figure caption, a table caption or a footnote. These rows are
+    made after the body text and were never searched.
+
+  `href` is the full target ("https://osf.io/s6bjp",
+  "https://doi.org/10.5281/zenodo.1") and `link_text` the printed form.
+- Two URLs printed with no space between them
+  ("…/repo):https://doi.org/10.5281/…") are two `url` entries, in PDF, HTML,
+  DOCX and JATS input. They were one entry with both addresses in its `href`.
+
 ## [0.9.1] - 2026-11-17
 
 The first 0.9 release; this section lists every change since 0.8.0. 0.9.0 was

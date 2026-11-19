@@ -1412,6 +1412,83 @@ class TestExportUrlSanity:
         assert "URL_MALFORMED_DROPPED" not in codes
 
 
+class TestExportCompletedLinksInReferenceEntries:
+    """A bare DOI or scheme-less URL bibr completed into a link is not a link
+    of the paper when a reference entry prints it. The parser cannot always
+    tell: a reference list with no heading of its own is found after parsing."""
+
+    def _paper(self, section_type: CanonicalSection, references=()) -> Paper:
+        entry = "Smith, J. (2020). A study. Journal, 1, 2-3. doi: 10.1234/abc https://osf.io/abcde"
+        contents = _minimal_contents(
+            sentences=[
+                PaperSentence(
+                    text_id=1, text="Data: 10.5281/zenodo.1.", section_id=1, paragraph_id=1
+                ),
+                PaperSentence(text_id=2, text=entry, section_id=2, paragraph_id=2),
+            ],
+            sections=[
+                PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+                PaperSection(1, "Intro", 1, 0, CanonicalSection.INTRODUCTION),
+                PaperSection(2, "Publisher's note", 1, 0, section_type),
+            ],
+            links=[
+                PaperURLLink(
+                    url="https://doi.org/10.5281/zenodo.1",
+                    section_id=1,
+                    paragraph_id=1,
+                    text_id=1,
+                    link_text="10.5281/zenodo.1",
+                    completed=True,
+                ),
+                PaperURLLink(
+                    url="https://doi.org/10.1234/abc",
+                    section_id=2,
+                    paragraph_id=2,
+                    text_id=2,
+                    link_text="10.1234/abc",
+                    completed=True,
+                ),
+                PaperURLLink(url="https://osf.io/abcde", section_id=2, paragraph_id=2, text_id=2),
+            ],
+        )
+        metadata = PaperMetadata(doi="10.1234/test", title="Test Paper")
+        metadata.references = list(references)
+        return _minimal_paper(contents=contents, metadata=metadata)
+
+    @staticmethod
+    def _hrefs(paper: Paper) -> list[str]:
+        return [u["href"] for u in export_paper_to_json(paper)["url"]]
+
+    def test_dropped_in_a_section_typed_references_after_parsing(self):
+        assert self._hrefs(self._paper(CanonicalSection.REFERENCES)) == [
+            "https://doi.org/10.5281/zenodo.1",
+            "https://osf.io/abcde",
+        ]
+
+    def test_dropped_in_the_row_of_a_reference_entry(self):
+        reference = PaperReference(
+            bib_id=1,
+            title="A study",
+            first_page=None,
+            volume=None,
+            authors=None,
+            year=2020,
+            container=None,
+            text_id=2,
+        )
+        assert self._hrefs(self._paper(CanonicalSection.UNKNOWN, [reference])) == [
+            "https://doi.org/10.5281/zenodo.1",
+            "https://osf.io/abcde",
+        ]
+
+    def test_kept_outside_a_reference_list(self):
+        assert self._hrefs(self._paper(CanonicalSection.UNKNOWN)) == [
+            "https://doi.org/10.5281/zenodo.1",
+            "https://doi.org/10.1234/abc",
+            "https://osf.io/abcde",
+        ]
+
+
 class TestExportEmptyEqGate:
     """Audit export-3: a blank equation side reaches the export as '' and must
     trip VAL_EMPTY_EQ in extraction.validation (not silently ship)."""

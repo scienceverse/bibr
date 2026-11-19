@@ -863,6 +863,10 @@ class PaperURLLink:
     paragraph_id: int  # originating paragraph
     text_id: int  # originating sentence
     link_text: str | None = None  # text of the hyperlink (None for plain-text URLs)
+    # True when the paper prints no full URL here: bibr completed a URL printed
+    # without its scheme, or a bare DOI. Such a link is left out of a reference
+    # list (see bibr.export.json_export._links_outside_reference_entries).
+    completed: bool = False
 
 
 @dataclass

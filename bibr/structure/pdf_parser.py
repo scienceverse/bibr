@@ -307,6 +307,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         self.sections: list[PaperSection] = []
         self.sentences: list[PaperSentence] = []
         self.links: list[PaperURLLink] = []
+        # section_id -> headed as the reference list (see _detect_urls).
+        self._reference_list_sections: dict[int, bool] = {}
         self.tables: list[PaperTable] = []
         # Pending footnotes: each record is (text, page_number,
         # body_section_id, deferred_text_index). Converted to sections +
@@ -665,6 +667,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     from_ocr=caption_from_ocr.get(fig.caption.strip(), True),
                 )
                 contents.sentences.append(sent)
+                self._detect_urls(sent)
                 self._sentence_counter += 1
 
         # --- Table sections ---
@@ -698,6 +701,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     from_ocr=caption_from_ocr.get(tbl.caption.strip(), True),
                 )
                 contents.sentences.append(sent)
+                self._detect_urls(sent)
                 self._sentence_counter += 1
 
         # --- Footnote sections + xrefs ---
@@ -735,6 +739,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 from_ocr=fn_from_ocr,
             )
             contents.sentences.append(sent)
+            self._detect_urls(sent)
             self._sentence_counter += 1
 
             # A note printed without a mark (an author note, or text taken

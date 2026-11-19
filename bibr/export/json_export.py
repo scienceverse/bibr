@@ -77,6 +77,7 @@ from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
 from bibr.export.structure_ids import ExportIds, export_ids
 from bibr.extract.research_integrity import affiliation_key, collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
+from bibr.paper_contents import CanonicalSection
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.citation_linker import reanchor_citation_receipt
 from bibr.utils.text import normalize_doi
@@ -454,6 +455,37 @@ def _normalize_export_url(url: str) -> str:
     """
     cleaned = "".join(url.split())
     return cleaned.rstrip(".")
+
+
+def _links_outside_reference_entries(paper: Paper) -> list:
+    """The paper's links, without those bibr completed inside a reference entry.
+
+    A DOI a reference entry prints is that reference's own (``bib.doi``), not a
+    link of the paper. The parser already skips bare DOIs and scheme-less URLs
+    under a heading that names the reference list; a list found later, by its
+    position or its entries, is only known here, where its sections are typed
+    and its entries carry their row. A URL an entry prints in full stays.
+    """
+    links = paper.contents.links
+    if not any(link.completed for link in links):
+        return links
+    reference_sections = {
+        section.section_id
+        for section in paper.contents.sections
+        if section.section_type == CanonicalSection.REFERENCES
+    }
+    entry_rows = {
+        reference.text_id
+        for reference in (paper.metadata.references if paper.metadata else [])
+        if reference.text_id is not None
+    }
+    # Read from the rows as they are now: a row can change section after parsing.
+    entry_rows.update(
+        sentence.text_id
+        for sentence in paper.contents.sentences
+        if sentence.section_id in reference_sections
+    )
+    return [link for link in links if not (link.completed and link.text_id in entry_rows)]
 
 
 def _sane_export_links(links: list) -> tuple[list, list]:
@@ -1085,7 +1117,7 @@ def _export_paper_payload(
     xref_locator = SpanLocator(texts, shared=True)
     url_locator = SpanLocator(texts, shared=False)
     eq_locator = SpanLocator(texts, shared=False)
-    exported_links, dropped_links = _sane_export_links(paper.contents.links)
+    exported_links, dropped_links = _sane_export_links(_links_outside_reference_entries(paper))
     # A dropped link leaves no trace in the payload, so record each loss as a
     # coded warning (read on by the extraction-warnings union below). Without
     # this the malformed-URL loss is silent (audit export-3). These stay local
