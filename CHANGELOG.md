@@ -48,6 +48,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a real card of 40 to 64 GB. Set `LLM_LOCAL_MEM_FRACTION=0.85` to keep the
   0.9.1 plan.
 
+- With PaddleOCR-VL on the managed vLLM server (`--ocr paddle` on a CUDA
+  machine), bibr prepares the next file while the server reads the current
+  one. The OCR phase handled one file strictly in series: render the pages
+  and find their layout, read the PDF's own text, then wait for OCR, and only
+  then start on the next file. The server sat idle while bibr prepared a
+  file, and bibr sat idle while the server read it. The next file's render,
+  layout and text pass now run during the current file's OCR, so the pages of
+  at most two files are in memory instead of one. `--memory aggressive` keeps
+  the one-file bound, and an in-process OCR engine and remote OCR behave as
+  before. On an RTX 5090, with both servers kept up for the run, 120
+  born-digital papers took 605 s in chunks of 8 against 729 s without it (715
+  against 592 papers an hour), and 570 s against 693 s as one chunk of 120
+  (758 against 624), bibr starting both servers itself in every run. Those
+  runs measured speed, not accuracy.
+
 ### Fixed
 
 - A PDF's `url` list now holds links it used to miss:
