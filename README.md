@@ -82,7 +82,7 @@ standing for the fields left out:
 
 ```json
 {
-  "schema_version": "12.4",
+  "schema_version": "12.5",
   "metadata": {"title": "The Coefficient of Rodential Efficiency: A Synthetic Benchmark",
                "language": "en", "paper_type": "empirical", "doi": null, "...": "..."},
   "author": [{"author_id": 1, "given": "Ada", "family": "Vole", "orcid": null, "...": "..."}],

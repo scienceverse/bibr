@@ -1386,10 +1386,12 @@ def _export_paper_payload(
                 text_id=link.text_id,
                 start=span[0] if span else None,
                 end=span[1] if span else None,
+                # Written only on a link printed in a table cell.
+                table_id=ids.table_id(link.table_id) if link.table_id is not None else None,
             )
             for position, link in enumerate(exported_links, start=1)
             for href in (_normalize_export_url(link.url),)
-            for span in (url_span(url_locator, link, href),)
+            for span in (url_span(url_locator, link, href) if link.text_id is not None else None,)
         ],
         bib=bib_data,
         xref=[

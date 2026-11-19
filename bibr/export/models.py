@@ -24,11 +24,19 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.4"
+_SCHEMA_VERSION = "12.5"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.4 export schema — single source of truth for validation
+# Pydantic v12.5 export schema — single source of truth for validation
+#
+# v12.5 (vs 12.4) — additive:
+#   - ``url[]`` now also lists the links printed in table cells. Such a row
+#     carries the new ``url[].table_id`` (the table's ``table_id``) and a null
+#     ``text_id``, ``start`` and ``end``: a cell is in no ``text[]`` row.
+#     ``url[].text_id`` was never null before 12.5; ``table_id`` is omitted on
+#     a link in a sentence, so every 12.4 export is still a valid 12.5 reader
+#     input.
 #
 # v12.4 (vs 12.3) — additive:
 #   - New ``extraction.settings.mode`` (``fast`` or ``full``): the run mode
@@ -742,7 +750,15 @@ class UrlExport(BaseModel):
         description="Visible link text when it differs from the URL; null when the URL itself "
         "is the text."
     )
-    text_id: Id = Field(description="text[].text_id of the sentence containing the link.")
+    text_id: Id | None = Field(
+        description="text[].text_id of the sentence containing the link; null for a link "
+        "printed in a table cell, which is in no sentence (see table_id)."
+    )
+    table_id: Id | None = Field(
+        default=None,
+        description="table[].table_id of the table whose cell prints the link. Omitted for a "
+        "link in a sentence, and before schema 12.5.",
+    )
     start: int | None = Field(
         default=None,
         ge=0,
@@ -755,6 +771,18 @@ class UrlExport(BaseModel):
         description="Where the link's visible text (or the URL) ends (exclusive), in the same "
         "units as start.",
     )
+
+    # A reader of a 12.4 export finds no such key. Written only on a link
+    # printed in a table cell.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("table_id",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class BibExport(BaseModel):
@@ -2546,7 +2574,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.4"] = Field(
+    schema_version: Literal["12.5"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

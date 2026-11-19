@@ -63,7 +63,7 @@ library(jsonlite)
 
 paper <- read_json("paper.json", simplifyVector = TRUE)
 
-paper$schema_version          # "12.4"
+paper$schema_version          # "12.5"
 paper$metadata$title
 paper$metadata$doi            # NULL when the paper prints no DOI
 paper$author[, c("given", "family", "orcid")]

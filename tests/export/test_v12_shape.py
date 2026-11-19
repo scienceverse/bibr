@@ -92,7 +92,7 @@ def test_gate_findings_are_not_mirrored_into_warnings():
 
 
 def test_schema_version_is_at_the_root(export_payload):
-    assert export_payload["schema_version"] == "12.4"
+    assert export_payload["schema_version"] == "12.5"
     assert "schema_version" not in export_payload.get("metadata", {})
 
 
@@ -1051,3 +1051,45 @@ def test_a_12_3_export_without_the_new_keys_still_reads(demo_paper):
     assert PaperExportReader.model_validate(older).schema_version == "12.3"
     with pytest.raises(ValueError, match="schema_version"):
         PaperExport.model_validate(older)
+
+
+# ── 12.5: url[].table_id, a link printed in a table cell ─────────────────
+
+
+def test_table_cell_link_points_at_its_table_and_at_no_text_row(demo_paper):
+    from bibr.export import PaperExport, export_paper_to_json
+    from bibr.paper_contents import PaperURLLink
+
+    table = demo_paper.contents.tables[0]
+    demo_paper.contents.links.append(
+        PaperURLLink(
+            url="https://doi.org/10.35802/227093",
+            section_id=table.section_id,
+            link_text="10.35802/227093",
+            completed=True,
+            table_id=table.table_id,
+        )
+    )
+
+    payload = export_paper_to_json(demo_paper)
+
+    in_sentence, in_table = payload["url"]
+    assert "table_id" not in in_sentence
+    assert in_table == {
+        "url_id": 2,
+        "href": "https://doi.org/10.35802/227093",
+        "link_text": "10.35802/227093",
+        "text_id": None,
+        "start": None,
+        "end": None,
+        "table_id": payload["table"][0]["table_id"],
+    }
+    PaperExport.model_validate(payload)
+
+
+def test_a_12_4_export_without_table_links_still_reads(demo_paper):
+    from bibr.export import PaperExportReader, export_paper_to_json
+
+    older = {**export_paper_to_json(demo_paper), "schema_version": "12.4"}
+    assert all("table_id" not in row for row in older["url"])
+    assert PaperExportReader.model_validate(older).schema_version == "12.4"
