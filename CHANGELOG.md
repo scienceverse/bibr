@@ -25,6 +25,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `bibr batch --llm local` on a vLLM server bibr starts now extracts 16 papers
+  at once instead of 4. `PIPELINE_MAX_CONCURRENT_POST_PARSE` defaults to 4,
+  which suits a cloud quota, but the vLLM server batches up to 64 requests and
+  four papers sent it about 4.5 a second. bibr raises the setting to 16 when it
+  points the pipeline at that server, the way it already raises
+  `LLM_RATE_LIMIT_RPM`. Measured on an RTX 5090 with 120 PDFs in one chunk and
+  both servers kept loaded: 476 s instead of 570 s (907 papers an hour instead
+  of 758), all 120 extracted with the same row counts. 48 gave 466 s, and a
+  paper's extraction then took up to 93 s, so the default stays at 16. Other
+  backends keep 4. Set `PIPELINE_MAX_CONCURRENT_POST_PARSE` yourself to
+  override it; `4` gives the old behaviour.
+
 - On a card of 32 to 64 GB the default local plan (`--llm local --ocr paddle`
   in balanced memory mode) keeps the managed vLLM LLM server and the managed
   PaddleOCR-VL server up together for the whole run. In 0.9.1 the default LLM
