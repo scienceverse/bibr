@@ -4,7 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.9.2] - 2026-11-19
+
+A patch release for links. A PDF's `url` list now finds links it used to miss
+(addresses printed without a scheme, DOIs printed without doi.org, and links in
+captions and footnotes), repairs addresses the line breaks damaged from the
+PDF's own link annotations, and splits two addresses printed with no space
+between them. Links printed in table cells join the `url` list, which moves the
+export to schema 12.5; it only adds the key `url[].table_id`, but `text_id` can
+now be null.
 
 ### Added — export schema 12.5 (additive)
 
