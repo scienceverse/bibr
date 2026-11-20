@@ -50,6 +50,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Two URLs printed with no space between them
   ("…/repo):https://doi.org/10.5281/…") are two `url` entries, in PDF, HTML,
   DOCX and JATS input. They were one entry with both addresses in its `href`.
+- `LLM_PROVIDER=anthropic` works with Claude Sonnet 5.5 and Sonnet 5. Every
+  call failed with a 400 from the API:
+  - Sonnet 5.5 rejects a forced tool call ("tool_choice: type "tool" and
+    "any" are not supported for this model."). Calls to it, and to Opus 5.5
+    and Fable and Mythos 5.1 and 5.2, which reject it too, now offer the
+    answer tool without forcing it. The offline Message Batches adapter does
+    the same and asks for the tool call in its system prompt;
+  - Sonnet 5 rejects a `temperature` ("`temperature` is deprecated for this
+    model."). Calls to it carry none, as for Haiku 5.5 already, and
+    `LLM_THINKING_BUDGET` is ignored with a warning. The same now holds for
+    Opus 4.7, 4.8 and 5, Fable 5 and 5.2 and Mythos 5.
+
+  Sonnet 5.5 ran 390 papers with this change and no failed call. Sonnet 5 has
+  not been run on papers since, and the other models were added from
+  Anthropic's documentation without a run.
 
 ## [0.9.1] - 2026-11-17
 
