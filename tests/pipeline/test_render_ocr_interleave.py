@@ -11,6 +11,7 @@ is bounded by the window (1 file for local OCR), not the chunk size.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -333,3 +334,242 @@ async def test_window_mode_never_trims_after_the_last_window(monkeypatch, n_file
     await _stage(files, [0]).run(ctx)
 
     assert len(calls) == trims
+
+
+# --- One-file prepare lookahead ---------------------------------------------
+#
+# With a managed vLLM OCR server the engine is another process: while file N
+# waits on it, file N+1 renders, gets its layout and has its text layer read.
+# Two files' pages are then resident instead of one. In-process engines and
+# aggressive memory mode keep the strict one-file bound.
+
+
+class _RecordingLayout(_CountingLayout):
+    """Fake LayoutStage that also records call order, reports progress like
+    the real one, and sets ``any_needs_ocr`` from a per-file table."""
+
+    def __init__(self, all_files, peak, calls, needs_ocr=None):
+        super().__init__(all_files, peak)
+        self._calls = calls
+        self._needs_ocr = needs_ocr or {}
+
+    async def run(self, ctx):
+        ctx.progress.stage_start(self.name)
+        for fs in ctx.alive():
+            self._calls.append(fs.path.name)
+            ctx.signals.any_needs_ocr = self._needs_ocr.get(fs.path.name, True)
+        await super().run(ctx)
+        ctx.progress.stage_end(self.name)
+
+
+class _YieldingOcr(_CountingOcr):
+    """Fake OcrStage that waits like the real one does on the OCR server, then
+    records what it saw: whether the following file was prepared meanwhile,
+    and the ``any_needs_ocr`` signal."""
+
+    def __init__(self, all_files, peak, seen, *, publish_identity=None, raise_for=()):
+        super().__init__(all_files, peak)
+        self._seen = seen
+        self._publish_identity = publish_identity
+        self._raise_for = set(raise_for)
+
+    async def run(self, ctx):
+        (fs,) = ctx.file_states
+        ctx.progress.stage_start(self.name)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        if self._publish_identity is not None:
+            # The real stage records the runtime the automatic chain started.
+            ctx.scratch["ocr_runtime_identity"] = self._publish_identity
+        idx = self._all.index(fs)
+        following = self._all[idx + 1] if idx + 1 < len(self._all) else None
+        self._seen.append(
+            {
+                "file": fs.path.name,
+                "next_prepared": following is not None and following.page_images is not None,
+                "any_needs_ocr": ctx.signals.any_needs_ocr,
+            }
+        )
+        if fs.path.name in self._raise_for:
+            raise RuntimeError(f"OCR crashed on {fs.path.name}")
+        await super().run(ctx)
+        ctx.progress.stage_end(self.name)
+
+
+class _RecordingProgress(NullProgress):
+    def __init__(self):
+        self.events: list[tuple[str, str]] = []
+
+    def stage_start(self, name, detail=""):
+        self.events.append(("start", name))
+
+    def stage_end(self, name):
+        self.events.append(("end", name))
+
+
+def _lookahead_stage(files, peak, seen, calls, **ocr_kwargs) -> InterleavedRenderOcrStage:
+    return InterleavedRenderOcrStage(
+        layout=_RecordingLayout(files, peak, calls),
+        native_text=_NoopNative(),
+        ocr=_YieldingOcr(files, peak, seen, **ocr_kwargs),
+    )
+
+
+_VLLM_OCR = {"ocr_backend": "paddle-vllm", "memory_mode": "balanced"}
+
+
+@pytest.mark.asyncio
+async def test_managed_vllm_ocr_prepares_the_next_file_while_ocr_runs():
+    files = _mk_files(4)
+    seen: list[dict] = []
+    ctx = _ctx(files, RunConfig(**_VLLM_OCR))
+
+    await _lookahead_stage(files, [0], seen, []).run(ctx)
+
+    # While each file waited on the OCR server, the following one was rendered.
+    assert [s["next_prepared"] for s in seen] == [True, True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_lookahead_holds_at_most_two_files_pages_and_frees_them_all():
+    files = _mk_files(6)
+    peak = [0]
+    ctx = _ctx(files, RunConfig(**_VLLM_OCR))
+
+    await _lookahead_stage(files, peak, [], []).run(ctx)
+
+    assert peak[0] == 2
+    assert all(fs.ocr_regions is not None for fs in files)
+    assert all(fs.page_images is None for fs in files)
+    assert all(fs.pdf_bytes is None for fs in files)
+
+
+@pytest.mark.asyncio
+async def test_lookahead_keeps_file_order_and_prepares_each_file_once():
+    files = _mk_files(5)
+    seen: list[dict] = []
+    calls: list[str] = []
+    ctx = _ctx(files, RunConfig(**_VLLM_OCR))
+
+    await _lookahead_stage(files, [0], seen, calls).run(ctx)
+
+    names = [fs.path.name for fs in files]
+    assert calls == names
+    assert [s["file"] for s in seen] == names
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        # An in-process engine shares this process's memory and CPU.
+        {"ocr_backend": "glm-mlx", "memory_mode": "balanced"},
+        # Aggressive mode is the explicit request for the smallest footprint.
+        {"ocr_backend": "paddle-vllm", "memory_mode": "aggressive"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_no_lookahead_for_in_process_engines_or_aggressive_memory(config):
+    files = _mk_files(4)
+    peak = [0]
+    seen: list[dict] = []
+    ctx = _ctx(files, RunConfig(**config))
+
+    await _lookahead_stage(files, peak, seen, []).run(ctx)
+
+    assert peak[0] == 1
+    assert not any(s["next_prepared"] for s in seen)
+
+
+@pytest.mark.asyncio
+async def test_automatic_chain_starts_the_lookahead_once_the_runtime_is_known():
+    from bibr.ocr.profiles import resolve_ocr_runtime_identity
+
+    files = _mk_files(4)
+    seen: list[dict] = []
+    # ``paddle`` is the automatic chain: which engine runs is known only after
+    # the first file's OCR started it, so the first file runs without lookahead.
+    ctx = _ctx(files, RunConfig(ocr_backend="paddle", memory_mode="balanced"))
+    started = resolve_ocr_runtime_identity(RunConfig(ocr_backend="paddle-vllm"), Settings)
+
+    await _lookahead_stage(files, [0], seen, [], publish_identity=started).run(ctx)
+
+    assert [s["next_prepared"] for s in seen] == [False, True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_lookahead_layout_does_not_change_the_signal_of_the_file_in_ocr():
+    files = _mk_files(3)
+    peak = [0]
+    seen: list[dict] = []
+    needs = {"0.pdf": True, "1.pdf": False, "2.pdf": True}
+    stage = InterleavedRenderOcrStage(
+        layout=_RecordingLayout(files, peak, [], needs_ocr=needs),
+        native_text=_NoopNative(),
+        ocr=_YieldingOcr(files, peak, seen),
+    )
+    ctx = _ctx(files, RunConfig(**_VLLM_OCR))
+
+    await stage.run(ctx)
+
+    # Each file's OCR reads the signal its own layout pass set, although the
+    # following file's layout ran in the meantime.
+    assert {s["file"]: s["any_needs_ocr"] for s in seen} == needs
+    assert [s["next_prepared"] for s in seen] == [True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_lookahead_reports_no_progress_under_the_running_ocr():
+    files = _mk_files(3)
+    progress = _RecordingProgress()
+    seen: list[dict] = []
+    ctx = _ctx(files, RunConfig(**_VLLM_OCR))
+    ctx.progress = progress
+
+    await _lookahead_stage(files, [0], seen, []).run(ctx)
+
+    assert [s["next_prepared"] for s in seen] == [True, True, False]
+    # The display follows one file at a time: no layout line opens between an
+    # OCR start and its end.
+    open_stage = None
+    for kind, name in progress.events:
+        if kind == "start":
+            assert open_stage is None, f"{name} started while {open_stage} was open"
+            open_stage = name
+        else:
+            assert open_stage == name
+            open_stage = None
+
+
+@pytest.mark.asyncio
+async def test_ocr_crash_cancels_the_lookahead_and_frees_its_pages():
+    files = _mk_files(3)
+    peak = [0]
+    cancelled: list[str] = []
+
+    class _HangingLayout(_CountingLayout):
+        async def run(self, ctx):
+            (fs,) = ctx.file_states
+            await super().run(ctx)
+            if fs.path.name == "2.pdf":
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.append(fs.path.name)
+                    raise
+
+    stage = InterleavedRenderOcrStage(
+        layout=_HangingLayout(files, peak),
+        native_text=_NoopNative(),
+        ocr=_YieldingOcr(files, peak, [], raise_for={"1.pdf"}),
+    )
+    ctx = _ctx(files, RunConfig(**_VLLM_OCR))
+
+    with pytest.raises(RuntimeError, match=r"OCR crashed on 1\.pdf"):
+        await asyncio.wait_for(stage.run(ctx), timeout=5)
+
+    # The prepare of the following file was running when OCR crashed: it is
+    # cancelled, its pages are released and nothing outlives the stage.
+    assert cancelled == ["2.pdf"]
+    assert files[2].page_images is None
+    leftover = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+    assert leftover == []
