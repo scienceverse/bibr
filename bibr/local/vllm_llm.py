@@ -35,6 +35,15 @@ from bibr.local.http_runtime import (
 
 logger = logging.getLogger(__name__)
 
+# Papers the extract stage works on at once against a vLLM server bibr started.
+# ``PIPELINE_MAX_CONCURRENT_POST_PARSE``'s default of 4 suits a cloud quota or a
+# server that answers one request at a time; this one batches up to 64
+# sequences, and four papers kept it at about 4.5 requests a second. Measured on
+# a 32 GB card over 120 papers: 16 cut the run from 570 s to 476 s, 48 only to
+# 466 s while a paper's extraction took up to 93 s, past the 90 s a paper's
+# equation pass is given. Setting the variable suppresses this.
+MANAGED_VLLM_MAX_CONCURRENT_POST_PARSE = 16
+
 
 def max_model_len(model: str, extra_args: str | None) -> int | None:
     """The ``--max-model-len`` a vLLM server for *model* is launched with, if any.
@@ -419,6 +428,12 @@ class VllmLlmServer:
             logger.info(
                 "Local vLLM backend — raising llm.rate_limit_rpm to %d",
                 MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+            )
+        if "max_concurrent_post_parse" not in settings.pipeline.model_fields_set:
+            settings.pipeline.max_concurrent_post_parse = MANAGED_VLLM_MAX_CONCURRENT_POST_PARSE
+            logger.info(
+                "Local vLLM backend — raising pipeline.max_concurrent_post_parse to %d",
+                MANAGED_VLLM_MAX_CONCURRENT_POST_PARSE,
             )
         logger.info(
             "LLM configured: provider=openai, model=%s, base_url=%s",

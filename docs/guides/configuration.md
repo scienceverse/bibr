@@ -299,6 +299,12 @@ loopback, a private network or a tailnet, bibr uses 600 instead, so the server's
 own queue and `LLM_MAX_CONCURRENCY` set the pace. The `ollama` provider gets 10.
 Setting `LLM_RATE_LIMIT_RPM` yourself overrides all of these.
 
+`PIPELINE_MAX_CONCURRENT_POST_PARSE` sets how many papers of a chunk are in
+extraction at once. It defaults to 4. For a vLLM server bibr starts itself
+(the `vllm` runtime of `--llm local`) bibr uses 16, because that server
+answers many requests in one batch. Setting the variable yourself overrides
+both; lower it if a slow GPU runs into LLM request timeouts.
+
 The provider SDK sends each LLM request once and gives it up after twice
 `LLM_TIMEOUT_SECONDS`. bibr retries rate limits (429), server errors (5xx),
 request timeouts and conflicts (408, 409) and dropped connections itself, up
