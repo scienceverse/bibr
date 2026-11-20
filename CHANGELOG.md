@@ -4,7 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.9.2] - 2026-11-20
+
+A speed and links release. On a CUDA machine the default local plan gets
+faster in three ways: on a card of 32 to 64 GB the vLLM LLM server and the
+PaddleOCR-VL server stay up together instead of both restarting every chunk,
+bibr prepares the next file while PaddleOCR-VL reads the current one, and
+`bibr batch` sends 16 papers at a time to a vLLM server it starts, not 4. On an
+RTX 5090 with 120 born-digital papers in chunks of 8, 0.9.1 ran 267 papers an
+hour, keeping both servers up gave 606 and the lookahead 715. As one chunk of
+120, the three together ran 907 papers an hour. Those runs measured speed, not
+accuracy. See Changed.
+
+A PDF's `url` list now finds links it used to miss (addresses printed without a
+scheme, DOIs printed without doi.org, and links in captions and footnotes),
+repairs addresses the line breaks damaged from the PDF's own link annotations,
+and splits two addresses printed with no space between them. Links printed in
+table cells join the `url` list, which moves the export to schema 12.5; it only
+adds the key `url[].table_id`, but `text_id` can now be null.
+
+`LLM_PROVIDER=anthropic` works with Claude Sonnet 5.5 and Sonnet 5, where every
+call failed with a 400.
 
 ### Added — export schema 12.5 (additive)
 
