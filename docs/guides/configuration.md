@@ -299,6 +299,12 @@ loopback, a private network or a tailnet, bibr uses 600 instead, so the server's
 own queue and `LLM_MAX_CONCURRENCY` set the pace. The `ollama` provider gets 10.
 Setting `LLM_RATE_LIMIT_RPM` yourself overrides all of these.
 
+`PIPELINE_MAX_CONCURRENT_POST_PARSE` sets how many papers of a chunk are in
+extraction at once. It defaults to 4. For a vLLM server bibr starts itself
+(the `vllm` runtime of `--llm local`) bibr uses 16, because that server
+answers many requests in one batch. Setting the variable yourself overrides
+both; lower it if a slow GPU runs into LLM request timeouts.
+
 The provider SDK sends each LLM request once and gives it up after twice
 `LLM_TIMEOUT_SECONDS`. bibr retries rate limits (429), server errors (5xx),
 request timeouts and conflicts (408, 409) and dropped connections itself, up
@@ -311,11 +317,16 @@ not stream, so it caps the output of one call at 16,384 tokens (8,192 for
 Claude Opus 4 and 4.1) even when `LLM_MAX_TOKENS` is higher. A
 `LLM_THINKING_BUDGET` above that cap less 1,024 tokens leaves too little room
 for the answer, so calls are then sent without thinking and a warning is
-logged. Claude Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.1 reject any `temperature`, so
+logged. Claude Opus 4.7 and 4.8, Haiku 5.5 and the Sonnet 5, Opus 5, Fable 5
+and Mythos 5 families (5.5, 5.1 and 5.2 included) reject any `temperature`, so
 calls to them carry none and the model samples at its own default; the same
 paper can then come back slightly different between runs. They take adaptive
 thinking instead of a token budget, which bibr does not send yet, so
-`LLM_THINKING_BUDGET` is ignored for them and a warning is logged. The
+`LLM_THINKING_BUDGET` is ignored for them and a warning is logged. Claude
+Sonnet 5.5, Opus 5.5 and Fable and Mythos 5.1 and 5.2 also reject a forced
+tool call, so bibr offers them its one answer tool without forcing it; an
+answer that comes back without the tool call is retried like any other
+invalid answer. The
 `anthropic` provider needs the anthropic SDK below 1.0, which the `anthropic`
 extra installs (`uv add 'bibr[anthropic]'`; `bibr setup` installs it when you pick
 Anthropic). Without it, or with 1.0 or later, bibr stops before the first call

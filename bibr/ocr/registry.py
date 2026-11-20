@@ -623,6 +623,20 @@ def automatic_backend_names(*, llm_backend: str | None = None) -> tuple[str, ...
     return ("glm-llama",)
 
 
+def requests_managed_paddle_vllm(ocr_backend: str | None, *, llm_backend: str | None) -> bool:
+    """Whether *ocr_backend* is, or may resolve to, a managed paddle-vllm server.
+
+    ``paddle-vllm`` itself, or the automatic ``paddle`` chain on hardware
+    where it lists paddle-vllm for a run with *llm_backend*. The caller rules
+    out an OCR URL, which names someone else's server.
+    """
+    if ocr_backend == "paddle-vllm":
+        return True
+    if ocr_backend != "paddle":
+        return False
+    return "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
+
+
 def local_runtime_unavailable_reason(backend: str) -> str | None:
     """Cheap, start-nothing check that a managed local OCR runtime can launch.
 

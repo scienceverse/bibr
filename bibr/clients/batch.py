@@ -3,9 +3,10 @@
 Deliberately separate from bibr/clients/llm.py (the live, per-request path).
 Turns a list of independent structured-extraction requests into one provider
 batch job, polls to completion, and returns validated pydantic results keyed
-by a caller custom_id. Structured output is a forced tool whose input_schema
+by a caller custom_id. Structured output is a tool whose input_schema
 is the request schema's model_json_schema() sanitized to strict-tool-legal
-form. The `anthropic` SDK is imported lazily (a core dependency; the `batch` extra
+form. The call is forced, except on the models that reject a forced tool
+call, which are asked for it in the system prompt. The `anthropic` SDK is imported lazily (a core dependency; the `batch` extra
 names it too).
 """
 
@@ -104,11 +105,13 @@ def _tool_use_input(message):
 # If the SDK/API rejects strict tools (needs a beta header on your SDK version),
 # flip to False — forced tool_choice + client-side pydantic validation still
 # guarantees a schema-valid result; strict only adds grammar-level enforcement.
+# Models that reject a forced tool call are not forced, so for them strict is
+# the only schema guarantee before validation.
 _STRICT_TOOLS = True
 
 
 class AnthropicBatchAdapter:
-    """Anthropic Message Batches adapter (forced-tool structured output)."""
+    """Anthropic Message Batches adapter (structured output through one tool)."""
 
     def __init__(
         self,
@@ -126,7 +129,21 @@ class AnthropicBatchAdapter:
         self._settings = settings if settings is not None else snapshot_settings()
 
     def _build_request(self, req: BatchRequest) -> dict:
+        # Imported here: the provider module loads Instructor.
+        from bibr.clients.providers.anthropic import rejects_forced_tool_choice
+
         tool_name = _tool_name(req.schema)
+        system = req.system
+        tool_choice: dict = {"type": "tool", "name": tool_name}
+        if rejects_forced_tool_choice(self.model):
+            # The API answers a forced call with a 400 for these models, so
+            # the prompt asks for the call instead. An answer without it comes
+            # back as a ``no_tool_use`` error for that request.
+            system = (
+                f"{system}\n\nAnswer by calling the {tool_name} tool exactly once. "
+                "Write no other text."
+            )
+            tool_choice = {"type": "auto"}
         tool = {
             "name": tool_name,
             "description": f"Emit the {tool_name} structured result.",
@@ -138,10 +155,10 @@ class AnthropicBatchAdapter:
             "params": {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
-                "system": req.system,
+                "system": system,
                 "messages": [{"role": "user", "content": req.user_text}],
                 "tools": [tool],
-                "tool_choice": {"type": "tool", "name": tool_name},
+                "tool_choice": tool_choice,
             },
         }
 

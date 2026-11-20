@@ -45,14 +45,38 @@ _NONSTREAMING_MAX_TOKENS = 16_384
 # carry neither and the model samples at its own default. They also reject
 # budget-style thinking ("thinking.type.enabled" is not supported) in favour of
 # adaptive thinking with an effort level, which bibr does not send yet.
-# Prefixes, so dated snapshot ids match too; a new family is a one-line
-# addition. Checked against the live API on 2026-10-13 (the thinking
-# rejection on Haiku 5.5 and Fable 5.1 only).
+# Prefixes, so dated snapshot ids match too ("claude-sonnet-5" covers Sonnet 5
+# and 5.5); a new family is a one-line addition. Haiku 5.5, Sonnet 5.5,
+# Opus 5.5 and Fable 5.1 were checked against the live API on 2026-10-13 (the
+# thinking rejection on Haiku 5.5 and Fable 5.1 only) and Sonnet 5 answered
+# the temperature 400 on 2026-11-17; the rest are from Anthropic's
+# documentation.
 _SAMPLING_FREE_MODELS: tuple[str, ...] = (
     "claude-haiku-5-5",
+    "claude-sonnet-5",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+# Claude models that reject a forced tool call. Instructor forces its response
+# tool (``tool_choice`` of type ``tool``) unless the call names a
+# ``tool_choice`` of its own, and the API answers that with a 400
+# ("tool_choice: type "tool" and "any" are not supported for this model."), so
+# calls to them ask for ``{"type": "auto"}`` and the model picks the one tool
+# it is offered. Sonnet 5, Opus 5, Fable 5 and Haiku 5.5 still accept a forced
+# tool and keep it. Prefixes again. Sonnet 5.5 answered the 400 on 2026-11-17
+# and then ran 390 papers with ``auto``; the rest are from Anthropic's
+# documentation.
+_NO_FORCED_TOOL_MODELS: tuple[str, ...] = (
     "claude-sonnet-5-5",
     "claude-opus-5-5",
     "claude-fable-5-1",
+    "claude-fable-5-2",
+    "claude-mythos-5-1",
+    "claude-mythos-5-2",
 )
 
 
@@ -60,6 +84,12 @@ def _rejects_sampling(model: str) -> bool:
     """Whether ``model`` rejects ``temperature`` and budget-style thinking."""
     model = (model or "").strip()
     return any(model.startswith(p) for p in _SAMPLING_FREE_MODELS)
+
+
+def rejects_forced_tool_choice(model: str) -> bool:
+    """Whether ``model`` answers a forced tool call (``tool`` or ``any``) with a 400."""
+    model = (model or "").strip()
+    return any(model.startswith(p) for p in _NO_FORCED_TOOL_MODELS)
 
 
 def _check_sdk_version() -> None:
@@ -152,6 +182,10 @@ class AnthropicProvider:
         cap = _nonstreaming_cap(model)
         requested = max_tokens or self._settings.llm.max_tokens
         kwargs: dict = {"max_tokens": min(requested, cap)}
+        if rejects_forced_tool_choice(model):
+            # Instructor leaves a tool_choice it is given alone, and forces
+            # its response tool otherwise (see _NO_FORCED_TOOL_MODELS).
+            kwargs["tool_choice"] = {"type": "auto"}
         budget = self._settings.llm.thinking_budget
         if _rejects_sampling(model):
             # Neither a temperature nor a thinking budget: either one makes

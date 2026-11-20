@@ -304,6 +304,28 @@ def test_configure_llm_client_respects_explicit_rate_limit():
     assert server._settings.llm.rate_limit_rpm == 25
 
 
+def test_configure_llm_client_raises_default_extraction_cap():
+    """The server takes 64 requests at once; four papers leave it mostly idle."""
+    server, _ = _mk_server(model="org/m", port=9999)
+    server._settings.pipeline.max_concurrent_post_parse = 4
+    server._settings.pipeline.model_fields_set.discard("max_concurrent_post_parse")
+
+    server.configure_llm_client()
+
+    assert server._settings.pipeline.max_concurrent_post_parse == 16
+
+
+def test_configure_llm_client_respects_explicit_extraction_cap():
+    """A user-set PIPELINE_MAX_CONCURRENT_POST_PARSE must not be overridden."""
+    server, _ = _mk_server(model="org/m", port=9999)
+    server._settings.pipeline.max_concurrent_post_parse = 2
+    server._settings.pipeline.model_fields_set.add("max_concurrent_post_parse")
+
+    server.configure_llm_client()
+
+    assert server._settings.pipeline.max_concurrent_post_parse == 2
+
+
 def _mk_wait_server(monkeypatch):
     """VllmLlmServer with a fake process and stubbed HTTP, driving the real wait."""
     from bibr.config import GlobalSettings

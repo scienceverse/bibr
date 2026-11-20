@@ -14,6 +14,10 @@ RAM is then bounded by the window, independent of chunk size:
 
 - **local OCR** (GLM and generic local engines): sequential engine → window of 1,
   so at most one file's pages are ever resident.
+- **managed vLLM OCR** (``paddle-vllm``): window of 1 with a one-window
+  lookahead. The engine is another process, so while one file waits on it the
+  next file is rendered, laid out and has its text layer read. At most two
+  files' pages are resident. ``--memory aggressive`` turns the lookahead off.
 - **remote OCR** (glm-http / cloud vision): network-bound → window of
   ``OCR_MAX_CONCURRENT_FILES`` so cross-file HTTP concurrency is preserved
   while still capping resident pages.
@@ -33,9 +37,11 @@ import weakref
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from bibr.ocr.profiles import OcrRuntimeIdentity
 from bibr.pipeline.pipeline import run_stage
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.ocr import (
+    CONCURRENT_MANAGED_OCR_BACKENDS,
     OcrStage,
     _is_remote_ocr,
     _should_unload_ocr_after_chunk,
@@ -45,6 +51,8 @@ from bibr.pipeline.stages.ocr import (
 from bibr.utils.heap import trim_between_windows
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from bibr.pipeline.context import PipelineContext
 
 logger = logging.getLogger(__name__)
@@ -156,38 +164,139 @@ class InterleavedRenderOcrStage:
         """Mark the OCR-needing files failed instead of aborting the chunk."""
         fail_ocr_targets(targets, exc, stage=self.name, log=log)
 
+    @staticmethod
+    def _window_size(ctx: PipelineContext) -> int:
+        """How many files' page images one window holds."""
+        if _is_remote_ocr(ctx.config):
+            return max(1, ctx.settings.ocr.max_concurrent_files)
+        return 1
+
+    @staticmethod
+    def _may_prepare_ahead(ctx: PipelineContext) -> bool:
+        """Whether the next window may be prepared while this one is in OCR.
+
+        Only when the OCR engine is a managed vLLM server: it is another
+        process, so this process is idle while a file waits on it. An
+        in-process engine shares this process's CPU and memory, and remote OCR
+        already overlaps files within a window. ``aggressive`` memory mode
+        keeps the strict one-window bound. The automatic chain publishes its
+        runtime only once an engine has started, so its first window runs
+        without lookahead.
+        """
+        cfg = ctx.config
+        if _is_remote_ocr(cfg) or cfg.memory_mode == "aggressive":
+            return False
+        if ctx.signals.ocr_init_error is not None:
+            return False
+        identity = ctx.scratch.get("ocr_runtime_identity")
+        return (
+            isinstance(identity, OcrRuntimeIdentity)
+            and identity.backend in CONCURRENT_MANAGED_OCR_BACKENDS
+        )
+
+    async def _prepare(self, ctx: PipelineContext) -> None:
+        """Everything a window needs before OCR: render, layout, text layer."""
+        await self._layout.run(ctx)
+        await self._native.run(ctx)
+
+    async def _settle_prepare_ahead(self, task: asyncio.Task, ahead_ctx: PipelineContext) -> None:
+        """Stop an unconsumed lookahead and release its files' pages.
+
+        Reached only when the window loop is unwinding (an inner stage raised
+        or the stage was cancelled): no prepare task may outlive ``run()``.
+        """
+        if not task.done():
+            task.cancel()
+        settlement = asyncio.gather(task, return_exceptions=True)
+        try:
+            try:
+                (result,) = await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                task.cancel()
+                try:
+                    await asyncio.shield(settlement)
+                except asyncio.CancelledError:
+                    pass
+                raise
+            if isinstance(result, Exception):
+                # The loop is already unwinding with its own error, which is
+                # the one reported; keep this one findable.
+                logger.debug("Discarded prepare-ahead failed: %r", result)
+        finally:
+            for fs in ahead_ctx.file_states:
+                fs.free_pre_ocr()
+
+    async def _run_windows(
+        self,
+        ctx: PipelineContext,
+        pending: list,
+        on_window_done: Callable[[list], None] | None = None,
+    ) -> None:
+        """Drive Layout → NativeText → OCR over ``pending``, one window at a time.
+
+        ``on_window_done`` is called with each window's files once their OCR is
+        finished and their pages are freed.
+        """
+        window = self._window_size(ctx)
+        # Snapshot alive files up front: files that error inside a window drop
+        # out of later inner stages via ``ctx.alive()`` but must still have
+        # their page buffers freed, so we iterate the original grouping.
+        groups = [pending[start : start + window] for start in range(0, len(pending), window)]
+        # The next window's prepare, running under this window's OCR.
+        ahead: tuple[asyncio.Task, PipelineContext] | None = None
+        try:
+            for i, group in enumerate(groups):
+                sub = replace(ctx, file_states=group)
+                if ahead is None:
+                    await self._prepare(sub)
+                else:
+                    task, ahead_ctx = ahead
+                    await task
+                    ahead = None
+                    # The lookahead ran on its own copy of the signals, so the
+                    # previous window's OCR kept reading its own. They become
+                    # this window's now.
+                    ctx.signals.any_needs_ocr = ahead_ctx.signals.any_needs_ocr
+                    ctx.signals.preloading_ocr = ahead_ctx.signals.preloading_ocr
+                if i + 1 < len(groups) and self._may_prepare_ahead(ctx):
+                    # Silent: its stage lines would open under the OCR line of
+                    # the window on display. Per-file timings still land in
+                    # ``fs.stage_times``.
+                    ahead_ctx = replace(
+                        ctx,
+                        file_states=groups[i + 1],
+                        progress=NullProgress(),
+                        signals=replace(ctx.signals),
+                    )
+                    ahead = (asyncio.create_task(self._prepare(ahead_ctx)), ahead_ctx)
+                await self._ocr.run(sub)
+                # Reclaim this window's page images (and pdf_bytes / layout_results)
+                # before the next window's OCR — the memory cap. With a
+                # lookahead, the next window's pages are the only ones left.
+                for fs in group:
+                    fs.free_pre_ocr()
+                if on_window_done is not None:
+                    on_window_done(group)
+                # ...and, with PIPELINE_HEAP_TRIM=window, hand the freed pages back
+                # to the OS before the next window (the last window's go at the
+                # chunk-end trim).
+                if i + 1 < len(groups):
+                    await trim_between_windows(ctx.settings)
+        finally:
+            if ahead is not None:
+                await self._settle_prepare_ahead(*ahead)
+
     async def run(self, ctx: PipelineContext) -> None:
         cfg = ctx.config
 
         pending = await self._probe_cache(ctx)
-
-        # Window size = how many files' page images may be resident at once.
-        window = ctx.settings.ocr.max_concurrent_files if _is_remote_ocr(cfg) else 1
-        window = max(1, window)
 
         # Let each window's OcrStage skip the per-chunk engine teardown; we do
         # it once below so a local LLM backend still reclaims VRAM without
         # reloading the OCR engine per window.
         ctx.signals.defer_ocr_teardown = True
 
-        # Snapshot alive files up front: files that error inside a window drop
-        # out of later inner stages via ``ctx.alive()`` but must still have
-        # their page buffers freed, so we iterate the original grouping.
-        for start in range(0, len(pending), window):
-            group = pending[start : start + window]
-            sub = replace(ctx, file_states=group)
-            await self._layout.run(sub)
-            await self._native.run(sub)
-            await self._ocr.run(sub)
-            # Reclaim this window's page images (and pdf_bytes / layout_results)
-            # before the next window renders — the memory cap.
-            for fs in group:
-                fs.free_pre_ocr()
-            # ...and, with PIPELINE_HEAP_TRIM=window, hand the freed pages back
-            # to the OS before the next window (the last window's go at the
-            # chunk-end trim).
-            if start + window < len(pending):
-                await trim_between_windows(ctx.settings)
+        await self._run_windows(ctx, pending)
 
         # Single per-chunk teardown, matching what OcrStage would have done once
         # had it processed the whole chunk in one pass.
@@ -273,8 +382,7 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
         # starts immediately, before any window renders.
         bypass = [fs for fs in ctx.alive() if fs.contents is not None or fs.ocr_regions is not None]
 
-        window = ctx.settings.ocr.max_concurrent_files if _is_remote_ocr(cfg) else 1
-        window = max(1, window)
+        window = self._window_size(ctx)
 
         # A run with exactly one back-half group (one pending window and no
         # bypass, or bypass-only) has nothing to interleave with, so that group
@@ -299,19 +407,9 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
             # by the finally below even if a later front-half stage raises —
             # the "no spawned task outlives run()" invariant stays structural.
             _spawn(bypass)
-            for start in range(0, len(pending), window):
-                group = pending[start : start + window]
-                sub = replace(ctx, file_states=group)
-                await self._layout.run(sub)
-                await self._native.run(sub)
-                await self._ocr.run(sub)
-                # Reclaim this window's page images before the next renders —
-                # same memory cap as the non-streaming path.
-                for fs in group:
-                    fs.free_pre_ocr()
-                _spawn(group)
-                if start + window < len(pending):
-                    await trim_between_windows(ctx.settings)
+            # Same windows, memory cap and lookahead as the non-streaming
+            # path; each window's back half starts once its pages are freed.
+            await self._run_windows(ctx, pending, on_window_done=_spawn)
             self._signal_front_half_done(ctx)
         finally:
             # Settle every spawned back half before the stage returns — no

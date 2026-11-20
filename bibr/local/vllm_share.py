@@ -357,6 +357,62 @@ def size_managed_llm_share(
     )
 
 
+#: How far above the model's floor a resident plan's expected budget must be.
+#: The plan is made before either server starts, from one reading of the card,
+#: and a start that falls short of the floor later fails its chunk: a plan
+#: closer to the floor than this keeps the swap, which can squeeze its start.
+RESIDENT_LLM_SLACK_GB = 1.0
+
+
+def resident_llm_cap(
+    reading: GpuMemory | None,
+    *,
+    configured: float,
+    ocr_share: float,
+    vram_gb: float | None,
+    floor_gb: float | None,
+    reserve_gb: float,
+) -> float | None:
+    """A cap under which the LLM server stays up beside PaddleOCR-VL, or None.
+
+    At the *configured* share (0.85 by default) the LLM server, the managed
+    PaddleOCR-VL server and ``MANAGED_VLLM_ONNX_RESERVE_GB`` do not fit on
+    cards up to 64 GB, so the two servers take turns and both restart every
+    chunk. On an RTX 5090 that cost about 60 s per chunk of 8 papers against
+    about 40 s of work: 120 papers in chunks of 8 took 1,616 s, and 713 s
+    with both servers up under this cap.
+
+    The cap is the largest share, in hundredths, that fits beside *ocr_share*
+    and the reserve on a card of *vram_gb*. None, which keeps the swap, when:
+
+    - the configured share already fits (nothing to plan);
+    - the card cannot be identified or the model has no floor;
+    - the LLM, starting second beside the OCR server and the reserve, would
+      get less than the floor plus ``RESIDENT_LLM_SLACK_GB``. *reading* says
+      what is free now; without one the whole card counts as free. A 24 GB
+      card would leave the 4B student 11.36 GiB, so it keeps the swap.
+    """
+    from bibr.ocr.registry import MANAGED_VLLM_ONNX_RESERVE_GB, managed_vllm_shares_fit
+
+    if vram_gb is None or vram_gb <= 0 or floor_gb is None:
+        return None
+    if managed_vllm_shares_fit(configured, ocr_share, vram_gb=vram_gb):
+        return None
+    room = 1.0 - ocr_share - MANAGED_VLLM_ONNX_RESERVE_GB / vram_gb
+    cap = min(configured, math.floor(round(room * 100, 6)) / 100)
+    total, free = (reading.total_gb, reading.free_gb) if reading else (vram_gb, vram_gb)
+    beside_ocr = (
+        free
+        - ocr_share * total
+        - LLM_CONTEXT_RESERVE_GB
+        - reserve_gb
+        - MANAGED_VLLM_ONNX_RESERVE_GB
+    )
+    if min(cap * total, beside_ocr) < floor_gb + RESIDENT_LLM_SLACK_GB:
+        return None
+    return cap
+
+
 def managed_llm_model(settings: GlobalSettings, model: str | None = None) -> str:
     """The model a managed vLLM LLM server for *settings* serves.
 

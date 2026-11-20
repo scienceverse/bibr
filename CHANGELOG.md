@@ -4,15 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.2] - 2026-11-19
+## [0.9.2] - 2026-11-20
 
-A patch release for links. A PDF's `url` list now finds links it used to miss
-(addresses printed without a scheme, DOIs printed without doi.org, and links in
-captions and footnotes), repairs addresses the line breaks damaged from the
-PDF's own link annotations, and splits two addresses printed with no space
-between them. Links printed in table cells join the `url` list, which moves the
-export to schema 12.5; it only adds the key `url[].table_id`, but `text_id` can
-now be null.
+A speed and links release. On a CUDA machine the default local plan gets
+faster in three ways: on a card of 32 to 64 GB the vLLM LLM server and the
+PaddleOCR-VL server stay up together instead of both restarting every chunk,
+bibr prepares the next file while PaddleOCR-VL reads the current one, and
+`bibr batch` sends 16 papers at a time to a vLLM server it starts, not 4. On an
+RTX 5090 with 120 born-digital papers in chunks of 8, 0.9.1 ran 267 papers an
+hour, keeping both servers up gave 606 and the lookahead 715. As one chunk of
+120, the three together ran 907 papers an hour. Those runs measured speed, not
+accuracy. See Changed.
+
+A PDF's `url` list now finds links it used to miss (addresses printed without a
+scheme, DOIs printed without doi.org, and links in captions and footnotes),
+repairs addresses the line breaks damaged from the PDF's own link annotations,
+and splits two addresses printed with no space between them. Links printed in
+table cells join the `url` list, which moves the export to schema 12.5; it only
+adds the key `url[].table_id`, but `text_id` can now be null.
+
+`LLM_PROVIDER=anthropic` works with Claude Sonnet 5.5 and Sonnet 5, where every
+call failed with a 400.
 
 ### Added — export schema 12.5 (additive)
 
@@ -30,6 +42,58 @@ now be null.
   code that joins every `url` entry to a `text` row has to skip, or look up by
   `table_id`, the entries where it is. A consumer that validates with the 12.4
   strict schema needs the 12.5 schema.
+
+### Changed
+
+- `bibr batch --llm local` on a vLLM server bibr starts now extracts 16 papers
+  at once instead of 4. `PIPELINE_MAX_CONCURRENT_POST_PARSE` defaults to 4,
+  which suits a cloud quota, but the vLLM server batches up to 64 requests and
+  four papers sent it about 4.5 a second. bibr raises the setting to 16 when it
+  points the pipeline at that server, the way it already raises
+  `LLM_RATE_LIMIT_RPM`. Measured on an RTX 5090 with 120 PDFs in one chunk and
+  both servers kept loaded: 476 s instead of 570 s (907 papers an hour instead
+  of 758), all 120 extracted with the same row counts. 48 gave 466 s, and a
+  paper's extraction then took up to 93 s, so the default stays at 16. Other
+  backends keep 4. Set `PIPELINE_MAX_CONCURRENT_POST_PARSE` yourself to
+  override it; `4` gives the old behaviour.
+
+- On a card of 32 to 64 GB the default local plan (`--llm local --ocr paddle`
+  in balanced memory mode) keeps the managed vLLM LLM server and the managed
+  PaddleOCR-VL server up together for the whole run. In 0.9.1 the default LLM
+  share of 0.85, PaddleOCR-VL's share and the 6 GB bibr keeps for its own
+  models did not fit on anything under about 80 GB, so the two servers took
+  turns and both restarted every chunk, which also left speculative decoding
+  off. bibr now plans the largest LLM cap that fits beside PaddleOCR-VL and
+  that reserve (0.65 of a 32 GB card, 0.76 of 48 GB), and uses it only where
+  the LLM would still start with at least 1 GiB more than its model's minimum
+  budget. The 4B student needs about 24.4 GiB free on a 32 GB card for that;
+  with less free, on a card of up to 24 GB, in aggressive memory mode or for a
+  model with no minimum budget, the servers take turns as before. A
+  `LLM_LOCAL_MEM_FRACTION` you set is never replanned; one that fits beside
+  PaddleOCR-VL now keeps that server up too. With the LLM server up for the
+  run, `LLM_VLLM_SPEC_DECODE=auto` turns MTP on where its budget allows, and
+  bibr's paper and section classifiers run on the GPU instead of the CPU. On
+  an RTX 5090, 120 born-digital papers took 713 s in chunks of 8 against
+  1,616 s with 0.9.1 (606 against 267 papers an hour), and 693 s against 818 s
+  as one chunk of 120 (624 against 529), bibr starting both servers itself in
+  every run. Those runs measured speed, not accuracy; the plan was not run on
+  a real card of 40 to 64 GB. Set `LLM_LOCAL_MEM_FRACTION=0.85` to keep the
+  0.9.1 plan.
+
+- With PaddleOCR-VL on the managed vLLM server (`--ocr paddle` on a CUDA
+  machine), bibr prepares the next file while the server reads the current
+  one. The OCR phase handled one file strictly in series: render the pages
+  and find their layout, read the PDF's own text, then wait for OCR, and only
+  then start on the next file. The server sat idle while bibr prepared a
+  file, and bibr sat idle while the server read it. The next file's render,
+  layout and text pass now run during the current file's OCR, so the pages of
+  at most two files are in memory instead of one. `--memory aggressive` keeps
+  the one-file bound, and an in-process OCR engine and remote OCR behave as
+  before. On an RTX 5090, with both servers kept up for the run, 120
+  born-digital papers took 605 s in chunks of 8 against 729 s without it (715
+  against 592 papers an hour), and 570 s against 693 s as one chunk of 120
+  (758 against 624), bibr starting both servers itself in every run. Those
+  runs measured speed, not accuracy.
 
 ### Fixed
 
@@ -58,6 +122,21 @@ now be null.
 - Two URLs printed with no space between them
   ("…/repo):https://doi.org/10.5281/…") are two `url` entries, in PDF, HTML,
   DOCX and JATS input. They were one entry with both addresses in its `href`.
+- `LLM_PROVIDER=anthropic` works with Claude Sonnet 5.5 and Sonnet 5. Every
+  call failed with a 400 from the API:
+  - Sonnet 5.5 rejects a forced tool call ("tool_choice: type "tool" and
+    "any" are not supported for this model."). Calls to it, and to Opus 5.5
+    and Fable and Mythos 5.1 and 5.2, which reject it too, now offer the
+    answer tool without forcing it. The offline Message Batches adapter does
+    the same and asks for the tool call in its system prompt;
+  - Sonnet 5 rejects a `temperature` ("`temperature` is deprecated for this
+    model."). Calls to it carry none, as for Haiku 5.5 already, and
+    `LLM_THINKING_BUDGET` is ignored with a warning. The same now holds for
+    Opus 4.7, 4.8 and 5, Fable 5 and 5.2 and Mythos 5.
+
+  Sonnet 5.5 ran 390 papers with this change and no failed call. Sonnet 5 has
+  not been run on papers since, and the other models were added from
+  Anthropic's documentation without a run.
 
 ## [0.9.1] - 2026-11-17
 
