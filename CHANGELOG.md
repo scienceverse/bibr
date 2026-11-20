@@ -23,6 +23,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `table_id`, the entries where it is. A consumer that validates with the 12.4
   strict schema needs the 12.5 schema.
 
+### Changed
+
+- On a card of 32 to 64 GB the default local plan (`--llm local --ocr paddle`
+  in balanced memory mode) keeps the managed vLLM LLM server and the managed
+  PaddleOCR-VL server up together for the whole run. In 0.9.1 the default LLM
+  share of 0.85, PaddleOCR-VL's share and the 6 GB bibr keeps for its own
+  models did not fit on anything under about 80 GB, so the two servers took
+  turns and both restarted every chunk, which also left speculative decoding
+  off. bibr now plans the largest LLM cap that fits beside PaddleOCR-VL and
+  that reserve (0.65 of a 32 GB card, 0.76 of 48 GB), and uses it only where
+  the LLM would still start with at least 1 GiB more than its model's minimum
+  budget. The 4B student needs about 24.4 GiB free on a 32 GB card for that;
+  with less free, on a card of up to 24 GB, in aggressive memory mode or for a
+  model with no minimum budget, the servers take turns as before. A
+  `LLM_LOCAL_MEM_FRACTION` you set is never replanned; one that fits beside
+  PaddleOCR-VL now keeps that server up too. With the LLM server up for the
+  run, `LLM_VLLM_SPEC_DECODE=auto` turns MTP on where its budget allows, and
+  bibr's paper and section classifiers run on the GPU instead of the CPU. On
+  an RTX 5090, 120 born-digital papers took 713 s in chunks of 8 against
+  1,616 s with 0.9.1 (606 against 267 papers an hour), and 693 s against 818 s
+  as one chunk of 120 (624 against 529), bibr starting both servers itself in
+  every run. Those runs measured speed, not accuracy; the plan was not run on
+  a real card of 40 to 64 GB. Set `LLM_LOCAL_MEM_FRACTION=0.85` to keep the
+  0.9.1 plan.
+
 ### Fixed
 
 - A PDF's `url` list now holds links it used to miss:

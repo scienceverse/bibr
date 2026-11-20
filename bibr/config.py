@@ -721,7 +721,9 @@ class LlmOptions(_BibrSettings):
         description=(
             "Share of GPU memory (0.0-1.0) for the managed vLLM LLM server. Left unset, it is "
             "the most the server takes: bibr sizes the share from the GPU memory free when the "
-            "server starts. Set it to start the server at exactly this share."
+            "server starts, and beside a managed PaddleOCR-VL server it lowers that most to "
+            "what lets both servers stay up for the run where the card has the room (0.65 on "
+            "a 32 GB card). Set it to start the server at exactly this share."
         ),
     )
     local_min_vram_gb: float | None = Field(
@@ -771,7 +773,7 @@ class LlmOptions(_BibrSettings):
         description="Speculative decoding for the managed vLLM LLM server: 'auto' (MTP when "
         "bibr's model registry lists an MTP config for the model, the server stays up for the "
         "whole run, and its budget meets MTP's minimum; none when it restarts every chunk to "
-        "take turns with a managed PaddleOCR-VL server, as by default on cards up to 64 GB), "
+        "take turns with a managed PaddleOCR-VL server, as by default on cards up to 24 GB), "
         "'none', or 'mtp' / 'dflash' at every start when the registry lists that config for "
         "the model (DFlash: the 4B student's bf16 build only); the start then needs that "
         "config's larger minimum. A --speculative-config in LLM_VLLM_EXTRA_ARGS wins.",
@@ -1264,14 +1266,18 @@ class OcrOptions(_BibrSettings):
     )
     # When to tear down a local in-process OCR engine between batch chunks.
     # "auto" (default) keeps it resident in balanced mode unless a local LLM
-    # shares the GPU — avoiding per-chunk weight reloads (vllm-mlx 30-60s) on
-    # multi-chunk batches; "always" forces the legacy per-chunk teardown;
+    # needs its GPU memory — avoiding per-chunk weight reloads (vllm-mlx
+    # 30-60s) on multi-chunk batches. A managed PaddleOCR-VL server beside a
+    # managed vLLM LLM server stays up when their shares fit together.
+    # "always" forces the legacy per-chunk teardown;
     # "never" keeps it loaded until the pipeline closes. aggressive always
     # tears down (8 GB boxes); keep_all never does.
     unload_between_chunks: Literal["auto", "always", "never"] = Field(
         "auto",
         description='When to tear down a local in-process OCR engine between batch chunks: "auto" '
-        '(default, keep resident in balanced mode unless a local LLM shares the GPU), "always" '
+        "(default, keep resident in balanced mode unless a local LLM needs its GPU memory: a "
+        "managed PaddleOCR-VL server stays up beside a managed vLLM LLM server when their "
+        'shares fit together), "always" '
         '(legacy per-chunk teardown), or "never".',
     )
 

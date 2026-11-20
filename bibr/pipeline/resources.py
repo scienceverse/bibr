@@ -868,9 +868,10 @@ class ResourceManager:
         Each vLLM server claims a fixed share of total VRAM when it starts and
         refuses to start while less is free, and bibr's own GPU sessions stay
         on the card between chunks. So unless both shares plus
-        ``MANAGED_VLLM_ONNX_RESERVE_GB`` fit (the defaults, 0.85 and
-        PaddleOCR-VL's ~5 GB, do not on cards up to 64 GB), the one starting
-        must stop the other.
+        ``MANAGED_VLLM_ONNX_RESERVE_GB`` fit, the one starting must stop the
+        other. The default 0.85 beside PaddleOCR-VL's ~5 GB does not fit on
+        cards up to 64 GB; ``LocalPipeline`` plans a smaller LLM cap that does
+        where the card has the room (``bibr.local.vllm_share.resident_llm_cap``).
         """
         from bibr.ocr.registry import managed_vllm_shares_fit, paddle_vllm_gpu_memory_utilization
 
@@ -886,13 +887,9 @@ class ResourceManager:
         """
         if self.ocr_url:
             return False
-        if self.ocr_backend == "paddle-vllm":
-            return True
-        if self.ocr_backend != "paddle":
-            return False
-        from bibr.ocr.registry import automatic_backend_names
+        from bibr.ocr.registry import requests_managed_paddle_vllm
 
-        return "paddle-vllm" in automatic_backend_names(llm_backend=self._llm_backend)
+        return requests_managed_paddle_vllm(self.ocr_backend, llm_backend=self._llm_backend)
 
     def _llm_swaps_with_ocr(self) -> bool:
         """Whether a managed PaddleOCR-VL server takes turns with the vLLM LLM server.

@@ -9,7 +9,7 @@
   MTP scored within 2 papers of no speculation and cut the LLM stage to 0.80x
   (RTX 3090) and 0.74x (RTX 5090). Where the LLM server restarts every chunk
   to take turns with a managed PaddleOCR-VL server (bibr's default on cards
-  up to 64 GB), each MTP start took 51 s instead of 37 s, and batches on 12
+  up to 24 GB), each MTP start took 51 s instead of 37 s, and batches on 12
   and 16 GB cards ran 5% and 9% slower, so it is off there. An auto choice
   never refuses a start: below MTP's floor the server starts without it.
 - ``none``: never.

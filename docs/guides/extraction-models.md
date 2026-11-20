@@ -30,10 +30,14 @@ bibr sizes it): the model's own
 budget (11.0 GiB for the 4B, 6.0 GiB for the W4A16 build, measured on an RTX
 3090 with vLLM 0.32), plus what vLLM takes beyond it while it starts and 1 GiB
 for bibr's other models. That is when PaddleOCR-VL takes turns with the model,
-as in the defaults below. A model that stays up for the run beside cloud OCR or
-an OCR server at `--ocr-url` leaves bibr's other models 6 GiB less what they
-hold instead: about 17.25 GiB free for the 4B and 12.25 GiB for the W4A16
-build. Speculative decoding needs more and is off in these default plans (see
+as in the defaults below on cards up to 24 GB. A model that stays up for the
+run beside cloud OCR or an OCR server at `--ocr-url` leaves bibr's other
+models 6 GiB less what they hold instead: about 17.25 GiB free for the 4B and
+12.25 GiB for the W4A16 build. On a card of 32 GB or more the default plan
+keeps the 4B and PaddleOCR-VL up together for the run, which needs about
+24.4 GiB free on a 32 GB card; with less free, they take turns as on smaller
+cards. Speculative decoding needs more and is off in the default plans that
+take turns (see
 [speculative decoding](model-runtime.md#speculative-decoding-on-vllm)).
 
 ### Hosted option

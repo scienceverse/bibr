@@ -380,8 +380,18 @@ def test_local_vllm_llm_keeps_its_own_fraction_beside_paddle_vllm(monkeypatch):
     assert devices == {"paper": "cuda", "section": "cuda"}
 
 
-@pytest.mark.parametrize(("vram_gb", "total_gib"), [(31.84, 31.45), (24.0, 23.56)])
-def test_classifiers_stay_off_the_card_the_servers_swap_on(monkeypatch, vram_gb, total_gib):
+@pytest.mark.parametrize(
+    ("vram_gb", "total_gib", "llm_share"),
+    [
+        # A 24 GB card has no cap that fits both servers and leaves the LLM room.
+        (24.0, 23.56, None),
+        # On an RTX 5090 bibr plans one; a share the user set is kept, and swaps.
+        (31.84, 31.45, "0.85"),
+    ],
+)
+def test_classifiers_stay_off_the_card_the_servers_swap_on(
+    monkeypatch, vram_gb, total_gib, llm_share
+):
     """Local vLLM LLM + managed PaddleOCR-VL that do not fit together.
 
     One server stops for the other, and each restart (twice per chunk) needs
@@ -393,6 +403,8 @@ def test_classifiers_stay_off_the_card_the_servers_swap_on(monkeypatch, vram_gb,
     0.85, and the paper model would have taken 1.5 GiB of that margin.)
     """
     _pin_linux_x86(monkeypatch, vram_gb=vram_gb)
+    if llm_share is not None:
+        monkeypatch.setenv("LLM_LOCAL_MEM_FRACTION", llm_share)
     pipe, devices = _pipeline_devices(
         monkeypatch,
         free_gib=total_gib - 0.5,
@@ -403,6 +415,27 @@ def test_classifiers_stay_off_the_card_the_servers_swap_on(monkeypatch, vram_gb,
     assert pipe._resources._vllm_shares_overcommit()
     assert pipe._resources.classifiers._managed_vllm_fraction == pytest.approx(1.0)
     assert devices == {"paper": "cpu", "section": "cpu"}
+
+
+def test_classifiers_share_the_card_with_servers_planned_to_stay_up(monkeypatch):
+    """Local vLLM LLM + managed PaddleOCR-VL on an RTX 5090 at default settings.
+
+    bibr caps the LLM share at 0.65 so both servers stay up: with PaddleOCR-VL's
+    0.16 they claim 0.81, and the 6 GB ONNX reserve left over is where the
+    classifiers go. The LLM server starts after them and sizes its share from
+    the memory then free, so it gives way to what they took.
+    """
+    _pin_linux_x86(monkeypatch, vram_gb=31.84)
+    pipe, devices = _pipeline_devices(
+        monkeypatch,
+        free_gib=31.45 - 0.5,
+        total_gib=31.45,
+        llm_backend="vllm",
+        ocr_backend="paddle",
+    )
+    assert not pipe._resources._vllm_shares_overcommit()
+    assert pipe._resources.classifiers._managed_vllm_fraction == pytest.approx(0.81)
+    assert devices == {"paper": "cuda", "section": "cuda"}
 
 
 @pytest.mark.parametrize(

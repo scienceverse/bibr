@@ -20,6 +20,7 @@ from bibr.local.vllm_share import (
     llm_share_user_set,
     managed_llm_floor_gb,
     overshoot_reserve_gb,
+    resident_llm_cap,
     size_managed_llm_share,
 )
 from bibr.ocr import registry as _registry
@@ -35,6 +36,9 @@ STUDENT_4B_W4A16 = "scienceverse/bibr-extract-qwen35-4b-W4A16"
 # 16 GB card (RTX 4080: 16,376 MiB less about 400 MiB).
 CUDA_3090 = 23.56
 CUDA_16GB = 15.6
+# An RTX 5090: 32,607 MiB (31.84 GiB) to nvidia-smi, 31.42 GiB to CUDA.
+SMI_5090 = 31.84
+CUDA_5090 = 31.42
 MIB = 1 / 1024
 
 
@@ -1073,3 +1077,84 @@ class TestW4a16Floor:
                 swaps_with_ocr=True,
             )
         popen.assert_not_called()
+
+
+def _plan(reading, *, vram_gb, configured=0.85, model=STUDENT_4B):
+    return resident_llm_cap(
+        reading,
+        configured=configured,
+        ocr_share=_registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb),
+        vram_gb=vram_gb,
+        floor_gb=managed_llm_floor_gb(model),
+        reserve_gb=overshoot_reserve_gb(model, None),
+    )
+
+
+def _idle(total: float) -> GpuMemory:
+    """A card before bibr starts anything: a desktop session holds half a GiB."""
+    return GpuMemory(total_gb=total, free_gb=total - 0.5, own_gb=0.0)
+
+
+class TestResidentCap:
+    """A cap under which the LLM and PaddleOCR-VL servers stay up together.
+
+    At the default 0.85 the two shares and bibr's reserve do not fit on a
+    32 GB card, so the servers took turns. On an RTX 5090 each chunk of 8
+    papers then spent about 60 s restarting them against about 40 s of work
+    (120 papers: 1,616 s; 713 s with both up under the cap).
+    """
+
+    def test_32gb_card_gets_the_largest_cap_that_fits(self):
+        cap = _plan(_idle(CUDA_5090), vram_gb=SMI_5090)
+        assert cap == 0.65
+        assert not _registry.managed_vllm_shares_fit(0.85, 0.16, vram_gb=SMI_5090)
+        assert _registry.managed_vllm_shares_fit(cap, 0.16, vram_gb=SMI_5090)
+        assert not _registry.managed_vllm_shares_fit(cap + 0.01, 0.16, vram_gb=SMI_5090)
+
+    def test_48gb_card_gets_the_largest_cap_that_fits(self):
+        assert _plan(_idle(47.5), vram_gb=48.0) == 0.76
+
+    def test_no_reading_plans_from_the_card_size(self):
+        assert _plan(None, vram_gb=SMI_5090) == 0.65
+
+    def test_24gb_card_keeps_swapping(self):
+        # 0.54 would fit, but beside the OCR server and bibr's reserve the
+        # start would get 11.36 GiB, a third of a GiB above the 4B's floor.
+        assert _plan(_idle(CUDA_3090), vram_gb=24.0) is None
+        assert _plan(None, vram_gb=24.0) is None
+
+    def test_shares_that_already_fit_are_left_alone(self):
+        assert _plan(_idle(79.3), vram_gb=80.0) is None
+        assert _plan(_idle(CUDA_5090), vram_gb=SMI_5090, configured=0.5) is None
+
+    def test_card_someone_else_fills_keeps_swapping(self):
+        busy = GpuMemory(total_gb=CUDA_5090, free_gb=22.0, own_gb=0.0)
+        assert _plan(busy, vram_gb=SMI_5090) is None
+
+    def test_model_without_a_floor_keeps_swapping(self):
+        cap = resident_llm_cap(
+            _idle(CUDA_5090),
+            configured=0.85,
+            ocr_share=0.16,
+            vram_gb=SMI_5090,
+            floor_gb=None,
+            reserve_gb=0.75,
+        )
+        assert cap is None
+
+    def test_unidentified_card_keeps_swapping(self):
+        assert _plan(_idle(CUDA_5090), vram_gb=None) is None
+
+    @pytest.mark.parametrize(("vram_gb", "total"), [(SMI_5090, CUDA_5090), (48.0, 47.5)])
+    @pytest.mark.parametrize("own_gb", [0.5, 3.0])
+    def test_start_under_a_planned_cap_is_not_refused(self, vram_gb, total, own_gb):
+        """The LLM starts second, beside the OCR server and bibr's sessions."""
+        reading = _idle(total)
+        cap = _plan(reading, vram_gb=vram_gb)
+        ocr_share = _registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
+        ocr_gb = ocr_share * total + vllm_share.LLM_CONTEXT_RESERVE_GB
+        beside_ocr = GpuMemory(
+            total_gb=total, free_gb=reading.free_gb - ocr_gb - own_gb, own_gb=own_gb
+        )
+        share = _size(beside_ocr, cap=cap, swaps_with_ocr=False)
+        assert share.budget_gb >= managed_llm_floor_gb(STUDENT_4B) + 1.0
