@@ -350,10 +350,10 @@ def test_inspection_trusts_the_layer_when_disabled():
 def test_detection_failure_keeps_the_text_layer(monkeypatch):
     import bibr.ocr.pdf_inspection as inspection_mod
 
-    def boom(page, textpage, crop_box):
+    def boom(page, textpage, crop_box, page_cache):
         raise RuntimeError("pdfium")
 
-    monkeypatch.setattr(inspection_mod, "_is_invisible_text_layer_page", boom)
+    monkeypatch.setattr(inspection_mod, "_is_invisible_text_layer_page_cached", boom)
     inspection = _inspect(_cover_and_scan(), reject=True)
 
     assert inspection.layout_results[1][0]["_native_text_used"] is True
@@ -776,10 +776,10 @@ async def test_detection_errors_are_logged_once_per_document(monkeypatch, caplog
     """A failing detector keeps every page on its text layer, silently before."""
     import bibr.ocr.pdf_inspection as inspection_mod
 
-    def boom(page, textpage, crop_box):
+    def boom(page, textpage, crop_box, page_cache):
         raise RuntimeError("pdfium")
 
-    monkeypatch.setattr(inspection_mod, "_is_invisible_text_layer_page", boom)
+    monkeypatch.setattr(inspection_mod, "_is_invisible_text_layer_page_cached", boom)
     fs, logs = await _run_native_text_stage(monkeypatch, caplog, _cover_and_two_scans(), 3)
 
     assert all(page[0]["_native_text_used"] for page in fs.layout_results)

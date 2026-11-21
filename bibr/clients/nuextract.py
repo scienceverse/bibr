@@ -452,16 +452,16 @@ def _max_tokens_kw(
     return {}
 
 
-_DEFAULT_NATIVE_CONTRACT_FOR_MODEL = native_contract_for_model
-
-
 def _readonly_native_contract(response_model: type[BaseModel]) -> NativeSchemaContract:
-    """Read-only NuExtract contract without per-call deepcopy when unpatched."""
-    if native_contract_for_model is _DEFAULT_NATIVE_CONTRACT_FOR_MODEL:
-        if not isinstance(response_model, type) or not issubclass(response_model, BaseModel):
-            raise TypeError("response_model must be a Pydantic BaseModel subclass")
-        return _cached_native_contract(response_model)
-    return native_contract_for_model(response_model)
+    """The shared, memoized NuExtract contract, for callers here that only read it.
+
+    ``native_contract_for_model`` deep-copies the contract on every call so a
+    caller may change its copy; a request only reads it, so it takes the one
+    built object. Nothing returned from here may be mutated.
+    """
+    if not isinstance(response_model, type) or not issubclass(response_model, BaseModel):
+        raise TypeError("response_model must be a Pydantic BaseModel subclass")
+    return _cached_native_contract(response_model)
 
 
 def build_native_request_kwargs(

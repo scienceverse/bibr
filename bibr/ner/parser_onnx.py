@@ -27,7 +27,6 @@ from .decode import decode_bio_spans, map_fields_to_paper_ref
 from .tags import BIO_TAGS
 
 logger = logging.getLogger(__name__)
-_DEFAULT_ENCODE_BATCH = encode_batch
 
 
 def count_truncated(texts: list[str], offsets: list, max_seq_len: int) -> int:
@@ -198,21 +197,14 @@ class OnnxRefParser:
         self, texts: Sequence[str], *, session=None
     ) -> list[tuple[dict[str, str | int], int]]:
         """Each text's parsed fields and whether it was truncated (1/0), in order."""
-        if encode_batch is _DEFAULT_ENCODE_BATCH:
-            batch = encode_batch(
-                self.tokenizer,
-                list(texts),
-                max_length=self.max_seq_len,
-                add_special_tokens=False,
-                already_sanitized=True,
-            )
-        else:
-            batch = encode_batch(
-                self.tokenizer,
-                list(texts),
-                max_length=self.max_seq_len,
-                add_special_tokens=False,
-            )
+        # parse_batch has already stripped lone surrogates from every text.
+        batch = encode_batch(
+            self.tokenizer,
+            list(texts),
+            max_length=self.max_seq_len,
+            add_special_tokens=False,
+            already_sanitized=True,
+        )
         if batch.input_ids.shape[1] == 0:
             return [({}, 0) for _ in texts]
         emissions = self._emissions(batch.input_ids, batch.attention_mask, session=session)

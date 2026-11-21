@@ -937,16 +937,14 @@ def _stub_backend(monkeypatch, raw: str):
 
 async def test_create_builds_the_contract_once(monkeypatch):
     """One LLM call builds the contract once and parses the same title."""
-    import bibr.clients.nuextract_schema as schema
-
     builds = {"n": 0}
-    real_build = schema.native_contract_for_model
+    real_build = nuextract._readonly_native_contract
 
     def counting(model):
         builds["n"] += 1
         return real_build(model)
 
-    monkeypatch.setattr(nuextract, "native_contract_for_model", counting)
+    monkeypatch.setattr(nuextract, "_readonly_native_contract", counting)
     backend = _stub_backend(monkeypatch, json.dumps(valid_title_payload()))
 
     result, _completion = await backend.create(

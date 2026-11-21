@@ -53,7 +53,7 @@ def test_llm_cached_schema_json_and_sha256_exact_and_mock_safe():
     assert llm_mod._cached_schema_json(object()) == ""
 
 
-def test_nuextract_readonly_contract_reuses_cache_and_respects_monkeypatch(monkeypatch):
+def test_nuextract_readonly_contract_reuses_cache():
     c1 = nuextract_mod._readonly_native_contract(TitleKeywordsLLM)
     c2 = nuextract_mod._readonly_native_contract(TitleKeywordsLLM)
     assert c1 is c2
@@ -63,17 +63,6 @@ def test_nuextract_readonly_contract_reuses_cache_and_respects_monkeypatch(monke
     assert public is not c1
     public.template["__mutated__"] = "x"
     assert "__mutated__" not in nuextract_mod._readonly_native_contract(TitleKeywordsLLM).template
-
-    # Monkeypatching native_contract_for_model bypasses the read-only shortcut.
-    called = []
-
-    def fake_contract(model):
-        called.append(model)
-        return c1
-
-    monkeypatch.setattr(nuextract_mod, "native_contract_for_model", fake_contract)
-    assert nuextract_mod._readonly_native_contract(TitleKeywordsLLM) is c1
-    assert called == [TitleKeywordsLLM]
 
 
 async def test_crossref_prefetch_mget_and_pipeline_and_expired_404():

@@ -1442,3 +1442,23 @@ class TestJobRoutesAuth:
             "/papers/jobs", files={"file": ("a.pdf", b"%PDF-1.4", "application/pdf")}
         )
         assert resp.status_code == 401
+
+
+async def test_memory_store_poll_sweeps_every_job_past_the_ttl(monkeypatch):
+    """A replica that only gets polls drops every expired job, not just the one polled."""
+    monkeypatch.setattr(Settings.jobs, "ttl_seconds", 100)
+    clock = _Clock()
+    store = MemoryJobStore(clock=clock, replica_id="replica-a")
+    old = await store.create(filename="old.pdf")
+    await store.set_succeeded(old.job_id, {"ok": True})
+    clock.advance(60)
+    new = await store.create(filename="new.pdf")
+    await store.set_succeeded(new.job_id, {"ok": True})
+
+    clock.advance(60)  # old finished 120s ago, new 60s ago
+    assert await store.get(new.job_id) is not None
+    assert set(store._jobs) == {new.job_id}
+
+    clock.advance(60)  # a poll for a job the store never had still sweeps
+    assert await store.get("no-such-job") is None
+    assert store._jobs == {}

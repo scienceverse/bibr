@@ -42,6 +42,25 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0, 
     return parser, contents
 
 
+async def _gather_cancelling(*aws):
+    """``asyncio.gather``, except that a failure cancels the rest and waits for them.
+
+    A bare gather raises the first error and leaves the others running with no
+    owner: a paper whose parse failed would still queue its document-layer
+    rebuild, under the process-wide pdfium lock, and its model passes. A thread
+    that is already running cannot be stopped; this stops a call still queued
+    for the pool and the later steps of a coroutine.
+    """
+    tasks = [asyncio.ensure_future(aw) for aw in aws]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def _document_layer(fs, settings, *, start_page, end_page):
     """The file's document layer with its regions as blocks; never raise."""
     try:
@@ -333,7 +352,7 @@ class ParseSegmentStage:
                     async def _noop_none():
                         return None
 
-                    (parser, contents), doc_layer, predictions, tagged = await asyncio.gather(
+                    (parser, contents), doc_layer, predictions, tagged = await _gather_cancelling(
                         parse_coro,
                         doc_layer_coro if doc_layer_coro is not None else _noop_none(),
                         roles_coro if roles_coro is not None else _noop_none(),

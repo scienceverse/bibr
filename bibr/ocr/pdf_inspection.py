@@ -23,7 +23,6 @@ from bibr.ocr.native_text import (
     _attach_page_dimensions,
     _build_page_char_records,
     _fill_page_regions_from_textpage,
-    _is_invisible_text_layer_page,
     _is_invisible_text_layer_page_cached,
     _page_crop_box,
     _page_rotation,
@@ -52,7 +51,6 @@ logger = logging.getLogger(__name__)
 # 0-based page indices whose DOI evidence is harvested inline during inspect_pdf
 # (matches IdentityValidationStage._EVIDENCE_PAGES = (1, 2), 1-based).
 _DOI_EVIDENCE_PAGE_INDICES = frozenset((0, 1))
-_DEFAULT_IS_INVISIBLE_TEXT_LAYER_PAGE = _is_invisible_text_layer_page
 
 
 @dataclass(frozen=True)
@@ -245,19 +243,9 @@ def inspect_pdf(
                             char_count = textpage.count_chars()
                             if reject_invisible_text_layer and char_count:
                                 try:
-                                    if (
-                                        _is_invisible_text_layer_page
-                                        is _DEFAULT_IS_INVISIBLE_TEXT_LAYER_PAGE
-                                    ):
-                                        invisible_text_layer = (
-                                            _is_invisible_text_layer_page_cached(
-                                                page, textpage, crop_box, page_cache
-                                            )
-                                        )
-                                    else:
-                                        invisible_text_layer = _is_invisible_text_layer_page(
-                                            page, textpage, crop_box
-                                        )
+                                    invisible_text_layer = _is_invisible_text_layer_page_cached(
+                                        page, textpage, crop_box, page_cache
+                                    )
                                 except Exception as exc:  # noqa: BLE001 - keeps the text layer
                                     component_errors[f"invisible_text_layer:{page_index}"] = (
                                         _error_text(exc)

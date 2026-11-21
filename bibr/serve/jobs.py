@@ -335,6 +335,9 @@ class MemoryJobStore:
         self._wall_clock = wall_clock
         self._replica_id = replica_id or default_replica_id()
         self._last_limits: tuple[int, int] | None = None
+        # finished_mono of the oldest finished job still held: what a read
+        # compares with the TTL to know a sweep is due.
+        self._oldest_finished: float | None = None
 
     @property
     def replica_id(self) -> str:
@@ -372,6 +375,7 @@ class MemoryJobStore:
             evict += 1
         for job in finished[:evict]:
             del self._jobs[job.job_id]
+        self._oldest_finished = finished[evict].finished_mono if evict < len(finished) else None
 
     async def create(self, *, filename: str) -> Job:
         async with self._lock:
@@ -394,23 +398,19 @@ class MemoryJobStore:
     async def get(self, job_id: str, *, include_result: bool = True) -> Job | None:  # noqa: ARG002
         # The body is already in memory, so a status-only read costs nothing extra.
         # Mutating transitions (create/cancel/set_succeeded/set_failed) already enforce
-        # count and byte retention budgets, so steady-state polls only need an O(1)
-        # lookup + per-job TTL check unless retention settings changed at runtime.
+        # the count and byte retention budgets, so a steady-state poll is an O(1)
+        # lookup. It sweeps only when something is due: the oldest finished job has
+        # passed the TTL (which expires every job past it, not just the one polled,
+        # on a replica that gets nothing but polls), or the retention settings
+        # changed at runtime.
         async with self._lock:
             limits = (Settings.jobs.max_retained, Settings.jobs.max_retained_bytes)
-            if self._last_limits is not None and self._last_limits != limits:
-                self._purge_locked()
-                return self._jobs.get(job_id)
-            job = self._jobs.get(job_id)
-            if job is None:
-                return None
-            if (
-                job.finished_mono is not None
-                and (self._clock() - job.finished_mono) > Settings.jobs.ttl_seconds
+            oldest = self._oldest_finished
+            if (self._last_limits is not None and self._last_limits != limits) or (
+                oldest is not None and (self._clock() - oldest) > Settings.jobs.ttl_seconds
             ):
-                del self._jobs[job_id]
-                return None
-            return job
+                self._purge_locked()
+            return self._jobs.get(job_id)
 
     async def discard(self, job_id: str) -> None:
         """Remove a job that failed before it could be admitted to dispatch."""

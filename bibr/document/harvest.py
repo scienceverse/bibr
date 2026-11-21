@@ -869,7 +869,11 @@ def _unpack(packed: _PackedDraft) -> _PageDraft:
 
 
 def _complete(draft: _PageDraft) -> tuple[Page, list[RoleTag]]:
-    """Columns, spans, lines and script tags of a drafted page (no pdfium calls)."""
+    """Columns, spans, lines and script tags of a drafted page (no pdfium calls).
+
+    The reference implementation: ``LayerBuilder.finish`` runs :func:`_complete_packed`,
+    which a test holds equal to ``_complete(_unpack(packed))`` bit for bit.
+    """
     built = draft.page
     if not draft.codes:
         return built, []
@@ -1175,11 +1179,6 @@ def _complete_packed(packed: _PackedDraft) -> tuple[Page, list[RoleTag]]:
         rec_text=rec_text,
     )
     return built, tags
-
-
-_DEFAULT_SPANS_AND_LINES = _spans_and_lines
-_DEFAULT_SCRIPT_TAGS = _script_tags
-_DEFAULT_COMPLETE = _complete
 
 
 class LayerBuilder:
@@ -1522,14 +1521,7 @@ class LayerBuilder:
                 pages.append(packed)
                 continue
             try:
-                if (
-                    _spans_and_lines is _DEFAULT_SPANS_AND_LINES
-                    and _script_tags is _DEFAULT_SCRIPT_TAGS
-                    and _complete is _DEFAULT_COMPLETE
-                ):
-                    built, tags = _complete_packed(packed)
-                else:
-                    built, tags = _complete(_unpack(packed))
+                built, tags = _complete_packed(packed)
             except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
                 key = f"harvest:{packed.page.index}"
                 self.errors[key] = _error_text(exc)
