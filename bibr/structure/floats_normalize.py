@@ -432,41 +432,21 @@ def _header_key(label: object) -> str:
     return _NON_ALNUM_RE.sub("", normalize_label(unicodedata.normalize("NFKC", str(label))))
 
 
-def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool:
-    """Append *continuation*'s rows to *survivor*; False when shapes differ."""
-    merged = continuation_frame(survivor.df, continuation.df)
-    if merged is None:
-        logger.debug(
-            "table continuation on page %s not merged: %d vs %d columns",
-            continuation.page_number,
-            len(continuation.df.columns),
-            len(survivor.df.columns),
-        )
-        return False
-    survivor.df = merged
-    survivor.tbl_html = f"{survivor.tbl_html}\n{continuation.tbl_html}"
-    survivor.provenance.extend(continuation.provenance)
-    survivor.parts.extend(continuation.parts)
-    return True
-
-
-def _continuation_pieces(
-    s_columns: pd.Index, c_df: pd.DataFrame
-) -> list[pd.DataFrame] | None:
+def _continuation_pieces(s_columns: pd.Index, c_df: pd.DataFrame) -> list[pd.DataFrame] | None:
     """Frames to append to a survivor with *s_columns*, or None on column-count mismatch."""
     if len(s_columns) != len(c_df.columns):
         return None
     body = c_df.copy()
     body.columns = s_columns
     if [_header_key(c) for c in c_df.columns] == [_header_key(c) for c in s_columns]:
+        # The page repeats the header, perhaps read with other spacing, case
+        # or punctuation; the first page's labels stand and the rows align by
+        # position.
         return [body]
+    # Headerless continuation page: the HTML parser promoted its first data
+    # row to column names — restore it and align positionally. A header that
+    # differs by more than that is restored as well: a page whose first row is
+    # all text looks no different, and dropping the row would lose printed
+    # cells.
     header_row = pd.DataFrame([[str(c) for c in c_df.columns]], columns=s_columns)
     return [header_row, body]
-
-
-def continuation_frame(s_df: pd.DataFrame, c_df: pd.DataFrame) -> pd.DataFrame | None:
-    """*s_df* with a continuation part's rows appended; None when the column counts differ."""
-    pieces = _continuation_pieces(s_df.columns, c_df)
-    if pieces is None:
-        return None
-    return pd.concat([s_df, *pieces], ignore_index=True)

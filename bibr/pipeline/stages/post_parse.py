@@ -1752,17 +1752,6 @@ async def post_parse(
                 settings=effective_settings,
             )
 
-            # Start the statement tagger's CPU ONNX forward pass concurrently
-            # with metadata/equation/reference extraction: content_blocks(contents)
-            # reads only sentences & sections, which are immutable until late text
-            # cleaning below.
-            if effective_settings.ml.statement_tagger_model_id and not no_llm:
-                from bibr.statement_tagger.pipeline import predict_statement_tags
-
-                stmt_task = asyncio.create_task(
-                    asyncio.to_thread(predict_statement_tags, contents, effective_settings)
-                )
-
             # --- Metadata + Equations in parallel ---
             paper_metadata = await _extract_metadata_and_equations(
                 contents,
@@ -1779,6 +1768,19 @@ async def post_parse(
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
             )
+            # Start the statement tagger's CPU ONNX forward pass now, so it
+            # overlaps the printed-citation read, the title decision and the
+            # integrity rules below. Not earlier: content_blocks(contents)
+            # skips REFERENCES sections, and reference extraction retypes
+            # sections to and from REFERENCES (RefLocator), so a snapshot taken
+            # while it runs depends on thread timing. From here to the await
+            # below nothing changes a section's type or a sentence's text.
+            if effective_settings.ml.statement_tagger_model_id and not no_llm:
+                from bibr.statement_tagger.pipeline import predict_statement_tags
+
+                stmt_task = asyncio.create_task(
+                    asyncio.to_thread(predict_statement_tags, contents, effective_settings)
+                )
             # The paper's own printed citation, parsed now with the reference
             # parser that just parsed its reference list (it may be unloaded
             # after this stage). The identity stage, which knows the DOI,
@@ -1887,7 +1889,10 @@ async def post_parse(
                 precomputed = await stmt_task
                 stmt_task = None
                 if precomputed is not None:
-                    integrity_resolution = apply_statement_tagger(
+                    # Threaded like the rules above: candidate building runs
+                    # over every statement and block, off the serve loop.
+                    integrity_resolution = await asyncio.to_thread(
+                        apply_statement_tagger,
                         contents,
                         integrity_resolution,
                         effective_settings,

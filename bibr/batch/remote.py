@@ -559,7 +559,9 @@ class RemoteExecutor:
         max_interval = max(poll_target, MAX_POLL_INTERVAL)
         # Progressive initial ramp: notice fast jobs promptly instead of waiting a
         # full initial poll_interval (default 4s), then settle onto the configured
-        # backoff cadence.
+        # backoff cadence. A failed or unreadable poll ends the ramp at once
+        # (interval floored at poll_target): MAX_POLL_ERRORS has to cover a
+        # window of serve unavailability, not six polls a quarter second apart.
         interval = min(poll_target, 0.25)
         errors = 0
         while self._clock() < deadline:
@@ -572,6 +574,7 @@ class RemoteExecutor:
                     raise TransientError(
                         "connection_error", f"{type(exc).__name__}: {exc}", job_id=job_id
                     ) from exc
+                interval = max(interval, poll_target)
                 continue
             status = response.status_code
             if status == 404:
@@ -582,6 +585,7 @@ class RemoteExecutor:
                     raise TransientError(
                         f"http_{status}", bounded_text(response.text, 300) or "", job_id=job_id
                     )
+                interval = max(interval, poll_target)
                 continue
             if status >= 400:
                 raise PermanentError(
@@ -594,6 +598,7 @@ class RemoteExecutor:
             try:
                 body = response.json()
             except ValueError:
+                interval = max(interval, poll_target)
                 continue
             if isinstance(body, dict) and body.get("status") in TERMINAL:
                 return body
