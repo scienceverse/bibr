@@ -790,10 +790,12 @@ def _fold_math_alnum(text: str) -> str:
     return _MATH_ALNUM_RE.sub(fold, text)
 
 
-# Necessary condition for ANY of the 4 extraction passes: passes 1, 2 and 4
-# require a comparator (ASCII =<>~, Unicode ≤≥⩽⩾≈≠≪≫, or a LaTeX \le/\ge/…
-# command), and pass 3 requires "$". Sentences failing this skip bytearray
-# allocation, paren grouping, and all 4 regex passes.
+# Necessary condition for the 4 extraction passes on a sentence of running
+# text: passes 1, 2 and 4 require a comparator (ASCII =<>~, Unicode
+# ≤≥⩽⩾≈≠≪≫, or a LaTeX \le/\ge/… command), and pass 3 requires "$". Such a
+# sentence failing this skips bytearray allocation, paren grouping, and all
+# 4 regex passes. A display-formula sentence is never skipped: pass 3 records
+# one whole when it holds no relation, and it has no "$" around it.
 _EQ_FAST_PRESCAN_RE = re.compile(r"[$=<>~≤≥⩽⩾≈≠≪≫\\]")
 
 _FIVE_FOR_EQUALS_RULE = _stand_in_for("=", _FIVE_FOR_EQUALS_RE)
@@ -918,7 +920,7 @@ class EquationExtractor:
             text = printed = _single_char_line_breaks(sent.text)
             if repair_glitches:
                 text = repair_statistic_glitches(printed)
-            if not _EQ_FAST_PRESCAN_RE.search(text):
+            if not sent.is_display_formula and not _EQ_FAST_PRESCAN_RE.search(text):
                 continue
             # Each pass marks the characters of the components it emitted,
             # and a later pass skips any match overlapping them. Only those

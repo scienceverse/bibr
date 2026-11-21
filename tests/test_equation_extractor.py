@@ -1354,6 +1354,20 @@ class TestDuplicates:
 
         assert _components(eqs) == [("t", "28", "=", "2.10"), ("p", "", "<", ".05")]
 
+    def test_display_formula_without_a_relation_is_recorded_whole(self):
+        # No comparator, "$" or backslash: nothing the passes for running text
+        # look for, and still a display formula, which is always recorded. The
+        # group ids of the equations after it count from it.
+        display = PaperSentence(
+            text_id=1, text="a + b", section_id=1, paragraph_id=1, is_display_formula=True
+        )
+        eqs = EquationExtractor().extract_from_sentences(
+            [display, _make_sentence(2, "The fit was good (R2 = 0.86).")], _make_sections()
+        )
+
+        assert _components(eqs) == [("a + b", "", "", ""), ("R2", "", "=", "0.86")]
+        assert [eq.grp_id for eq in eqs] == [1, 2]
+
     def test_operator_in_an_unclosed_parenthesis_still_splits_a_formula(self):
         display = PaperSentence(
             text_id=1,
