@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,6 +69,7 @@ INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
 OUTPUT_NAME = "logits"
 _LABEL = "text reference segmenter"
+_WINDOW_BATCH_SIZE = 16
 # What the load probe tokenises: a short reference list in the shapes papers print.
 _PROBE_TEXT = (
     "[1] Smith, J. A., & Müller, K. (2019). A title of the first work. Journal of "
@@ -259,7 +259,7 @@ class TextSegmentation:
 class OnnxTextSegmenter:
     """Loads a text segmenter bundle and splits reference text; safe to share across threads."""
 
-    def __init__(self, path: str | Path, revision: str | None = None) -> None:
+    def __init__(self, path: str | Path, revision: str | None = None, *, probe: bool = True) -> None:
         from tokenizers import Tokenizer
 
         from bibr.utils.onnx_providers import create_session
@@ -278,20 +278,28 @@ class OnnxTextSegmenter:
         self._tokenizer.no_padding()
         self.files: tuple[Path, ...] = (self.onnx_path, manifest_path, tokenizer_path)
         self._session, _device = create_session(self.onnx_path, device="cpu", model_name=_LABEL)
-        inputs = [i.name for i in self._session.get_inputs()]
+        in_metas = self._session.get_inputs()
+        inputs = [i.name for i in in_metas]
         outputs = [o.name for o in self._session.get_outputs()]
         if set(inputs) != {INPUT_IDS, ATTENTION_MASK} or OUTPUT_NAME not in outputs:
             raise ConfigurationError(
                 f"{self.onnx_path}: graph inputs {inputs} / outputs {outputs}; want "
                 f"{INPUT_IDS!r} and {ATTENTION_MASK!r} in and {OUTPUT_NAME!r} out"
             )
-        self._lock = threading.Lock()
-        self._check_graph()
+        id_shape = next((i.shape for i in in_metas if i.name == INPUT_IDS), None) or ()
+        self._dynamic_batch = bool(id_shape) and id_shape[0] != 1
+        # CPU ORT InferenceSession.run and immutable Rust tokenizers are thread-safe.
+        if probe:
+            self._check_graph()
 
     def _run(self, ids: np.ndarray) -> np.ndarray:
         x = np.asarray(ids, dtype=np.int64)[None]
-        with self._lock:
-            out = self._session.run([OUTPUT_NAME], {INPUT_IDS: x, ATTENTION_MASK: np.ones_like(x)})
+        out = self._session.run([OUTPUT_NAME], {INPUT_IDS: x, ATTENTION_MASK: np.ones_like(x)})
+        return np.asarray(out[0])
+
+    def _run_batch(self, batch_ids: np.ndarray) -> np.ndarray:
+        x = np.asarray(batch_ids, dtype=np.int64)
+        out = self._session.run([OUTPUT_NAME], {INPUT_IDS: x, ATTENTION_MASK: np.ones_like(x)})
         return np.asarray(out[0])
 
     def _probe_ids(self) -> list[np.ndarray]:
@@ -348,8 +356,22 @@ class OnnxTextSegmenter:
         """``(tags, kept softmax, offsets, windows)`` for ``text`` (already surrogate-free)."""
         ids, offsets = self.encode(text)
         spans = windows(len(ids), self.window, self.stride)
-        logits = [(a, b, self._run(ids[a:b])[0]) for a, b in spans]
-        tags, probs = merge_windows(len(ids), logits)
+        full = [(idx, a, b) for idx, (a, b) in enumerate(spans) if b - a == self.window]
+        if self._dynamic_batch and len(full) > 1:
+            logits: list[tuple[int, int, np.ndarray] | None] = [None] * len(spans)
+            for start in range(0, len(full), _WINDOW_BATCH_SIZE):
+                chunk = full[start : start + _WINDOW_BATCH_SIZE]
+                batch = np.stack([ids[a:b] for _, a, b in chunk], axis=0)
+                batch_out = self._run_batch(batch)
+                for row, (idx, a, b) in enumerate(chunk):
+                    logits[idx] = (a, b, batch_out[row])
+            for idx, (a, b) in enumerate(spans):
+                if logits[idx] is None:
+                    logits[idx] = (a, b, self._run(ids[a:b])[0])
+            tags, probs = merge_windows(len(ids), [item for item in logits if item is not None])
+        else:
+            logits_seq = [(a, b, self._run(ids[a:b])[0]) for a, b in spans]
+            tags, probs = merge_windows(len(ids), logits_seq)
         return tags, probs, offsets, len(spans)
 
     def segment_text(self, text: str) -> TextSegmentation:

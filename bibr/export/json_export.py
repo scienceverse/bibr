@@ -666,19 +666,56 @@ def _field_states(paper: Paper, *, present: dict[str, bool], warnings: list) -> 
     )
 
 
+def _sanitize_str(s: str) -> str:
+    """Replace lone surrogates in *s*, with an O(1) fast path for ASCII strings."""
+    if s.isascii() or _SURROGATE_RE.search(s) is None:
+        return s
+    return _SURROGATE_RE.sub("\ufffd", s)
+
+
 def _sanitize_json_strings(value):
-    """Replace lone surrogate code points so JSON responses are UTF-8 encodable."""
+    """Replace lone surrogate code points so JSON responses are UTF-8 encodable.
+
+    Copy-on-write: avoids allocating new dicts/lists when no string contains a
+    lone surrogate (the common case) while never mutating caller inputs.
+    """
     if isinstance(value, str):
-        return _SURROGATE_RE.sub("\ufffd", value)
+        return _sanitize_str(value)
     if isinstance(value, list):
-        return [_sanitize_json_strings(item) for item in value]
+        out_list: list | None = None
+        for i, item in enumerate(value):
+            if isinstance(item, str):
+                clean = _sanitize_str(item)
+            elif isinstance(item, (dict, list)):
+                clean = _sanitize_json_strings(item)
+            else:
+                continue
+            if clean is not item:
+                if out_list is None:
+                    out_list = list(value)
+                out_list[i] = clean
+        return value if out_list is None else out_list
     if isinstance(value, dict):
-        return {
-            _sanitize_json_strings(key) if isinstance(key, str) else key: _sanitize_json_strings(
-                item
-            )
-            for key, item in value.items()
-        }
+        out_dict: dict | None = None
+        for key, item in value.items():
+            clean_k = _sanitize_str(key) if isinstance(key, str) else key
+            if isinstance(item, str):
+                clean_v = _sanitize_str(item)
+            elif isinstance(item, (dict, list)):
+                clean_v = _sanitize_json_strings(item)
+            else:
+                clean_v = item
+            if clean_k is not key:
+                # Rare surrogate in a dict key: rebuild to preserve key order.
+                return {
+                    (_sanitize_str(k) if isinstance(k, str) else k): _sanitize_json_strings(v)
+                    for k, v in value.items()
+                }
+            if clean_v is not item:
+                if out_dict is None:
+                    out_dict = dict(value)
+                out_dict[key] = clean_v
+        return value if out_dict is None else out_dict
     return value
 
 
@@ -890,31 +927,30 @@ def _export_paper_payload(
         # Flatten matches into bib_match table
         for src, m in r.match.items():
             try:
-                d = m.model_dump()
                 bib_match_data.append(
                     BibMatchExport(
                         bib_id=r.bib_id,
                         service=src.value,
-                        service_id=_export_service_id(d.get("id")),
-                        score=_match_score(d.get("score")),
-                        bib_type=_export_bib_type(d.get("bib_type")),
-                        doi=_export_doi(d.get("doi"), "bib_match.doi"),
-                        title=d.get("title"),
+                        service_id=_export_service_id(m.id),
+                        score=_match_score(m.score),
+                        bib_type=_export_bib_type(m.bib_type),
+                        doi=_export_doi(m.doi, "bib_match.doi"),
+                        title=m.title,
                         author=_authors_to_dicts(m.authors),
                         editor=_authors_to_dicts(m.editors),
-                        publisher=d.get("publisher"),
-                        year=d.get("year"),
+                        publisher=m.publisher,
+                        year=m.year,
                         published_date=_conformed(
-                            d.get("date"), _ISO_DATE_RE, "bib_match.published_date"
+                            m.date, _ISO_DATE_RE, "bib_match.published_date"
                         ),
-                        container=d.get("container"),
-                        volume=d.get("volume"),
-                        issue=d.get("issue"),
-                        first_page=d.get("first_page"),
-                        last_page=d.get("last_page"),
-                        edition=d.get("edition"),
-                        version=d.get("version"),
-                        url=_without_active_scheme(d.get("url")),
+                        container=m.container,
+                        volume=m.volume,
+                        issue=m.issue,
+                        first_page=m.first_page,
+                        last_page=m.last_page,
+                        edition=m.edition,
+                        version=m.version,
+                        url=_without_active_scheme(m.url),
                         **_record_ids(m),
                     )
                 )
@@ -926,30 +962,29 @@ def _export_paper_payload(
     metadata_match_data = []
     for src, m in paper.metadata.match.items() if paper.metadata else []:
         try:
-            d = m.model_dump()
             metadata_match_data.append(
                 MetadataMatchExport(
                     service=src.value,
-                    service_id=_export_service_id(d.get("id")),
-                    score=_match_score(d.get("score")),
-                    bib_type=_export_bib_type(d.get("bib_type")),
-                    doi=_export_doi(d.get("doi"), "metadata_match.doi"),
-                    title=d.get("title"),
+                    service_id=_export_service_id(m.id),
+                    score=_match_score(m.score),
+                    bib_type=_export_bib_type(m.bib_type),
+                    doi=_export_doi(m.doi, "metadata_match.doi"),
+                    title=m.title,
                     author=_authors_to_dicts(m.authors),
                     editor=_authors_to_dicts(m.editors),
-                    publisher=d.get("publisher"),
-                    year=d.get("year"),
+                    publisher=m.publisher,
+                    year=m.year,
                     published_date=_conformed(
-                        d.get("date"), _ISO_DATE_RE, "metadata_match.published_date"
+                        m.date, _ISO_DATE_RE, "metadata_match.published_date"
                     ),
-                    container=d.get("container"),
-                    volume=d.get("volume"),
-                    issue=d.get("issue"),
-                    first_page=d.get("first_page"),
-                    last_page=d.get("last_page"),
-                    edition=d.get("edition"),
-                    version=d.get("version"),
-                    url=_without_active_scheme(d.get("url")),
+                    container=m.container,
+                    volume=m.volume,
+                    issue=m.issue,
+                    first_page=m.first_page,
+                    last_page=m.last_page,
+                    edition=m.edition,
+                    version=m.version,
+                    url=_without_active_scheme(m.url),
                     **_record_ids(m),
                 )
             )
@@ -1486,11 +1521,17 @@ def export_paper_to_json(
     include_region_meta: bool = False,
     validate: bool = True,
 ) -> dict[str, Any]:
-    """Export *paper* as the v12.0 dictionary payload."""
-    export = build_paper_export(
+    """Export *paper* as the v12.0 dictionary payload.
+
+    ``_export_paper_payload`` already constructs and validates the full
+    :class:`PaperExport` tree (plus :class:`ValidationExport` when *validate*
+    is true), dumps it with aliases, and sanitizes lone surrogates in-place —
+    so returning it directly avoids a redundant full-tree re-validation and
+    second dump.
+    """
+    return _export_paper_payload(
         paper,
         include_regions=include_regions,
         include_region_meta=include_region_meta,
         validate=validate,
     )
-    return cast(dict[str, Any], export.model_dump(by_alias=True, exclude_unset=True))

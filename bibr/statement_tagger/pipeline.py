@@ -441,7 +441,7 @@ def get_statement_tagger(settings: Any) -> StatementTagger | None:
     written into the run's record.
     """
     global _TAGGER, _KEY
-    from bibr.utils.model_overrides import override_load_error, record_model_load
+    from bibr.utils.model_overrides import is_model_override, override_load_error, record_model_load
 
     ml = getattr(settings, "ml", None)
     value = getattr(ml, "statement_tagger_model_id", None)
@@ -453,7 +453,8 @@ def get_statement_tagger(settings: Any) -> StatementTagger | None:
     with _LOCK:
         if _TAGGER is None or key != _KEY:
             try:
-                _TAGGER = _load(value, revision)
+                # A candidate's graph is probed at load; the shipped default is not.
+                _TAGGER = _load(value, revision, probe=is_model_override(settings, SETTING))
                 _KEY = key
             except Exception as exc:
                 strict = override_load_error(settings, SETTING, exc)
@@ -491,7 +492,7 @@ def _bundle_path(value: str, revision: str | None) -> Path:
     return directory
 
 
-def _load(value: str, revision: str | None) -> StatementTagger:
+def _load(value: str, revision: str | None, *, probe: bool = True) -> StatementTagger:
     from bibr.statement_tagger.runtime import StatementTagger
     from bibr.utils.onnx_providers import apply_cpu_memory, apply_cpu_threading
 
@@ -503,8 +504,7 @@ def _load(value: str, revision: str | None) -> StatementTagger:
     apply_cpu_memory(options)
     options.inter_op_num_threads = 1
     logger.info("loading statement tagger: %s", value)
-    # Opens the graph and runs it once on two blocks (StatementTagger._check_graph).
-    return StatementTagger(bundle, session_options=options)
+    return StatementTagger(bundle, session_options=options, probe=probe)
 
 
 def reset_statement_tagger() -> None:
@@ -517,12 +517,48 @@ def reset_statement_tagger() -> None:
 # -- the stage ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class StatementTagRun:
+    """Precomputed statement-tagger inference output ready to merge into a resolution."""
+
+    blocks: list[ContentBlock]
+    statements: list[TaggedStatement] | None
+    error: Exception | None = None
+
+
+def predict_statement_tags(
+    contents: PaperContents,
+    settings: Any,
+    *,
+    tagger: StatementTagger | None = None,
+) -> StatementTagRun | None:
+    """Run the statement tagger's ONNX inference over *contents* without mutating it.
+
+    Returns ``None`` when no tagger is configured/available or *contents* has no
+    blocks. Load errors for an overridden bundle propagate immediately; per-paper
+    inference errors are captured in ``StatementTagRun.error`` so the caller can
+    record them at the exact same point in post-parse.
+    """
+    tagger = tagger if tagger is not None else get_statement_tagger(settings)
+    if tagger is None:
+        return None
+    blocks = content_blocks(contents)
+    if not blocks:
+        return None
+    try:
+        statements = tagger.tag([block.text for block in blocks])
+    except Exception as exc:
+        return StatementTagRun(blocks=blocks, statements=None, error=exc)
+    return StatementTagRun(blocks=blocks, statements=statements)
+
+
 def apply_statement_tagger(
     contents: PaperContents,
     resolution: IntegrityStatementResolution,
     settings: Any,
     *,
     tagger: StatementTagger | None = None,
+    precomputed: StatementTagRun | None = None,
 ) -> IntegrityStatementResolution:
     """Add the tagger's statements to the resolution and the sections; unset, a no-op.
 
@@ -532,11 +568,12 @@ def apply_statement_tagger(
     default that fails to load or raises on a paper leaves the paper the rules'
     statements, with a warning in the log.
     """
-    tagger = tagger if tagger is not None else get_statement_tagger(settings)
-    if tagger is None:
-        return resolution
-    blocks = content_blocks(contents)
-    if not blocks:
+    run = (
+        precomputed
+        if precomputed is not None
+        else predict_statement_tags(contents, settings, tagger=tagger)
+    )
+    if run is None:
         return resolution
     from bibr.utils.model_overrides import (
         is_model_override,
@@ -544,20 +581,21 @@ def apply_statement_tagger(
         note_inference_success,
     )
 
-    try:
-        statements = tagger.tag([block.text for block in blocks])
-    except Exception as exc:
+    if run.error is not None:
         if not is_model_override(settings, SETTING):
             logger.warning(
                 "statement tagger raised on this paper (%r); it keeps the rules' statements",
-                exc,
+                run.error,
             )
             return resolution
         # The paper keeps the rules' statements; several papers in a row stop the run.
-        warning = note_inference_failure(settings, SETTING, exc)
+        warning = note_inference_failure(settings, SETTING, run.error)
         if warning is not None and warning not in contents.processing_warnings:
             contents.processing_warnings.append(warning)
         return resolution
+    assert run.statements is not None
+    blocks = run.blocks
+    statements = run.statements
     note_inference_success(settings, SETTING)
     additions = _field_candidates(contents, resolution, statements, blocks)
     # A field the tagger reads exactly as the rules did keeps the rules'

@@ -149,14 +149,26 @@ class OnnxSectionClassifierModel:
         max_length: int = RUNTIME_MAX_LENGTH,
     ) -> list[SectionPrediction]:
         contexts = [_coerce_header_context(item) for item in items]
+        n = len(contexts)
+        if n <= _MAX_INFERENCE_BATCH:
+            order: list[int] | None = None
+            ordered = contexts
+        else:
+            # Length-sorted chunks keep short headings from padding out to the
+            # longest heading in another chunk; results are restored to input order.
+            order = sorted(
+                range(n),
+                key=lambda i: len(contexts[i].heading) + min(len(contexts[i].body), 1500),
+            )
+            ordered = [contexts[i] for i in order]
         results: list[SectionPrediction] = []
-        for start in range(0, len(contexts), _MAX_INFERENCE_BATCH):
-            chunk = contexts[start : start + _MAX_INFERENCE_BATCH]
+        on_gpu = getattr(self, "device", None) == "cuda"
+        for start in range(0, n, _MAX_INFERENCE_BATCH):
+            chunk = ordered[start : start + _MAX_INFERENCE_BATCH]
             # A GPU out-of-memory failure halves the chunk and finally runs a
             # single header on the CPU, instead of failing the whole paper's
             # headers over to the alias/LLM tier. A CPU session's failure is
             # raised as before.
-            on_gpu = getattr(self, "device", None) == "cuda"
             results.extend(
                 split_on_gpu_oom(
                     chunk,
@@ -174,7 +186,12 @@ class OnnxSectionClassifierModel:
                     on_gpu=on_gpu,
                 )
             )
-        return results
+        if order is None:
+            return results
+        restored: list[SectionPrediction] = [results[0]] * n
+        for pos, pred in zip(order, results, strict=True):
+            restored[pos] = pred
+        return restored
 
     def _session_on_cpu(self):
         """A CPU session on the same graph, opened on first use (GPU OOM last resort).

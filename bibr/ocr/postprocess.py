@@ -27,8 +27,27 @@ _NUMBERED_DOT_RE = re.compile(r"^(\d+|[A-Za-z])(\.|\)|\uff09)(.+)$")
 # strip a leading one only when no command name follows.  A trailing one
 # cannot start a command, so every region strips it the same way.
 _LEADING_TAB_RE = re.compile(r"^(\\t)+")
-_TRAILING_TAB_RE = re.compile(r"(\\t)+$")
 _FORMULA_LEADING_TAB_RE = re.compile(r"^(?:\\t(?![A-Za-z]))+")
+_DOT_RUN_RE = re.compile(r"\.{3,}")
+_MIDDOT_RUN_RE = re.compile(r"\u00b7{3,}")
+_UNDERSCORE_RUN_RE = re.compile(r"_{3,}")
+_ESC_UNDERSCORE_RUN_RE = re.compile(r"(?:\\_){3,}")
+
+
+def _strip_trailing_tabs(s: str) -> str:
+    """Linear-time equivalent of ``re.sub(r'(\\t)+$', '', s)``."""
+    if s.endswith(r"\t"):
+        end = len(s)
+        while end >= 2 and s[end - 2 : end] == r"\t":
+            end -= 2
+        return s[:end]
+    # Python's ``$`` also matches immediately before a single trailing ``\n``.
+    if s.endswith("\\t\n"):
+        end = len(s) - 1
+        while end >= 2 and s[end - 2 : end] == r"\t":
+            end -= 2
+        return s[:end] + "\n"
+    return s
 
 # Punctuation that attaches to the token before it: a space in front of it
 # would split "(1)–(3)" or "(a), (b)".
@@ -82,48 +101,142 @@ def _find_consecutive_repeat(
     Returns the string with the repetition replaced by a single occurrence —
     the text before and after the run is kept — or ``None`` if no repeats
     were found.
+
+    Exact equivalent of ``re.compile(r"(.{min_unit_len,max_unit_len}?)\1{min_repeats-1,}",
+    re.DOTALL).search(search_s)`` (leftmost start, then shortest unit length)
+    implemented via dyadic-block anchor search in O(N log N) time instead of
+    superlinear regex backtracking.
     """
     n = len(s)
-    if n < min_unit_len * min_repeats:
+    if min_unit_len < 1 or min_repeats < 2 or n < min_unit_len * min_repeats:
         return None
-    # Bound the input the backreference + non-greedy quantifier pattern sees:
-    # its cost is superlinear in the searched length (2,048 chars ≈ 16 ms;
-    # 32,768 ≈ 4.3 s).
     _MAX_SEARCH_LEN = 50_000
     search_s = s[:_MAX_SEARCH_LEN] if n > _MAX_SEARCH_LEN else s
-    # Derive the unit ceiling from what is actually searched. Taking it from
-    # the full length left the cap ineffective — a 100,000-character input
-    # cost twice a 50,000-character one (23 s measured) despite both
-    # searching 50,000 characters.
-    max_unit_len = len(search_s) // min_repeats
+    m = len(search_s)
+    max_unit_len = m // min_repeats
     if max_unit_len < min_unit_len:
         return None
-    if not _has_repeated_ngram(search_s, min_unit_len, min_repeats):
-        return None
-    pattern = re.compile(
-        r"(.{"
-        + str(min_unit_len)
-        + ","
-        + str(max_unit_len)
-        + r"}?)\1{"
-        + str(min_repeats - 1)
-        + ",}",
-        re.DOTALL,
-    )
-    match = pattern.search(search_s)
-    if match is None:
+
+    best_start: int | None = None
+    best_len = 0
+
+    lo = min_unit_len
+    while lo <= max_unit_len:
+        hi = min(lo * 2 - 1, max_unit_len)
+        if min_repeats >= 3:
+            step = lo
+            block = lo
+        else:
+            step = max(1, lo // 2)
+            block = max(1, (lo + 1) // 2)
+
+        # Any valid run with start < best_start (or same start and smaller length
+        # within this band) has its first grid anchor g <= best_start + step - 1.
+        max_g = m - block - lo
+        if best_start is not None:
+            max_g = min(max_g, best_start + step - 1)
+
+        g = 0
+        while g <= max_g:
+            anchor = search_s[g : g + block]
+            p_start = g + lo
+            p_end = min(m, g + hi + block)
+            pos = search_s.find(anchor, p_start, p_end)
+            while pos != -1:
+                unit_len = pos - g
+                if min_repeats >= 3:
+                    need_end = g + (min_repeats - 1) * unit_len
+                    if need_end > m:
+                        pos = search_s.find(anchor, pos + 1, p_end)
+                        continue
+                    unit_g = search_s[g : g + unit_len]
+                    ok = True
+                    for k in range(1, min_repeats - 1):
+                        if search_s[g + k * unit_len : g + (k + 1) * unit_len] != unit_g:
+                            ok = False
+                            break
+                    if not ok:
+                        pos = search_s.find(anchor, pos + 1, p_end)
+                        continue
+                    l_limit = max(0, g - step + 1)
+                    l_start = g
+                    while (
+                        l_start > l_limit
+                        and search_s[l_start - 1] == search_s[l_start - 1 + unit_len]
+                    ):
+                        l_start -= 1
+                    # If the match extends back to g - step, g - step already found it.
+                    if l_start == l_limit and l_limit > 0 and search_s[l_limit - 1] == search_s[l_limit - 1 + unit_len]:
+                        pos = search_s.find(anchor, pos + 1, p_end)
+                        continue
+                    needed_r = l_start + min_repeats * unit_len
+                    is_repeat = needed_r <= m and (
+                        need_end >= needed_r
+                        or search_s[need_end:needed_r]
+                        == search_s[need_end - unit_len : needed_r - unit_len]
+                    )
+                    if is_repeat and (
+                        best_start is None
+                        or l_start < best_start
+                        or (l_start == best_start and unit_len < best_len)
+                    ):
+                        best_start = l_start
+                        best_len = unit_len
+                        if best_start == 0 and best_len == min_unit_len:
+                            break
+                        max_g = min(max_g, best_start + step - 1)
+                else:
+                    # min_repeats == 2: extend left (at most step) and right to check >= 2*unit_len.
+                    l_limit = max(0, g - step + 1)
+                    l_start = g
+                    while (
+                        l_start > l_limit
+                        and search_s[l_start - 1] == search_s[l_start - 1 + unit_len]
+                    ):
+                        l_start -= 1
+                    if l_start == l_limit and l_limit > 0 and search_s[l_limit - 1] == search_s[l_limit - 1 + unit_len]:
+                        pos = search_s.find(anchor, pos + 1, p_end)
+                        continue
+                    needed_r = l_start + 2 * unit_len
+                    is_repeat = (
+                        needed_r <= m
+                        and search_s[l_start : l_start + unit_len]
+                        == search_s[l_start + unit_len : needed_r]
+                    )
+                    if is_repeat and (
+                        best_start is None
+                        or l_start < best_start
+                        or (l_start == best_start and unit_len < best_len)
+                    ):
+                        best_start = l_start
+                        best_len = unit_len
+                        if best_start == 0 and best_len == min_unit_len:
+                            break
+                        max_g = min(max_g, best_start + step - 1)
+
+                pos = search_s.find(anchor, pos + 1, p_end)
+
+            if best_start == 0 and best_len == min_unit_len:
+                break
+            g += step
+
+        if best_start == 0 and best_len == min_unit_len:
+            break
+        lo *= 2
+
+    if best_start is None:
         return None
     # Keep the text after the run: dropping it cut a dot-leader table of
     # contents to its first entry. A decode loop can run on past the searched
     # window, so its copies beyond the window go too, and so does a final
     # partial copy where the model hit its token cap.
-    unit = match.group(1)
-    end = match.end()
+    unit = s[best_start : best_start + best_len]
+    end = best_start + best_len * min_repeats
     while s.startswith(unit, end):
-        end += len(unit)
+        end += best_len
     if unit.startswith(s[end:]):
         end = n
-    return s[: match.start()] + unit + s[end:]
+    return s[:best_start] + unit + s[end:]
 
 
 def _clean_repeated_content(
@@ -201,14 +314,18 @@ def clean_ocr_content(content: str, *, formula: bool = False) -> str:
     # 1. Strip leading/trailing literal \t
     leading = _FORMULA_LEADING_TAB_RE if formula else _LEADING_TAB_RE
     result = leading.sub("", content).lstrip()
-    result = _TRAILING_TAB_RE.sub("", result).rstrip()
+    result = _strip_trailing_tabs(result).rstrip()
 
     # 2. Collapse repeated punctuation
     if not formula:
-        result = re.sub(r"(\.)\1{2,}", r"\1\1\1", result)
-        result = re.sub(r"(\u00b7)\1{2,}", r"\1\1\1", result)  # middle dot
-        result = re.sub(r"(_)\1{2,}", r"\1\1\1", result)
-        result = re.sub(r"(\\_)\1{2,}", r"\1\1\1", result)
+        if "..." in result:
+            result = _DOT_RUN_RE.sub("...", result)
+        if "\u00b7\u00b7\u00b7" in result:
+            result = _MIDDOT_RUN_RE.sub("\u00b7\u00b7\u00b7", result)  # middle dot
+        if "___" in result:
+            result = _UNDERSCORE_RUN_RE.sub("___", result)
+        if r"\_\_\_" in result:
+            result = _ESC_UNDERSCORE_RUN_RE.sub(r"\_\_\_", result)
 
     # 3. Remove hallucinated repeated content (long strings only)
     if len(result) >= 2048:

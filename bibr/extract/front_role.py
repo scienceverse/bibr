@@ -23,6 +23,7 @@ Hub that cannot be reached included), is the exception: it raises.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from collections.abc import Mapping, Sequence
@@ -125,7 +126,7 @@ class FrontRoleClassifier:
     """Loads a bundle and scores regions; safe to share across threads."""
 
     def __init__(self, model_spec: str, revision: str | None = None) -> None:
-        from bibr.utils.gbm_bundle import load_gbm_bundle
+        from bibr.utils.gbm_bundle import TreeEnsemble, load_gbm_bundle
 
         # A pickle-free bibr-gbm/1 bundle, read with numpy, as for the geom segmenter.
         path, bundle = load_gbm_bundle(model_spec, revision, stem=_BUNDLE_STEM)
@@ -144,7 +145,10 @@ class FrontRoleClassifier:
         self.feature_keys = feature_keys
         self.roles: list[str] = [str(r) for r in bundle["roles"]]
         self.version = str(bundle.get("version", MODEL_KIND_FRONT_ROLE_V1))
-        self._lock = threading.Lock()
+        # Pure-NumPy TreeEnsemble has no OpenMP/native lock hazard.
+        self._lock: contextlib.AbstractContextManager[Any] = (
+            contextlib.nullcontext() if isinstance(self.model, TreeEnsemble) else threading.Lock()
+        )
 
     def _score_rows(self, rows: list[dict]) -> list[RoleScores]:
         if not rows:
@@ -163,10 +167,15 @@ class FrontRoleClassifier:
         return out
 
     def predict_pages(
-        self, pages: Sequence[Sequence[Any]], *, first_page_index: int = 0
+        self,
+        pages: Sequence[Sequence[Any]],
+        *,
+        first_page_index: int = 0,
+        regions: list[FrontRegion] | None = None,
     ) -> FrontRolePredictions:
         """Score every text region; keys are ``(page_number, index)``."""
-        regions = build_front_regions(pages, first_page_index=first_page_index)
+        if regions is None:
+            regions = build_front_regions(pages, first_page_index=first_page_index)
         feats = region_features(regions)
         keep = [
             (region, feat)

@@ -300,6 +300,49 @@ def _bbox_containment(inner: list, outer: list) -> float:
     return inter / inner_area if inner_area > 0 else 0.0
 
 
+_FORMULA_DEDUP_LABELS = frozenset({"formula", "display_formula", "inline_formula"})
+_TEXT_DEDUP_LABELS = frozenset({"text", "content"})
+
+
+def _contained_formula_indices(
+    page_regions: list[dict],
+    containment_threshold: float,
+    *,
+    pre_ocr: bool = False,
+) -> set[int]:
+    """Return indices of formula regions contained inside a text region on the same page."""
+    text_bboxes = []
+    for r in page_regions:
+        if not r:
+            continue
+        if pre_ocr and r.get("task_type", "text") == "abandon":
+            continue
+        text_label = r.get("label", "text") if pre_ocr else r.get("native_label")
+        if text_label in _TEXT_DEDUP_LABELS:
+            bbox = r.get("bbox_2d")
+            if bbox:
+                text_bboxes.append(bbox)
+    if not text_bboxes:
+        return set()
+
+    to_remove: set[int] = set()
+    for i, region in enumerate(page_regions):
+        if not region:
+            continue
+        if pre_ocr and region.get("task_type", "text") == "abandon":
+            continue
+        if region.get("label") not in _FORMULA_DEDUP_LABELS:
+            continue
+        bbox = region.get("bbox_2d")
+        if not bbox:
+            continue
+        for text_bbox in text_bboxes:
+            if _bbox_containment(bbox, text_bbox) > containment_threshold:
+                to_remove.add(i)
+                break
+    return to_remove
+
+
 def _deduplicate_formula_text_regions(
     pages: list[list[dict]], settings: GlobalSettings | None = None
 ) -> list[list[dict]]:
@@ -311,31 +354,10 @@ def _deduplicate_formula_text_regions(
     content inline in the text block).  This function drops the formula
     region when >=50% of its area is contained within a text region.
     """
-    _FORMULA_LABELS = {"formula", "display_formula", "inline_formula"}
-    _TEXT_LABELS = {"text", "content"}
     containment_threshold = _effective_settings(settings).layout.containment_threshold
 
     for page_regions in pages:
-        text_regions = [
-            r
-            for r in page_regions
-            if r and r.get("native_label") in _TEXT_LABELS and r.get("bbox_2d")
-        ]
-        if not text_regions:
-            continue
-
-        to_remove = set()
-        for i, region in enumerate(page_regions):
-            if not region or region.get("label") not in _FORMULA_LABELS:
-                continue
-            bbox = region.get("bbox_2d")
-            if not bbox:
-                continue
-            for text_r in text_regions:
-                if _bbox_containment(bbox, text_r["bbox_2d"]) > containment_threshold:
-                    to_remove.add(i)
-                    break
-
+        to_remove = _contained_formula_indices(page_regions, containment_threshold, pre_ocr=False)
         if to_remove:
             page_regions[:] = [r for i, r in enumerate(page_regions) if i not in to_remove]
 
@@ -625,12 +647,34 @@ async def _ocr_page_regions_impl(
     effective = _effective_settings(settings)
     emit_figures = include_figures if include_figures is not None else effective.FIGURE_IMAGES
 
+    # Drop formula regions already contained inside a text region BEFORE OCR
+    # so we don't spend crop + VLM OCR calls on regions _deduplicate_formula_text_regions
+    # would discard immediately afterwards.
+    dropped_formulas = _contained_formula_indices(
+        regions, effective.layout.containment_threshold, pre_ocr=True
+    )
+
     # Pre-allocate one slot per non-abandoned region to preserve reading order.
     region_list: list[dict | None] = []
     slot_map: dict[int, int] = {}
     ocr_tasks = []
 
+    # Ensure lazy file-backed PIL images are decoded before concurrent worker crops.
+    if hasattr(page_img, "load"):
+        page_img.load()
+
+    def _encode_figure(fig_bbox) -> str:
+        try:
+            from bibr.ocr.image_processing import crop_image_region
+
+            fig_crop = crop_image_region(page_img, fig_bbox)
+        except Exception:
+            fig_crop = page_img
+        return base64.b64encode(pil_to_bytes(fig_crop)).decode()
+
     for i, region in enumerate(regions):
+        if i in dropped_formulas:
+            continue
         task_type = region.get("task_type", "text")
 
         if task_type == "abandon":
@@ -644,13 +688,7 @@ async def _ocr_page_regions_impl(
             image_b64 = None
             if emit_figures:
                 fig_bbox = region.get("bbox_2d", [0, 0, 1000, 1000])
-                try:
-                    from bibr.ocr.image_processing import crop_image_region
-
-                    fig_crop = crop_image_region(page_img, fig_bbox)
-                except Exception:
-                    fig_crop = page_img
-                image_b64 = base64.b64encode(pil_to_bytes(fig_crop)).decode()
+                image_b64 = await asyncio.to_thread(_encode_figure, fig_bbox)
             region_list.append(
                 OcrRegionResult.from_layout_region(
                     region,
