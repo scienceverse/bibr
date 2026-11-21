@@ -72,6 +72,7 @@ class NativeTextStage:
         "pdf_uri_links",
         "native_metadata",
         "pdf_outline",
+        "pdf_doi_evidence",
         "doc_layer",
     )
 
@@ -154,6 +155,7 @@ class NativeTextStage:
             fs.ref_line_geometry = inspection.reference_lines or None
             fs.ref_page_lines = inspection.page_lines or None
             fs.pdf_uri_links = inspection.uri_links or None
+            fs.pdf_doi_evidence = inspection.pdf_doi_evidence
             if layer_kwargs:
                 fs.doc_layer = inspection.document
             native_skip_total += sum(

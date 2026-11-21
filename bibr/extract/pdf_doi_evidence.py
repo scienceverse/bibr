@@ -19,7 +19,8 @@ can be matched to the region it was printed in.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import ctypes
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from bibr.utils.text import DOI_CANDIDATE_RE
@@ -126,44 +127,85 @@ def _to_layout_point(
     return (u, v)
 
 
-def _printed_char_records(textpage) -> list[tuple[str, float, float, bool]]:
+def _printed_char_records(
+    textpage,
+    *,
+    codes: list[int] | None = None,
+    char_boxes: list[tuple[float, float, float, float] | None] | None = None,
+) -> list[tuple[str, float, float, bool]]:
     """``(char, centre x, centre y, is_newline)`` for each printed character.
 
     Characters in an unpainted text object (render mode 3 or 7) are left out,
     and so is a character the text layer gives no box.
     """
+    import pypdfium2 as pdfium
     import pypdfium2.raw as pdfium_c
 
     records: list[tuple[str, float, float, bool]] = []
     count = textpage.count_chars()
+    if not count:
+        return records
+    raw = textpage.raw
+    get_unicode = pdfium_c.FPDFText_GetUnicode
+    get_text_obj = pdfium_c.FPDFText_GetTextObject
+    get_render_mode = pdfium_c.FPDFTextObj_GetTextRenderMode
+    unpainted = _UNPAINTED_RENDER_MODES
+    use_codes = codes is not None and len(codes) == count
+    use_boxes = char_boxes is not None and len(char_boxes) == count
+
+    if use_boxes:
+
+        def _box(idx: int) -> tuple[float, float, float, float] | None:
+            return char_boxes[idx]
+    elif isinstance(textpage, pdfium.PdfTextPage):
+        _c_l = ctypes.c_double()
+        _c_r = ctypes.c_double()
+        _c_b = ctypes.c_double()
+        _c_t = ctypes.c_double()
+        _b_l = ctypes.byref(_c_l)
+        _b_r = ctypes.byref(_c_r)
+        _b_b = ctypes.byref(_c_b)
+        _b_t = ctypes.byref(_c_t)
+        _get_box = pdfium_c.FPDFText_GetCharBox
+
+        def _box(idx: int) -> tuple[float, float, float, float] | None:
+            if _get_box(raw, idx, _b_l, _b_r, _b_b, _b_t):
+                return (_c_l.value, _c_b.value, _c_r.value, _c_t.value)
+            return None
+    else:
+
+        def _box(idx: int) -> tuple[float, float, float, float] | None:
+            try:
+                return textpage.get_charbox(idx)
+            except Exception:  # noqa: BLE001 - a char without a box is not placed
+                return None
+
+    append = records.append
     index = 0
     while index < count:
-        code = pdfium_c.FPDFText_GetUnicode(textpage.raw, index)
+        code = codes[index] if use_codes else get_unicode(raw, index)
         width = 1
         # Non-BMP text arrives as a UTF-16 surrogate pair.
         if 0xD800 <= code <= 0xDBFF and index + 1 < count:
-            low = pdfium_c.FPDFText_GetUnicode(textpage.raw, index + 1)
+            low = codes[index + 1] if use_codes else get_unicode(raw, index + 1)
             if 0xDC00 <= low <= 0xDFFF:
                 code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
                 width = 2
         ch = "\ufffd" if 0xD800 <= code <= 0xDFFF or code > 0x10FFFF else chr(code)
         if ch in ("\n", "\r"):
-            records.append((ch, 0.0, 0.0, True))
+            append((ch, 0.0, 0.0, True))
             index += width
             continue
-        text_object = pdfium_c.FPDFText_GetTextObject(textpage.raw, index)
-        if (
-            text_object
-            and pdfium_c.FPDFTextObj_GetTextRenderMode(text_object) in _UNPAINTED_RENDER_MODES
-        ):
+        text_object = get_text_obj(raw, index)
+        if text_object and get_render_mode(text_object) in unpainted:
             index += width
             continue
-        try:
-            left, bottom, right, top = textpage.get_charbox(index)
-        except Exception:  # noqa: BLE001 - a char without a box is not placed
+        box = _box(index)
+        if box is None:
             index += width
             continue
-        records.append((ch, (left + right) / 2.0, (bottom + top) / 2.0, False))
+        left, bottom, right, top = box
+        append((ch, (left + right) / 2.0, (bottom + top) / 2.0, False))
         index += width
     return records
 
@@ -205,67 +247,29 @@ def _text_near(records, rect_pts: tuple[float, float, float, float]) -> str:
     return "".join(parts).strip()
 
 
-def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvidence:
-    """Read the text-layer DOI lines, DOI links and hidden-text DOIs of *pages*, and the Info DOIs.
-
-    *pages* are 1-based; pages the PDF does not have are skipped. Only the
-    character and link records are read under the process-wide PDFium lock;
-    lines and link texts are built after it is released. Raises on an
-    unreadable PDF; the caller treats that as no evidence.
-    """
-    import pypdfium2
-
-    from bibr.ocr.native_text import _page_crop_box, _page_rotation, open_text_page
-    from bibr.ocr.pdf_links import doi_from_uri, page_uri_links
-    from bibr.ocr.utils import pdfium_lock
+def build_pdf_doi_evidence(
+    info_values: Mapping[str, str],
+    raw_pages: list[tuple[int, tuple[float, float, float, float], int, list, list, list[tuple]]],
+) -> PdfDoiEvidence:
+    """Assemble :class:`PdfDoiEvidence` from detached per-page PDFium data (lock-free)."""
+    from bibr.ocr.pdf_links import doi_from_uri
 
     metadata: list[MetadataDoi] = []
-    hidden: list[HiddenDoi] = []
-    read: list[tuple[int, tuple, int, list, list]] = []
-    with pdfium_lock:
-        document = pypdfium2.PdfDocument(pdf_bytes)
-        try:
-            for key in _INFO_KEYS:
-                value = str(document.get_metadata_value(key) or "")
-                if DOI_CANDIDATE_RE.search(value):
-                    metadata.append(MetadataDoi("pdf_info", key, " ".join(value.split())[:300]))
-            count = len(document)
-            for page_number in sorted(set(pages)):
-                if not 1 <= page_number <= count:
-                    continue
-                page = document[page_number - 1]
-                try:
-                    furniture: list[tuple] = []
-                    textpage = open_text_page(page, None, furniture)
-                    try:
-                        records = _printed_char_records(textpage)
-                    finally:
-                        textpage.close()
-                    hidden.extend(
-                        HiddenDoi(page_number, text[:300])
-                        for kind, _box, text in furniture
-                        if kind == "hidden_text"
-                        and isinstance(text, str)
-                        and DOI_CANDIDATE_RE.search(text)
-                    )
-                    page_links = page_uri_links(document, page, page_number - 1)
-                    read.append(
-                        (
-                            page_number,
-                            _page_crop_box(page),
-                            _page_rotation(page),
-                            records,
-                            page_links,
-                        )
-                    )
-                finally:
-                    page.close()
-        finally:
-            document.close()
+    for key in _INFO_KEYS:
+        value = str(info_values.get(key) or "")
+        if DOI_CANDIDATE_RE.search(value):
+            metadata.append(MetadataDoi("pdf_info", key, " ".join(value.split())[:300]))
 
+    ordered = sorted(raw_pages, key=lambda item: item[0])
+    hidden: list[HiddenDoi] = []
     lines: list[TextLayerLine] = []
     links: list[LinkDoi] = []
-    for page_number, crop_box, rotation, records, page_links in read:
+    for page_number, crop_box, rotation, records, page_links, furniture in ordered:
+        hidden.extend(
+            HiddenDoi(page_number, text[:300])
+            for kind, _box, text in furniture
+            if kind == "hidden_text" and isinstance(text, str) and DOI_CANDIDATE_RE.search(text)
+        )
 
         def to_layout(x, y, crop_box=crop_box, rotation=rotation):
             return _to_layout_point(x, y, crop_box, rotation)
@@ -292,5 +296,57 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
                 max(c[1] for c in corners),
             )
             links.append(LinkDoi(page_number, doi, link.uri, rect, _text_near(records, link.rect)))
-    pages_read = tuple(page_number for page_number, *_rest in read)
+    pages_read = tuple(page_number for page_number, *_rest in ordered)
     return PdfDoiEvidence(pages_read, tuple(lines), tuple(links), tuple(metadata), tuple(hidden))
+
+
+def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvidence:
+    """Read the text-layer DOI lines, DOI links and hidden-text DOIs of *pages*, and the Info DOIs.
+
+    *pages* are 1-based; pages the PDF does not have are skipped. Only the
+    character and link records are read under the process-wide PDFium lock;
+    lines and link texts are built after it is released. Raises on an
+    unreadable PDF; the caller treats that as no evidence.
+    """
+    import pypdfium2
+
+    from bibr.ocr.native_text import _page_crop_box, _page_rotation, open_text_page
+    from bibr.ocr.pdf_links import page_uri_links
+    from bibr.ocr.utils import pdfium_lock
+
+    info_values: dict[str, str] = {}
+    read: list[tuple[int, tuple[float, float, float, float], int, list, list, list[tuple]]] = []
+    with pdfium_lock:
+        document = pypdfium2.PdfDocument(pdf_bytes)
+        try:
+            for key in _INFO_KEYS:
+                info_values[key] = str(document.get_metadata_value(key) or "")
+            count = len(document)
+            for page_number in sorted(set(pages)):
+                if not 1 <= page_number <= count:
+                    continue
+                page = document[page_number - 1]
+                try:
+                    furniture: list[tuple] = []
+                    textpage = open_text_page(page, None, furniture)
+                    try:
+                        records = _printed_char_records(textpage)
+                    finally:
+                        textpage.close()
+                    page_links = page_uri_links(document, page, page_number - 1)
+                    read.append(
+                        (
+                            page_number,
+                            _page_crop_box(page),
+                            _page_rotation(page),
+                            records,
+                            page_links,
+                            furniture,
+                        )
+                    )
+                finally:
+                    page.close()
+        finally:
+            document.close()
+
+    return build_pdf_doi_evidence(info_values, read)

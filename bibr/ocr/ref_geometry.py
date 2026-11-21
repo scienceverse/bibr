@@ -13,6 +13,7 @@ into the extract stage, where the geometry segmenter consumes them.
 
 from __future__ import annotations
 
+import ctypes
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -52,17 +53,30 @@ def group_chars_into_lines(
     buf: list[tuple[str, tuple[float, float, float, float]]] = []
 
     def flush() -> None:
+        if not buf:
+            return
         text = "".join(c for c, _ in buf).strip()
-        all_boxes = [b for _, b in buf]
-        glyph_boxes = [b for c, b in buf if not c.isspace()]
-        if text and glyph_boxes:
-            x0 = min(b[0] for b in all_boxes)
-            x1 = max(b[2] for b in glyph_boxes)
-            y_bottom = min(b[1] for b in glyph_boxes)
-            y_top = max(b[3] for b in glyph_boxes)
-            heights = sorted(b[3] - b[1] for b in glyph_boxes)
-            fs = heights[len(heights) // 2] if heights else 0.0
-            lines.append(LineRecord(text, page, x0, y_top, x1, y_bottom, fs))
+        if text:
+            x0 = float("inf")
+            x1 = float("-inf")
+            y_bottom = float("inf")
+            y_top = float("-inf")
+            heights: list[float] = []
+            for c, b in buf:
+                if b[0] < x0:
+                    x0 = b[0]
+                if not c.isspace():
+                    if b[2] > x1:
+                        x1 = b[2]
+                    if b[1] < y_bottom:
+                        y_bottom = b[1]
+                    if b[3] > y_top:
+                        y_top = b[3]
+                    heights.append(b[3] - b[1])
+            if heights:
+                heights.sort()
+                fs = heights[len(heights) // 2]
+                lines.append(LineRecord(text, page, x0, y_top, x1, y_bottom, fs))
         buf.clear()
 
     for ch, box in chars:
@@ -74,41 +88,122 @@ def group_chars_into_lines(
     return lines
 
 
-def _extract_page_chars(textpage) -> list[tuple[str, tuple[float, float, float, float]]]:
+def _extract_page_chars(
+    textpage,
+    *,
+    codes: list[int] | None = None,
+    char_boxes: list[tuple[float, float, float, float] | None] | None = None,
+) -> list[tuple[str, tuple[float, float, float, float]]]:
     import pypdfium2 as pdfium
 
     from bibr.ocr.native_text import compose_spacing_accents
 
-    out = []
     n_chars = textpage.count_chars()
+    if not n_chars:
+        return []
+
+    pdfium_c = pdfium.raw
+    raw = textpage.raw
+    get_unicode = pdfium_c.FPDFText_GetUnicode
+    get_text_idx = pdfium_c.FPDFText_GetTextIndexFromCharIndex
+    use_codes = codes is not None and len(codes) == n_chars
+    use_boxes = char_boxes is not None and len(char_boxes) == n_chars
+
+    # Bulk-read the page's UCS-2 text buffer once instead of calling
+    # textpage.get_text_range(i, 1) (which allocates a ctypes buffer and decodes
+    # UTF-16LE) for every single character on the page.
+    bulk_buf = None
+    bulk_t_start = 0
+    bulk_len = 0
+    is_real_tp = isinstance(textpage, pdfium.PdfTextPage)
+    if is_real_tp:
+        active = textpage._get_active_text_range(0, n_chars - 1)
+        if active is None:
+            # No active BMP text chars; still check non-BMP if any exist.
+            bulk_buf = ()
+            bulk_len = 0
+        else:
+            t_start, t_end, l_passive, r_passive = active
+            in_count = t_end + 2 - t_start
+            buf = (ctypes.c_ushort * in_count)()
+            out_count = pdfium_c.FPDFText_GetText(
+                raw, l_passive, n_chars - l_passive - r_passive, buf
+            )
+            if out_count - 1 == t_end - t_start + 1:
+                bulk_buf = buf
+                bulk_t_start = t_start
+                bulk_len = out_count - 1
+
+    if is_real_tp and not use_boxes:
+        _c_l = ctypes.c_double()
+        _c_r = ctypes.c_double()
+        _c_b = ctypes.c_double()
+        _c_t = ctypes.c_double()
+        _b_l = ctypes.byref(_c_l)
+        _b_r = ctypes.byref(_c_r)
+        _b_b = ctypes.byref(_c_b)
+        _b_t = ctypes.byref(_c_t)
+        _get_box = pdfium_c.FPDFText_GetCharBox
+
+        def _box(idx: int) -> tuple[float, float, float, float]:
+            if _get_box(raw, idx, _b_l, _b_r, _b_b, _b_t):
+                return (_c_l.value, _c_b.value, _c_r.value, _c_t.value)
+            return textpage.get_charbox(idx)
+    elif use_boxes:
+
+        def _box(idx: int) -> tuple[float, float, float, float]:
+            cached = char_boxes[idx]
+            if cached is not None:
+                return cached
+            return textpage.get_charbox(idx)
+    else:
+
+        def _box(idx: int) -> tuple[float, float, float, float]:
+            return textpage.get_charbox(idx)
+
+    out: list[tuple[str, tuple[float, float, float, float]]] = []
+    out_append = out.append
     i = 0
     while i < n_chars:
         # get_text_range is UCS-2: it drops a char beyond the BMP, whether
         # pdfium holds it as one code or as a UTF-16 surrogate pair. Read
         # those from the codes, as the native char records do.
-        code = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
+        code = codes[i] if use_codes else get_unicode(raw, i)
         width = 1
         if 0xD800 <= code <= 0xDBFF and i + 1 < n_chars:
-            low = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i + 1)
+            low = codes[i + 1] if use_codes else get_unicode(raw, i + 1)
             if 0xDC00 <= low <= 0xDFFF:
                 code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
                 width = 2
         if 0xFFFF < code <= 0x10FFFF:
             # A char left out of the page text stays out.
-            if pdfium.raw.FPDFText_GetTextIndexFromCharIndex(textpage.raw, i) >= 0:
-                boxes = [textpage.get_charbox(j) for j in range(i, i + width)]
-                box = (
-                    min(b[0] for b in boxes),
-                    min(b[1] for b in boxes),
-                    max(b[2] for b in boxes),
-                    max(b[3] for b in boxes),
-                )
-                out.append((chr(code), box))
+            if get_text_idx(raw, i) >= 0:
+                b0 = _box(i)
+                if width == 2:
+                    b1 = _box(i + 1)
+                    box = (
+                        b0[0] if b0[0] <= b1[0] else b1[0],
+                        b0[1] if b0[1] <= b1[1] else b1[1],
+                        b0[2] if b0[2] >= b1[2] else b1[2],
+                        b0[3] if b0[3] >= b1[3] else b1[3],
+                    )
+                else:
+                    box = b0
+                out_append((chr(code), box))
             i += width
             continue
-        ch = textpage.get_text_range(i, 1)
-        if ch:
-            out.append((ch, textpage.get_charbox(i)))
+        if bulk_buf is not None:
+            tidx = get_text_idx(raw, i)
+            if tidx >= 0:
+                pos = tidx - bulk_t_start
+                if 0 <= pos < bulk_len:
+                    u = bulk_buf[pos]
+                    if not (0xD800 <= u <= 0xDFFF):
+                        out_append((chr(u), _box(i)))
+        else:
+            ch = textpage.get_text_range(i, 1)
+            if ch:
+                out_append((ch, _box(i)))
         i += 1
     return compose_spacing_accents(out)
 

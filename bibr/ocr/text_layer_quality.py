@@ -31,6 +31,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 #: A glyph box ``(x0, y0, x1, y1)`` in the 0..1000 layout space, y down.
 Box = tuple[float, float, float, float]
@@ -149,15 +150,27 @@ def text_coverage(region_boxes: Sequence[Box], glyph_boxes: Sequence[Box]) -> fl
     return sum(_area(box) for box, hit in zip(region_boxes, covered, strict=True) if hit) / total
 
 
+_ASCII_LATIN = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_ASCII_COMMON = frozenset("eaointsrEAOINTSR")
+
+
+@lru_cache(maxsize=512)
 def _is_latin_letter(ch: str) -> bool:
+    if ch in _ASCII_LATIN:
+        return True
+    if ord(ch) < 128:
+        return False
     try:
         return unicodedata.name(ch).startswith("LATIN")
     except ValueError:
         return False
 
 
+@lru_cache(maxsize=512)
 def _base_letter(ch: str) -> str:
     """The letter without its accents, lower case ("É" -> "e")."""
+    if ch in _ASCII_LATIN:
+        return ch.lower()
     decomposed = unicodedata.normalize("NFKD", ch)
     return (decomposed[0] if decomposed else ch).lower()
 
@@ -174,15 +187,27 @@ def lexical_profile(texts: Iterable[str]) -> dict[str, float]:
     letters = sum(len(token) for token in tokens)
     if letters < MIN_LEXICAL_LETTERS:
         return {}
-    latin = [ch for token in tokens for ch in token if _is_latin_letter(ch)]
-    if len(latin) / letters < MIN_LATIN_LETTER_SHARE:
+    latin_count = 0
+    common_count = 0
+    ascii_latin = _ASCII_LATIN
+    ascii_common = _ASCII_COMMON
+    common_letters = COMMON_LETTERS
+    for ch, count in Counter("".join(tokens)).items():
+        if ch in ascii_latin:
+            latin_count += count
+            if ch in ascii_common:
+                common_count += count
+        elif _is_latin_letter(ch):
+            latin_count += count
+            if _base_letter(ch) in common_letters:
+                common_count += count
+    if latin_count / letters < MIN_LATIN_LETTER_SHARE:
         return {}
     glued = sum(len(token) for token in tokens if len(token) >= GLUED_TOKEN_LETTERS)
     profile = {
         "tokens": float(len(tokens)),
         "glued_letter_share": glued / letters,
-        "common_letter_share": sum(1 for ch in latin if _base_letter(ch) in COMMON_LETTERS)
-        / len(latin),
+        "common_letter_share": common_count / latin_count,
     }
     words = [token.lower() for token in tokens if len(token) >= 2]
     if len(words) >= MIN_LEXICAL_TOKENS:

@@ -111,7 +111,9 @@ class OnnxSectionClassifierModel:
         short = [HeaderContext(heading="Funding", body="None.", relative_position=0.9)]
         for contexts in (full, short):
             texts = [_build_input_text(ctx, self.template_version) for ctx in contexts]
-            batch = encode_batch(self.tokenizer, texts, max_length=RUNTIME_MAX_LENGTH)
+            batch = encode_batch(
+                self.tokenizer, texts, max_length=RUNTIME_MAX_LENGTH, need_offsets=False
+            )
             ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
             mask = batch.attention_mask
             if contexts is short:
@@ -217,7 +219,7 @@ class OnnxSectionClassifierModel:
         if not contexts:
             return []
         texts = [_build_input_text(ctx, self.template_version) for ctx in contexts]
-        batch = encode_batch(self.tokenizer, texts, max_length=max_length)
+        batch = encode_batch(self.tokenizer, texts, max_length=max_length, need_offsets=False)
         feeds = {"input_ids": batch.input_ids, "attention_mask": batch.attention_mask}
         feeds = {k: v for k, v in feeds.items() if k in self._input_names}
         type_logits, top_logits = (session or self.session).run(

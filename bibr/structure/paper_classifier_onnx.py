@@ -94,7 +94,9 @@ class OnnxPaperClassifierModel:
         model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
         for items in (full, short):
             texts = [_build_input_text(title, abstract) for title, abstract in items]
-            batch = encode_batch(self.tokenizer, texts, max_length=self.max_length)
+            batch = encode_batch(
+                self.tokenizer, texts, max_length=self.max_length, need_offsets=False
+            )
             ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
             mask = batch.attention_mask
             if items is short:
@@ -149,7 +151,7 @@ class OnnxPaperClassifierModel:
         if not items:
             return []
         texts = [_build_input_text(title, abstract) for title, abstract in items]
-        batch = encode_batch(self.tokenizer, texts, max_length=self.max_length)
+        batch = encode_batch(self.tokenizer, texts, max_length=self.max_length, need_offsets=False)
         feeds = {"input_ids": batch.input_ids, "attention_mask": batch.attention_mask}
         feeds = {k: v for k, v in feeds.items() if k in self._input_names}
         l1_logits, l2_logits, pt_logits = self.session.run(

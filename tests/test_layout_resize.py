@@ -91,3 +91,47 @@ def test_u8_planar_resize_accepts_non_contiguous_views():
     assert not chw.flags["C_CONTIGUOUS"]
     ours = mod.resize_bicubic_no_antialias(chw, 48, 40)
     assert np.array_equal(ours, _u8_reference(np.ascontiguousarray(chw), 48, 40))
+
+
+def test_preprocess_images_hwc_batched_is_bit_identical_for_v3_and_v4():
+    """HWC cache-blocked V3 & V4 preprocessing matches the CHW reference bit-for-bit."""
+    from PIL import Image
+
+    rng = np.random.default_rng(15)
+    pages = [
+        Image.fromarray(rng.integers(0, 256, size=(310, 230, 3), dtype=np.uint8), mode="RGB")
+        for _ in range(3)
+    ]
+    factor = np.float32(1.0 / 255.0)
+    mean = np.asarray([0.1, 0.2, 0.3], dtype=np.float32)[:, None, None]
+    std = np.asarray([0.5, 0.6, 0.7], dtype=np.float32)[:, None, None]
+
+    # V3 reference
+    v3_out = mod.preprocess_images(
+        pages,
+        size=(80, 64),
+        rescale_factor=float(factor),
+        image_mean=[0.1, 0.2, 0.3],
+        image_std=[0.5, 0.6, 0.7],
+        rescale_before_resize=False,
+    )
+    for i, img in enumerate(pages):
+        chw = np.asarray(img, dtype=np.uint8).transpose(2, 0, 1)
+        ref = (mod.resize_bicubic_no_antialias(chw, 80, 64).astype(np.float32) * factor - mean) / std
+        assert np.array_equal(v3_out[i], ref)
+
+    # V4 reference
+    v4_out = mod.preprocess_images(
+        pages,
+        size=(80, 64),
+        rescale_factor=float(factor),
+        image_mean=[0.1, 0.2, 0.3],
+        image_std=[0.5, 0.6, 0.7],
+        rescale_before_resize=True,
+    )
+    upper = np.float32(255.0 * float(factor))
+    for i, img in enumerate(pages):
+        chw = np.asarray(img, dtype=np.uint8).transpose(2, 0, 1)
+        ref_resized = mod.resize_bicubic_float(chw.astype(np.float32) * factor, 80, 64)
+        ref = (np.clip(ref_resized, np.float32(0.0), upper) - mean) / std
+        assert np.array_equal(v4_out[i], ref)
