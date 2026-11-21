@@ -9,12 +9,11 @@ import re
 from typing import TYPE_CHECKING
 
 from bibr.extract.doi_identity import collect_doi_candidates, doi_sha256, select_doi_candidates
-from bibr.extract.pdf_doi_evidence import is_pdf, read_pdf_doi_evidence
+from bibr.extract.pdf_doi_evidence import PdfDoiEvidence, is_pdf, read_pdf_doi_evidence
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
-    from bibr.extract.pdf_doi_evidence import PdfDoiEvidence
     from bibr.pipeline.state import FileState
 
 logger = logging.getLogger(__name__)
@@ -70,6 +69,18 @@ def _pdf_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
     pages = [page for page in _EVIDENCE_PAGES if page in processed]
     if not pages:
         return None
+    cached = getattr(fs, "pdf_doi_evidence", None)
+    if cached is not None and set(pages).issubset(cached.pages):
+        if tuple(pages) == cached.pages:
+            return cached
+        wanted = set(pages)
+        return PdfDoiEvidence(
+            pages=tuple(p for p in cached.pages if p in wanted),
+            lines=tuple(line for line in cached.lines if line.page in wanted),
+            links=tuple(link for link in cached.links if link.page in wanted),
+            metadata=cached.metadata,
+            hidden=tuple(h for h in cached.hidden if h.page in wanted),
+        )
     data = _processed_bytes(fs)
     if data is None or not is_pdf(data):
         return None

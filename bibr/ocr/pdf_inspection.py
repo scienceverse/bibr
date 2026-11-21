@@ -7,6 +7,14 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from bibr.extract.pdf_doi_evidence import (
+    _INFO_KEYS as _DOI_INFO_KEYS,
+)
+from bibr.extract.pdf_doi_evidence import (
+    PdfDoiEvidence,
+    _printed_char_records,
+    build_pdf_doi_evidence,
+)
 from bibr.input.pdf_metadata import harvest_docinfo
 from bibr.input.pdf_outline import OutlineItem, _walk_pdfium_outline
 from bibr.ocr.native_text import (
@@ -15,7 +23,7 @@ from bibr.ocr.native_text import (
     _attach_page_dimensions,
     _build_page_char_records,
     _fill_page_regions_from_textpage,
-    _is_invisible_text_layer_page,
+    _is_invisible_text_layer_page_cached,
     _page_crop_box,
     _page_rotation,
     _pdf_points_to_normalized_bbox,
@@ -39,6 +47,10 @@ if TYPE_CHECKING:
     from bibr.ocr.text_layer import TextLayerStream
 
 logger = logging.getLogger(__name__)
+
+# 0-based page indices whose DOI evidence is harvested inline during inspect_pdf
+# (matches IdentityValidationStage._EVIDENCE_PAGES = (1, 2), 1-based).
+_DOI_EVIDENCE_PAGE_INDICES = frozenset((0, 1))
 
 
 @dataclass(frozen=True)
@@ -84,6 +96,9 @@ class PdfInspection:
     # The PDF-native document layer (``bibr.document``), built with
     # ``include_doc_layer``. Never serialized with the inspection.
     document: DocumentLayer | None = field(default=None, compare=False, repr=False)
+    # Front-page DOI evidence harvested inline so IdentityValidationStage does
+    # not have to re-read/re-hash/re-open the PDF. Never serialized.
+    pdf_doi_evidence: PdfDoiEvidence | None = field(default=None, compare=False, repr=False)
 
 
 def inspect_pdf(
@@ -132,9 +147,17 @@ def inspect_pdf(
     stream_lines: list[dict[str, Any]] = []
     uri_links: list[dict[str, Any]] = []
     docinfo: dict[str, Any] = {}
+    doi_info_values: dict[str, str] = {}
     outline: list[OutlineItem] = []
     layer_builder = _layer_builder(pdf_bytes, render_budget) if include_doc_layer else None
     document: DocumentLayer | None = None
+    pending_ref_pages: list[
+        tuple[int, int, tuple[float, float, float, float], int, list, bool]
+    ] = []
+    doi_raw_pages: list[
+        tuple[int, tuple[float, float, float, float], int, list, list, list[tuple]]
+    ] = []
+    doi_evidence_failed = False
 
     with pdfium_lock:
         doc = pypdfium2.PdfDocument(pdf_bytes)
@@ -159,6 +182,15 @@ def inspect_pdf(
             except Exception as exc:  # noqa: BLE001 - best-effort component
                 component_errors["metadata"] = _error_text(exc)
 
+            try:
+                for key in _DOI_INFO_KEYS:
+                    if key in docinfo:
+                        doi_info_values[key] = str(docinfo[key] or "")
+                    else:
+                        doi_info_values[key] = str(doc.get_metadata_value(key) or "")
+            except Exception:  # noqa: BLE001 - best-effort; identity stage falls back
+                doi_evidence_failed = True
+
             if layer_builder is not None:
                 try:
                     layer_builder.start(doc)
@@ -178,6 +210,11 @@ def inspect_pdf(
                     _attach_bbox_pdf_pts(crop_box, regions, rotation)
 
                     needs_text = fill_native_text or include_ref_geometry
+                    collect_doi_page = (
+                        needs_text
+                        and page_index in _DOI_EVIDENCE_PAGE_INDICES
+                        and not doi_evidence_failed
+                    )
                     char_count = 0
                     invisible_text_layer = False
                     watermarks: list[str] = []
@@ -185,36 +222,52 @@ def inspect_pdf(
                     # shares with the native fill.
                     furniture: list[tuple] = []
                     walk: list[tuple] | None = None
-                    trace = records = page_chars = None
+                    trace = records = page_chars = doi_printed = None
+                    page_cache: dict[str, object] = {}
                     if needs_text:
                         if layer_builder is None:
-                            textpage = open_text_page(page, watermarks)
+                            textpage = (
+                                open_text_page(page, watermarks, furniture)
+                                if collect_doi_page
+                                else open_text_page(page, watermarks)
+                            )
                         else:
                             walk = []
                             textpage = open_text_page(page, watermarks, furniture, walk)
                         try:
                             if layer_builder is not None:
                                 trace, records = layer_builder.records(textpage, page_index)
+                                if trace is not None and trace.complete:
+                                    page_cache["codes"] = trace.codes
+                                    page_cache["boxes"] = trace.boxes
                             char_count = textpage.count_chars()
                             if reject_invisible_text_layer and char_count:
                                 try:
-                                    invisible_text_layer = _is_invisible_text_layer_page(
-                                        page, textpage, crop_box
+                                    invisible_text_layer = _is_invisible_text_layer_page_cached(
+                                        page, textpage, crop_box, page_cache
                                     )
                                 except Exception as exc:  # noqa: BLE001 - keeps the text layer
                                     component_errors[f"invisible_text_layer:{page_index}"] = (
                                         _error_text(exc)
                                     )
                             if (
-                                text_layer is not None
-                                and records is None
+                                records is None
                                 and fill_native_text
                                 and not invisible_text_layer
+                                and (
+                                    text_layer is not None
+                                    or include_ref_geometry
+                                    or collect_doi_page
+                                )
                             ):
-                                # Built once for the fill and the stream; a
-                                # failure is the fill's to report.
+                                # Built once for the fill, stream, and shared raw
+                                # char cache; a failure is the fill's to report.
+                                raw_out: dict[str, object] = {}
                                 try:
-                                    records = _build_page_char_records(textpage)
+                                    records = _build_page_char_records(textpage, raw_out=raw_out)
+                                    if "codes" in raw_out:
+                                        page_cache["codes"] = raw_out["codes"]
+                                        page_cache["boxes"] = raw_out["boxes"]
                                 except Exception:  # noqa: BLE001
                                     records = None
                             if fill_native_text and not invisible_text_layer:
@@ -230,6 +283,7 @@ def inspect_pdf(
                                         rotation=rotation,
                                         records=records,
                                         page=page,
+                                        page_cache=page_cache,
                                     )
                                 except Exception as exc:  # noqa: BLE001
                                     component_errors[f"native_text:{page_index}"] = _error_text(exc)
@@ -263,25 +317,34 @@ def inspect_pdf(
                                     full_text = textpage.get_text_range() or ""
                                     if header_page is None and _REF_HEADER_RE.search(full_text):
                                         header_page = page_index
-                                    chars = page_chars = _extract_page_chars(textpage)
-                                    if header_page is not None:
-                                        page_lines[page_index] = group_chars_into_lines(
-                                            chars, page_index
-                                        )
-                                    stream_lines.extend(
-                                        _page_line_dicts(
-                                            group_chars_into_lines(
-                                                _break_wrapped_lines(chars), page_index
-                                            ),
-                                            page_index + 1,
+                                    chars = page_chars = _extract_page_chars(
+                                        textpage,
+                                        codes=page_cache.get("codes"),  # type: ignore[arg-type]
+                                        char_boxes=page_cache.get("boxes"),  # type: ignore[arg-type]
+                                    )
+                                    pending_ref_pages.append(
+                                        (
+                                            layout_slot,
+                                            page_index,
                                             crop_box,
                                             rotation,
+                                            chars,
+                                            header_page is not None,
                                         )
                                     )
                                 except Exception as exc:  # noqa: BLE001
                                     component_errors[f"ref_geometry:{page_index}"] = _error_text(
                                         exc
                                     )
+                            if collect_doi_page:
+                                try:
+                                    doi_printed = _printed_char_records(
+                                        textpage,
+                                        codes=page_cache.get("codes"),  # type: ignore[arg-type]
+                                        char_boxes=page_cache.get("boxes"),  # type: ignore[arg-type]
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    doi_evidence_failed = True
                             if layer_builder is not None:
                                 _harvest_page(
                                     layer_builder,
@@ -306,6 +369,8 @@ def inspect_pdf(
                                     regions,
                                     records=records,
                                     chars=page_chars,
+                                    page_cache=page_cache,
+                                    copy_regions=False,
                                 )
                         finally:
                             textpage.close()
@@ -313,18 +378,42 @@ def inspect_pdf(
                         # Nothing else reads this page's text layer; the layer
                         # still does, through the same furniture strip.
                         _harvest_unread_page(layer_builder, page, page_index, crop_box, rotation)
+                    page_links_raw: list[PdfUriLink] | None = None
+                    uri_links_failed = False
                     if include_ref_geometry:
                         try:
+                            page_links_raw = page_uri_links(doc, page, page_index)
                             uri_links.extend(
                                 _uri_link_dicts(
-                                    page_uri_links(doc, page, page_index),
+                                    page_links_raw,
                                     page_index + 1,
                                     crop_box,
                                     rotation,
                                 )
                             )
                         except Exception as exc:  # noqa: BLE001 - best-effort component
+                            uri_links_failed = True
                             component_errors[f"uri_links:{page_index}"] = _error_text(exc)
+                    if collect_doi_page and not doi_evidence_failed and doi_printed is not None:
+                        if uri_links_failed:
+                            doi_evidence_failed = True
+                        else:
+                            if page_links_raw is None:
+                                try:
+                                    page_links_raw = page_uri_links(doc, page, page_index)
+                                except Exception:  # noqa: BLE001
+                                    doi_evidence_failed = True
+                            if not doi_evidence_failed and page_links_raw is not None:
+                                doi_raw_pages.append(
+                                    (
+                                        page_index + 1,
+                                        crop_box,
+                                        rotation,
+                                        doi_printed,
+                                        page_links_raw,
+                                        furniture,
+                                    )
+                                )
                     pages.append(
                         PdfPageInspection(
                             index=page_index,
@@ -340,7 +429,7 @@ def inspect_pdf(
                     page.close()
             # The last page's char records and object walk would otherwise
             # stay alive through the layer's finish().
-            trace = records = walk = page_chars = None
+            trace = records = walk = page_chars = doi_printed = None
 
             if include_outline:
                 try:
@@ -349,6 +438,28 @@ def inspect_pdf(
                     component_errors["outline"] = _error_text(exc)
         finally:
             doc.close()
+
+    # Pure-Python post-processing runs after releasing the process-wide pdfium_lock.
+    broken_lines_by_slot: dict[int, list[LineRecord]] = {}
+    for layout_slot, page_index, crop_box, rotation, chars, capture_ref in pending_ref_pages:
+        try:
+            if capture_ref:
+                page_lines[page_index] = group_chars_into_lines(chars, page_index)
+            broken_lines = group_chars_into_lines(_break_wrapped_lines(chars), page_index)
+            broken_lines_by_slot[layout_slot] = broken_lines
+            stream_lines.extend(_page_line_dicts(broken_lines, page_index + 1, crop_box, rotation))
+        except Exception as exc:  # noqa: BLE001
+            component_errors[f"ref_geometry:{page_index}"] = _error_text(exc)
+
+    if text_layer is not None:
+        text_layer.process_pending(broken_lines_by_slot=broken_lines_by_slot)
+
+    pdf_doi_evidence: PdfDoiEvidence | None = None
+    if not doi_evidence_failed and doi_raw_pages:
+        try:
+            pdf_doi_evidence = build_pdf_doi_evidence(doi_info_values, doi_raw_pages)
+        except Exception:  # noqa: BLE001 - best-effort; identity stage falls back cleanly
+            pdf_doi_evidence = None
 
     if layer_builder is not None:
         # Spans, lines and tags need no pdfium: built after the lock is released.
@@ -374,6 +485,7 @@ def inspect_pdf(
         page_lines=stream_lines,
         uri_links=uri_links,
         document=document,
+        pdf_doi_evidence=pdf_doi_evidence,
     )
 
 

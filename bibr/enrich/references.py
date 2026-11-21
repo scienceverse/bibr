@@ -254,7 +254,10 @@ async def prefetch_enrichment(
         # failure degrades to empty so every ref simply falls through to
         # CrossRef; the resolver never fails enrichment.
         resolver_authoritative = effective.resolver.authoritative
-        if resolver_client is not None:
+
+        async def _run_resolver_prefetch() -> None:
+            if resolver_client is None:
+                return
             try:
                 prefetch.resolver_prefetch = await _prefetch_resolver_searches(
                     references,
@@ -266,23 +269,34 @@ async def prefetch_enrichment(
                 logger.warning("Resolver prefetch search failed, falling back to CrossRef: %s", e)
                 prefetch.resolver_prefetch_error = e
 
-        # Collapse every DOI-bearing reference into one filter query before the
-        # fan-out. The per-ref lookup is unchanged — it just finds these already
-        # cached, spending one rate-limited slot per chunk instead of one per
-        # reference. An authoritative resolver answers from the same corpus and
-        # its clean miss deliberately skips CrossRef, so a CrossRef prefetch
-        # there would buy nothing — unless its search prefetch failed, which
-        # sends the batch to CrossRef after all (see enrich_references).
-        skip_bulk = (
-            resolver_client is not None
-            and resolver_authoritative
-            and prefetch.resolver_prefetch_error is None
-        )
-        if effective.crossref.bulk_doi_lookup and not skip_bulk:
+        async def _run_crossref_prefetch() -> None:
             try:
                 await crossref_client.prefetch_works_by_doi([r.doi for r in references if r.doi])
             except Exception as e:  # noqa: BLE001 — must fall through to per-ref lookups
                 logger.debug("Crossref bulk DOI prefetch skipped: %s", e)
+
+        if (
+            resolver_client is not None
+            and not resolver_authoritative
+            and effective.crossref.bulk_doi_lookup
+        ):
+            # Non-authoritative resolver and Crossref bulk DOI prefetch are independent:
+            # overlap their network round-trips concurrently.
+            await asyncio.gather(_run_resolver_prefetch(), _run_crossref_prefetch())
+        else:
+            await _run_resolver_prefetch()
+            # Collapse every DOI-bearing reference into one filter query before the
+            # fan-out. An authoritative resolver answers from the same corpus and
+            # its clean miss deliberately skips CrossRef, so a CrossRef prefetch
+            # there would buy nothing — unless its search prefetch failed, which
+            # sends the batch to CrossRef after all (see enrich_references).
+            skip_bulk = (
+                resolver_client is not None
+                and resolver_authoritative
+                and prefetch.resolver_prefetch_error is None
+            )
+            if effective.crossref.bulk_doi_lookup and not skip_bulk:
+                await _run_crossref_prefetch()
     except BaseException:
         await prefetch.aclose()
         raise
@@ -1265,10 +1279,17 @@ def _best_title_candidate(
     """
     best_index = None
     best_score = 0.0
+    ref_title_lower = title.lower()
     for index, cand in enumerate(candidates):
         if cand is None or not cand.title:
             continue
         if cand.work_type in _VETOED_WORK_TYPES:
+            continue
+        # Penalties in _score_candidate only scale downward (<= 1.0), so any
+        # candidate whose raw title similarity cannot beat both the threshold
+        # and current best_score can be rejected before expensive regex vetoes.
+        pre_score = float(fuzz.token_sort_ratio(ref_title_lower, cand.title.lower()))
+        if pre_score < _TITLE_MATCH_THRESHOLD or pre_score <= best_score:
             continue
         if _about_the_work(title, cand.title):
             continue
@@ -1280,9 +1301,12 @@ def _best_title_candidate(
             continue
         if _initials_conflict(ref_authors, list(cand.authors)):
             continue
-        score = _score_candidate(
-            title, cand.title, ref_year, cand.year, ref_authors, [a.family for a in cand.authors]
-        )
+        score = pre_score
+        if ref_year and ref_year > 0 and cand.year and abs(ref_year - cand.year) > 2:
+            score *= 0.5
+        cand_families = [a.family for a in cand.authors if a.family]
+        if ref_authors and cand_families and not _families_overlap(ref_authors, cand_families):
+            score *= 0.7
         if score > best_score:
             best_score = score
             best_index = index

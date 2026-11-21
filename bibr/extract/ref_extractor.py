@@ -13,12 +13,15 @@ capture in ``bibr.extract.training_capture``.
 """
 
 import asyncio
+import bisect
+import contextlib
 import copy
 import dataclasses
 import logging
 import re
 import threading
 import unicodedata
+from collections import defaultdict
 from typing import Any
 from urllib.parse import unquote
 
@@ -658,6 +661,15 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
     return _GEOM_SEGMENTER
 
 
+def _gbm_lock_for(segmenter) -> contextlib.AbstractContextManager:
+    """Pure-NumPy TreeEnsemble bundles need no global lock; anything else keeps it."""
+    from bibr.utils.gbm_bundle import TreeEnsemble
+
+    if isinstance(getattr(segmenter, "model", None), TreeEnsemble):
+        return contextlib.nullcontext()
+    return LOCAL_INFERENCE_LOCK
+
+
 _GEOM_TAGGER = None
 _GEOM_TAGGER_KEY: tuple[str, str | None] | None = None
 
@@ -685,7 +697,12 @@ def _get_geom_tagger(settings: GlobalSettings | None = None):
 
                 logger.info("loading geometry line tagger: %s", path)
                 try:
-                    tagger = GeomLineTagger(path, revision)
+                    # A candidate's graph is probed at load; the shipped default is not.
+                    tagger = GeomLineTagger(
+                        path,
+                        revision,
+                        probe=is_model_override(settings, "REF_GEOM_TAGGER_MODEL_ID"),
+                    )
                 except Exception as e:
                     if (
                         strict := override_load_error(settings, "REF_GEOM_TAGGER_MODEL_ID", e)
@@ -735,7 +752,12 @@ def _get_text_segmenter(settings: GlobalSettings | None = None):
 
                 logger.info("loading text reference segmenter: %s", path)
                 try:
-                    segmenter = OnnxTextSegmenter(path, revision)
+                    # A candidate's graph is probed at load; the shipped default is not.
+                    segmenter = OnnxTextSegmenter(
+                        path,
+                        revision,
+                        probe=is_model_override(settings, "REF_TEXT_SEG_MODEL_ID"),
+                    )
                 except Exception as e:
                     if (
                         strict := override_load_error(settings, "REF_TEXT_SEG_MODEL_ID", e)
@@ -1847,6 +1869,17 @@ def _map_bib_text_ids(refs: list[PaperReference], contents: PaperContents) -> No
     sent_text_ids = [s.text_id for s in ref_sentences]
     taken = {ref.text_id for ref in refs if ref.text_id is not None}
 
+    # Build a sentinel-delimited concatenation so exact substring search uses
+    # a single C-level str.find() instead of an O(R * S) Python scan.
+    joined_sents: str | None = None
+    sent_ends: list[int] = []
+    if all("\x00" not in t for t in sent_lower_texts):
+        joined_sents = "\x00".join(sent_lower_texts)
+        pos_acc = 0
+        for t in sent_lower_texts:
+            pos_acc += len(t) + 1  # include trailing \x00 slot
+            sent_ends.append(pos_acc)
+
     pending = [ref for ref in refs if ref.title and ref.text_id is None]
     pending.sort(key=lambda ref: -len(ref.title or ""))
     for ref in pending:
@@ -1856,12 +1889,25 @@ def _map_bib_text_ids(refs: list[PaperReference], contents: PaperContents) -> No
 
         # Exact substring fast path: the first free row, else the first row
         hits = []
-        for i, text in enumerate(sent_lower_texts):
-            if title_lower in text:
+        if joined_sents is not None and "\x00" not in title_lower:
+            search_pos = 0
+            while True:
+                found = joined_sents.find(title_lower, search_pos)
+                if found < 0:
+                    break
+                i = bisect.bisect_right(sent_ends, found)
                 hits.append(i)
                 if sent_text_ids[i] not in taken:
                     hits = [i]
                     break
+                search_pos = sent_ends[i]
+        else:
+            for i, text in enumerate(sent_lower_texts):
+                if title_lower in text:
+                    hits.append(i)
+                    if sent_text_ids[i] not in taken:
+                        hits = [i]
+                        break
         if not hits:
             # Vectorized fuzzy fallback (rapidfuzz runs in C); the next best
             # rows are scored only when the best one is taken
@@ -2002,21 +2048,23 @@ def _distinct_count(segments: list[str]) -> int:
     """Segments that do not repeat an earlier one, exactly or nearly."""
     from rapidfuzz import fuzz, process
 
-    keys: list[str] = []
-    years: list[frozenset[str]] = []
+    # Two entries can only repeat each other when they share the exact same
+    # year set, so bucket seen keys by year set instead of scanning all prior keys.
+    buckets: dict[frozenset[str], list[str]] = defaultdict(list)
     distinct = 0
     for segment in segments:
         key = _match_key(segment)
         if not key:
             continue
         segment_years = frozenset(_YEAR_TOKEN.findall(segment))
-        hits = process.extract(
-            key, keys, scorer=fuzz.ratio, score_cutoff=_REPEAT_MIN_RATIO, limit=None
-        )
-        if not any(years[index] == segment_years for _choice, _score, index in hits):
+        bucket = buckets[segment_years]
+        if (
+            not bucket
+            or process.extractOne(key, bucket, scorer=fuzz.ratio, score_cutoff=_REPEAT_MIN_RATIO)
+            is None
+        ):
             distinct += 1
-        keys.append(key)
-        years.append(segment_years)
+        bucket.append(key)
     return distinct
 
 
@@ -2070,6 +2118,7 @@ class ReferenceExtractor:
         self._credible_source_starts: int | None = None
         self._source_record_count: int | None = None
         self._reference_pages: tuple[int, int] | None = None
+        self._aligned_region_onset_cache: dict[tuple[str, tuple[int, ...]], int] = {}
 
     @property
     def _llm_skipped(self) -> bool:
@@ -2093,6 +2142,7 @@ class ReferenceExtractor:
         self.contents.reference_review_receipt = None
         self.validation_issues.clear()
         self._stream_reason_flags = set()
+        self._aligned_region_onset_cache.clear()
         self._segmentation_attempts.clear()
         self._selected_segmentation_spans = ()
         self._credible_source_starts = None
@@ -2383,10 +2433,16 @@ class ReferenceExtractor:
         summaries = self._reference_region_summaries()
         if not summaries:
             return 0
+        cache_key = (ref_text, tuple(id(s) for s in summaries))
+        cached = self._aligned_region_onset_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
-            return len(set(find_anchor_starts(ref_text, region_anchor_texts(summaries))))
+            count = len(set(find_anchor_starts(ref_text, region_anchor_texts(summaries))))
         except Exception:  # noqa: BLE001 — receipt evidence is best-effort
-            return 0
+            count = 0
+        self._aligned_region_onset_cache[cache_key] = count
+        return count
 
     def _record_yield_receipt(
         self,
@@ -2597,8 +2653,7 @@ class ReferenceExtractor:
             tagged = self._segment_geom_tagger(ref_text, lines)
             if tagged is not None:
                 return tagged
-        with LOCAL_INFERENCE_LOCK:
-            segmenter = _get_geom_segmenter(self._settings)
+        segmenter = _get_geom_segmenter(self._settings)
         if segmenter is None:
             self._record_segmentation_attempt(
                 "geom", ref_text, selected=False, reason_flags=("segmenter_unavailable",)
@@ -2608,7 +2663,7 @@ class ReferenceExtractor:
             )
             return None
         try:
-            with LOCAL_INFERENCE_LOCK:
+            with _gbm_lock_for(segmenter):
                 spans, confidence, labeled, aligned = segmenter.segment_spans(ref_text, lines)
         except Exception as e:  # noqa: BLE001 — any geom failure cascades
             self._record_segmentation_attempt(
@@ -2731,11 +2786,11 @@ class ReferenceExtractor:
         ``INFERENCE_FAILURE_LIMIT`` papers in a row stop the run.
         """
         try:
-            with LOCAL_INFERENCE_LOCK:
-                tagger = _get_geom_tagger(self._settings)
-                if tagger is None:
-                    self._decline_geom_tagger(ref_text, "tagger_unavailable")
-                    return None
+            tagger = _get_geom_tagger(self._settings)
+            if tagger is None:
+                self._decline_geom_tagger(ref_text, "tagger_unavailable")
+                return None
+            with inference_lock_for(getattr(tagger, "_session", None)):
                 spans, confidence, labeled, aligned = tagger.segment_spans(ref_text, lines)
         except _PASS_THROUGH:
             raise
@@ -3044,10 +3099,10 @@ class ReferenceExtractor:
         (:func:`~bibr.utils.model_overrides.note_inference_failure`).
         """
         try:
-            with LOCAL_INFERENCE_LOCK:
-                segmenter = _get_text_segmenter(self._settings)
-                if segmenter is None:
-                    return [], "tagger_unavailable", ()
+            segmenter = _get_text_segmenter(self._settings)
+            if segmenter is None:
+                return [], "tagger_unavailable", ()
+            with inference_lock_for(getattr(segmenter, "_session", None)):
                 result = segmenter.segment_text(ref_text)
         except _PASS_THROUGH:
             raise
@@ -3925,6 +3980,40 @@ class ReferenceExtractor:
     def _line_stream_choice(
         self, ref_df: pd.DataFrame, ref_text: str, ref_strings: list[str]
     ) -> _StreamChoice | None:
+        tier, tier_spans = self._cascade_selected_tier()
+        if tier == "geom_tagger":
+            # An accepted tagger answer is final: skip GBM probabilities, stream
+            # segmentation, and shingle quality scoring, and only build the line
+            # stream when the PDF actually carries DOI link annotations to borrow.
+            link_dois: list[str | None] = [None] * len(ref_strings)
+            uri_links = getattr(self.contents, "pdf_uri_links", None)
+            if uri_links:
+                from bibr.ocr.pdf_links import doi_from_uri
+
+                if any(
+                    isinstance(link, dict)
+                    and link.get("bbox")
+                    and doi_from_uri(link.get("uri")) is not None
+                    for link in uri_links
+                ):
+                    stream = build_line_stream(self.contents, ref_df)
+                    if stream is not None:
+                        link_dois = link_dois_for_segments(ref_strings, stream.lines)
+            self._record_segmentation_attempt(
+                "line_stream",
+                "",
+                spans=(),
+                selected=False,
+                reason_flags=("tagger_final",),
+            )
+            return _StreamChoice(
+                selected=False,
+                ref_text=ref_text,
+                ref_strings=ref_strings,
+                spans=(),
+                link_dois=link_dois,
+            )
+
         stream = build_line_stream(self.contents, ref_df)
         if stream is None:
             return None
@@ -3942,12 +4031,11 @@ class ReferenceExtractor:
         section_text = segmentation.section_key
         cascade_quality = segmentation_quality(ref_strings, section_text, typical_length=typical)
         stream_quality = segmentation_quality(entries, section_text, typical_length=typical)
-        tier, tier_spans = self._cascade_selected_tier()
-        if tier == "geom_tagger":
-            # An accepted tagger answer is final: the stream only lends it the
-            # link DOIs it reads off the page, as for any kept cascade answer.
-            trigger, selected = "tagger_final", False
-        elif ref_strings and len(entries) < _distinct_count(ref_strings):
+        if (
+            ref_strings
+            and len(entries) < len(ref_strings)
+            and len(entries) < _distinct_count(ref_strings)
+        ):
             trigger, selected = "fewer_entries", False
         elif ref_strings and stream.rotated:
             trigger, selected = "rotated_page", False
@@ -4101,10 +4189,10 @@ class ReferenceExtractor:
         """Lazy per-line start probabilities from the geom segmenter."""
 
         def predict(records: list[dict]) -> list[float]:
-            with LOCAL_INFERENCE_LOCK:
-                segmenter = _get_geom_segmenter(self._settings)
-                if segmenter is None:
-                    return []
+            segmenter = _get_geom_segmenter(self._settings)
+            if segmenter is None:
+                return []
+            with _gbm_lock_for(segmenter):
                 try:
                     return list(segmenter.line_start_probabilities(records))
                 except Exception as e:

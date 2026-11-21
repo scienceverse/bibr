@@ -126,7 +126,7 @@ def test_unload_during_parse_does_not_break_in_flight_caller(monkeypatch):
     monkeypatch.setattr(
         po,
         "encode_batch",
-        lambda tok, texts, max_length, add_special_tokens: type(
+        lambda tok, texts, max_length, add_special_tokens, already_sanitized: type(
             "B",
             (),
             {

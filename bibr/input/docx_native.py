@@ -482,7 +482,12 @@ def _outline_level(el) -> int | None:
 
 
 def _heading_level(
-    paragraph, traits: _StyleTraits, text: str, *, title_page: bool = False
+    paragraph,
+    traits: _StyleTraits,
+    text: str | None = None,
+    *,
+    title_page: bool = False,
+    text_getter=None,
 ) -> int | None:
     """A paragraph's heading level from its style name or its outline level
     (its own, else its style's), or ``None`` for body text.
@@ -494,12 +499,21 @@ def _heading_level(
     """
     level = _heading_level_from_style(traits.name)
     if level is not None:
-        if traits.name in _TITLE_STYLES and starts_as_caption(text):
-            return None
+        if traits.name in _TITLE_STYLES:
+            resolved_text = (
+                text_getter() if text is None and text_getter is not None else (text or "")
+            )
+            if starts_as_caption(resolved_text):
+                return None
         return level
     own = _outline_level(paragraph._p)
     level = (own if own is not None else traits.outline_level) or None
-    if level is not None and (title_page or not reads_as_outline_heading(text)):
+    if level is None:
+        return None
+    if title_page:
+        return None
+    resolved_text = text_getter() if text is None and text_getter is not None else (text or "")
+    if not reads_as_outline_heading(resolved_text):
         return None
     return level
 
@@ -782,6 +796,13 @@ class DocxParser:
         self._table_cells = 0
         self._table_bytes = 0
         self._tables_dropped = 0
+        self._plain_cache: dict[object, str] = {}
+
+    def _cached_plain(self, p) -> str:
+        cached = self._plain_cache.get(p)
+        if cached is None:
+            cached = self._plain_cache[p] = _paragraph_text(p)
+        return cached
 
     # ------------------------------------------------------------------
     # Public API (mirrors PDFParser)
@@ -836,7 +857,7 @@ class DocxParser:
             (
                 index
                 for index, paragraph in enumerate(paragraphs)
-                if opens_the_body(_paragraph_text(paragraph._p).strip())
+                if opens_the_body(self._cached_plain(paragraph._p).strip())
             ),
             None,
         )
@@ -845,18 +866,22 @@ class DocxParser:
         # heading style or outline level, has no other sign of its sections.
         # One or two styled headings (an "Abstract" in Heading 1, an appendix
         # heading style) do not mean the sections are styled.
-        styled_headings = sum(
-            1
-            for paragraph in paragraphs
-            if (traits := self._styles.traits(paragraph)).name not in _NON_SECTION_HEADING_STYLES
-            and _heading_level(
-                paragraph,
-                traits,
-                _paragraph_text(paragraph._p),
-                title_page=paragraph._p in self._title_page,
-            )
-            is not None
-        )
+        styled_headings = 0
+        for paragraph in paragraphs:
+            traits = self._styles.traits(paragraph)
+            if traits.name in _NON_SECTION_HEADING_STYLES:
+                continue
+            if (
+                _heading_level(
+                    paragraph,
+                    traits,
+                    None,
+                    title_page=paragraph._p in self._title_page,
+                    text_getter=lambda p=paragraph._p: self._cached_plain(p),
+                )
+                is not None
+            ):
+                styled_headings += 1
         self._bold_headings = styled_headings < _MIN_STYLED_HEADINGS
         # Read every table's cells first: which tables are kept decides which
         # paragraphs are table captions.
@@ -1170,7 +1195,12 @@ class DocxParser:
         style_name, caption_style = traits.name, traits.caption
 
         # Quick path: heading paragraphs cannot host inline math/images/refs we care about.
-        plain = _paragraph_text(paragraph._p).strip()
+        cached_plain = self._plain_cache.pop(paragraph._p, None)
+        plain = (
+            cached_plain.strip()
+            if cached_plain is not None
+            else _paragraph_text(paragraph._p).strip()
+        )
         previous_text = self._previous_text
         if plain:
             self._previous_text = plain

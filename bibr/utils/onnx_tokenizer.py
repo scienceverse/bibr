@@ -72,22 +72,33 @@ def encode_batch(
     *,
     max_length: int | None = None,
     add_special_tokens: bool = True,
+    need_offsets: bool = True,
+    already_sanitized: bool = False,
 ) -> TokenizedBatch:
     """Tokenize ``texts`` into right-padded int64 arrays (plus per-row offsets).
 
     ``max_length`` re-arms truncation for this call when it differs from the
     bundle default; lone surrogates from OCR garbage are stripped up front (the
-    Rust tokenizer rejects them).
+    Rust tokenizer rejects them) unless ``already_sanitized=True``. Callers that
+    do not consume token offsets (classifiers) can pass ``need_offsets=False``
+    to skip building per-token Python offset tuples.
     """
     if max_length is not None:
         current = tokenizer.truncation
         if current is None or current.get("max_length") != max_length:
             tokenizer.enable_truncation(int(max_length))
-    clean = [strip_lone_surrogates(t) if isinstance(t, str) else str(t) for t in texts]
+    if already_sanitized:
+        clean = texts
+    else:
+        clean = [strip_lone_surrogates(t) if isinstance(t, str) else str(t) for t in texts]
     encodings = tokenizer.encode_batch(clean, add_special_tokens=add_special_tokens)
     ids = np.asarray([e.ids for e in encodings], dtype=np.int64)
     mask = np.asarray([e.attention_mask for e in encodings], dtype=np.int64)
-    offsets = [
-        [tuple(o) for o, m in zip(e.offsets, e.attention_mask, strict=True) if m] for e in encodings
-    ]
+    if need_offsets:
+        offsets = [
+            [tuple(o) for o, m in zip(e.offsets, e.attention_mask, strict=True) if m]
+            for e in encodings
+        ]
+    else:
+        offsets = []
     return TokenizedBatch(input_ids=ids, attention_mask=mask, offsets=offsets)

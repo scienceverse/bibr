@@ -502,7 +502,13 @@ def _expand_numeric_range(text: str) -> list[int]:
 _CI_SPREAD_THRESHOLD = 15
 
 
-def _is_likely_citation_bracket(group_text: str, nums: list[int], valid_bib_ids: set[int]) -> bool:
+def _is_likely_citation_bracket(
+    group_text: str,
+    nums: list[int],
+    valid_bib_ids: set[int],
+    *,
+    max_bib: int | None = None,
+) -> bool:
     """Filter out numeric brackets that look more like CIs than citations.
 
     Two heuristics, both targeting cases where ``[A, B]`` happens to have one
@@ -524,7 +530,8 @@ def _is_likely_citation_bracket(group_text: str, nums: list[int], valid_bib_ids:
     if not nums or not valid_bib_ids:
         return bool(nums)
 
-    max_bib = max(valid_bib_ids)
+    if max_bib is None:
+        max_bib = max(valid_bib_ids)
     if any(n > max_bib for n in nums):
         return False
 
@@ -874,7 +881,7 @@ def _is_citation_superscript(m: re.Match) -> str:
     # preceded by a non-alphabetic one" sent ``$\mathrm{cm}^{2}$`` down the
     # citation path: it emitted a false xref *and* deleted the unit, leaving
     # "Each plot measured cm in area."
-    if len(_UNESCAPED_DOLLAR_RE.findall(text[:pos])) % 2 == 1:
+    if "$" in text and len(_UNESCAPED_DOLLAR_RE.findall(text[:pos])) % 2 == 1:
         return str(m.group(0))
     if text[pos - 1] == "}":
         # A braced base is LaTeX, not a word carrying a marker.
@@ -1249,45 +1256,51 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
     # Wide two-number brackets rejected only by the interval guard, with no
     # interval wording before them; accepted below in bracket-citing papers.
     wide_pairs: list[int] = []
+    max_bib = max(valid_bib_ids) if valid_bib_ids else None
     for sent in body_sents:
+        sent_text = sent.text
+        has_bracket = "[" in sent_text
         handled_bracket_spans: set[tuple[int, int]] = set()
-        for match in NUMERIC_CITE_RE.finditer(sent.text):
-            handled_bracket_spans.add((match.start(), match.end()))
-            nums = _expand_numeric_range(match.group(1))
-            reasons: list[str] = []
-            if not nums:
-                reasons.append("empty_numeric_marker")
-            elif not _is_likely_citation_bracket(match.group(1), nums, valid_bib_ids):
-                reasons.append(
-                    "unknown_bib_id"
-                    if any(num not in valid_bib_ids for num in nums)
-                    else "numeric_interval_guard"
+        if has_bracket:
+            for match in NUMERIC_CITE_RE.finditer(sent_text):
+                handled_bracket_spans.add((match.start(), match.end()))
+                nums = _expand_numeric_range(match.group(1))
+                reasons: list[str] = []
+                if not nums:
+                    reasons.append("empty_numeric_marker")
+                elif not _is_likely_citation_bracket(
+                    match.group(1), nums, valid_bib_ids, max_bib=max_bib
+                ):
+                    reasons.append(
+                        "unknown_bib_id"
+                        if any(num not in valid_bib_ids for num in nums)
+                        else "numeric_interval_guard"
+                    )
+                if _is_statistic_group(sent_text, match.start(), match.end(), require_both=True):
+                    reasons.append("statistic_context")
+                bib_ids = tuple(num for num in nums if num in valid_bib_ids)
+                if not bib_ids and "unknown_bib_id" not in reasons:
+                    reasons.append("unknown_bib_id")
+                if reasons == ["numeric_interval_guard"] and not _INTERVAL_CONTEXT_BEFORE_RE.search(
+                    sent_text[max(0, match.start() - 32) : match.start()]
+                ):
+                    wide_pairs.append(len(candidates))
+                candidates.append(
+                    CitationCandidate(
+                        text_id=sent.text_id,
+                        start=match.start(),
+                        end=match.end(),
+                        raw=match.group(0),
+                        style="numeric",
+                        bib_ids=bib_ids,
+                        evidence=("bracket_marker",),
+                        confidence=1.0 if not reasons else 0.0,
+                        accepted=not reasons,
+                        rejection_reasons=tuple(reasons),
+                    )
                 )
-            if _is_statistic_group(sent.text, match.start(), match.end(), require_both=True):
-                reasons.append("statistic_context")
-            bib_ids = tuple(num for num in nums if num in valid_bib_ids)
-            if not bib_ids and "unknown_bib_id" not in reasons:
-                reasons.append("unknown_bib_id")
-            if reasons == ["numeric_interval_guard"] and not _INTERVAL_CONTEXT_BEFORE_RE.search(
-                sent.text[max(0, match.start() - 32) : match.start()]
-            ):
-                wide_pairs.append(len(candidates))
-            candidates.append(
-                CitationCandidate(
-                    text_id=sent.text_id,
-                    start=match.start(),
-                    end=match.end(),
-                    raw=match.group(0),
-                    style="numeric",
-                    bib_ids=bib_ids,
-                    evidence=("bracket_marker",),
-                    confidence=1.0 if not reasons else 0.0,
-                    accepted=not reasons,
-                    rejection_reasons=tuple(reasons),
-                )
-            )
 
-        for match in _STRIP_CITE_SUP_RE.finditer(sent.text):
+        for match in _STRIP_CITE_SUP_RE.finditer(sent_text):
             group_text = match.group(1) or match.group(2) or ""
             nums = _expand_numeric_range(group_text)
             reasons = []
@@ -1297,7 +1310,7 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
             # Same policy as a bracket marker: a number outside the printed
             # range rejects the marker, while a gap inside it (a reference the
             # parser dropped) keeps the numbers that resolve.
-            if not bib_ids or min(nums) < 1 or max(nums) > max(valid_bib_ids):
+            if not bib_ids or min(nums) < 1 or (max_bib is not None and max(nums) > max_bib):
                 reasons.append("unknown_bib_id")
             candidates.append(
                 CitationCandidate(
@@ -1317,25 +1330,26 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
         # Retain locally rejected bracket-shaped negatives in the receipt.
         # They are deliberately excluded from LLM fallback, but silently
         # dropping them would make candidate-resolution diagnostics dishonest.
-        for match in _bracket_spans(sent.text):
-            if (match.start(), match.end()) in handled_bracket_spans:
-                continue
-            if not _looks_like_non_citation_bracket(match.group(1)):
-                continue
-            candidates.append(
-                CitationCandidate(
-                    text_id=sent.text_id,
-                    start=match.start(),
-                    end=match.end(),
-                    raw=match.group(0),
-                    style="numeric",
-                    bib_ids=(),
-                    evidence=("bracket_marker", "non_citation_shape"),
-                    confidence=0.0,
-                    accepted=False,
-                    rejection_reasons=("non_citation_bracket",),
+        if has_bracket:
+            for match in _bracket_spans(sent_text):
+                if (match.start(), match.end()) in handled_bracket_spans:
+                    continue
+                if not _looks_like_non_citation_bracket(match.group(1)):
+                    continue
+                candidates.append(
+                    CitationCandidate(
+                        text_id=sent.text_id,
+                        start=match.start(),
+                        end=match.end(),
+                        raw=match.group(0),
+                        style="numeric",
+                        bib_ids=(),
+                        evidence=("bracket_marker", "non_citation_shape"),
+                        confidence=0.0,
+                        accepted=False,
+                        rejection_reasons=("non_citation_bracket",),
+                    )
                 )
-            )
     bracket_sentences = {
         candidate.text_id
         for candidate in candidates

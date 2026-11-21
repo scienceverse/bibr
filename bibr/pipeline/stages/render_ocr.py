@@ -38,6 +38,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from bibr.ocr.profiles import OcrRuntimeIdentity
+from bibr.ocr.registry import TEXT_LAYER_BACKEND
 from bibr.pipeline.pipeline import run_stage
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.ocr import (
@@ -392,7 +393,7 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
         pending_windows = (len(pending) + window - 1) // window
         single_group = pending_windows + (1 if bypass else 0) <= 1
 
-        sem = self._backhalf_semaphore()
+        sem = self._backhalf_semaphore(ctx)
         tasks: list[tuple[asyncio.Task, list]] = []
 
         def _spawn(group: list) -> None:
@@ -464,11 +465,23 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
         ):
             await ctx.resources.shutdown_ocr()
 
-    def _backhalf_semaphore(self) -> asyncio.Semaphore:
+    def _backhalf_semaphore(self, ctx: PipelineContext | None = None) -> asyncio.Semaphore:
         loop = asyncio.get_running_loop()
         sem = self._backhalf_sems.get(loop)
         if sem is None:
-            sem = asyncio.Semaphore(self._MAX_CONCURRENT_BACKHALF_WINDOWS)
+            cap = self._MAX_CONCURRENT_BACKHALF_WINDOWS
+            # Fast / text_layer mode frees page images immediately after layout +
+            # text layer and has no GPU/remote OCR bottleneck, so let back-half
+            # windows scale up to max_concurrent_post_parse instead of capping at 2.
+            if ctx is not None:
+                identity = ctx.scratch.get("ocr_runtime_identity")
+                is_text_layer = ctx.config.ocr_backend == TEXT_LAYER_BACKEND or (
+                    isinstance(identity, OcrRuntimeIdentity)
+                    and identity.backend == TEXT_LAYER_BACKEND
+                )
+                if is_text_layer:
+                    cap = max(cap, int(ctx.settings.pipeline.max_concurrent_post_parse))
+            sem = asyncio.Semaphore(cap)
             self._backhalf_sems[loop] = sem
         return sem
 

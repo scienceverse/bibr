@@ -606,11 +606,7 @@ def _has_assertive_declaration(
 
 def _categories_in(text: str) -> set[str]:
     """Statement fields whose anchor phrase appears in ``text``."""
-    categories = {
-        field
-        for field, patterns in _ANCHORS.items()
-        if any(pattern.search(text) for pattern in patterns)
-    }
+    categories = {field for field, anchor in _ANCHOR_ANY.items() if anchor.search(text)}
     normalized = text.strip().casefold()
     categories.update(
         field for field, labels in _BARE_CATEGORY_LABELS.items() if normalized in labels

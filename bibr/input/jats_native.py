@@ -30,7 +30,7 @@ import re
 import pandas as pd
 
 from bibr.input.mathml_whitespace import FlatText, mspace_separates
-from bibr.input.xml_entities import parse_xml
+from bibr.input.xml_entities import parse_xml, resolve_entity_refs
 from bibr.models import (
     ORGANIZATION_ROLE,
     PaperAuthor,
@@ -769,8 +769,9 @@ class JatsParser:
     DOCX parsers.
     """
 
-    def __init__(self, xml_bytes: bytes) -> None:
+    def __init__(self, xml_bytes: bytes, *, parsed_root: object | None = None) -> None:
         self.xml_bytes = xml_bytes
+        self._parsed_root = parsed_root
         # page_number is None for XML — pages are a render-time concept.
         self.assembler = DocumentAssembler()
 
@@ -831,7 +832,11 @@ class JatsParser:
         )
 
         try:
-            root = parse_xml(self.xml_bytes)
+            if self._parsed_root is not None:
+                root = self._parsed_root
+                resolve_entity_refs(root)
+            else:
+                root = parse_xml(self.xml_bytes)
         except Exception as exc:
             from bibr.exceptions import ProcessingError
 
@@ -1074,17 +1079,21 @@ class JatsParser:
             elif id_type == "arxiv" and meta.arxiv is None:
                 meta.arxiv = value
 
+        def _first_child_or_desc(el, name: str):
+            found = _first_child(el, name)
+            return found if found is not None else _first_desc(el, name)
+
         # Title
-        title_group = _first_desc(article_meta, "title-group")
+        title_group = _first_child_or_desc(article_meta, "title-group")
         if title_group is not None:
-            title_el = _first_desc(title_group, "article-title")
+            title_el = _first_child_or_desc(title_group, "article-title")
             title = _text(title_el)
             if title:
                 meta.title = title
                 self._detected_title = title
 
         # Abstract (first <abstract>, excluding its heading title)
-        abstract_el = _first_desc(article_meta, "abstract")
+        abstract_el = _first_child_or_desc(article_meta, "abstract")
         if abstract_el is not None:
             meta.abstract = collapse_ws(_flatten_excluding(abstract_el, {"title"})).strip()
 
@@ -1103,10 +1112,10 @@ class JatsParser:
         meta.authors = self._parse_authors(article_meta)
 
         # Bibliographic self-identity
-        meta.volume = _text(_first_desc(article_meta, "volume")) or None
-        meta.issue = _text(_first_desc(article_meta, "issue")) or None
-        meta.first_page = _text(_first_desc(article_meta, "fpage")) or None
-        meta.last_page = _text(_first_desc(article_meta, "lpage")) or None
+        meta.volume = _text(_first_child_or_desc(article_meta, "volume")) or None
+        meta.issue = _text(_first_child_or_desc(article_meta, "issue")) or None
+        meta.first_page = _text(_first_child_or_desc(article_meta, "fpage")) or None
+        meta.last_page = _text(_first_child_or_desc(article_meta, "lpage")) or None
         meta.published = self._pub_date(article_meta)
         meta.license = self._license(article_meta)
 
@@ -1210,23 +1219,47 @@ class JatsParser:
                         rids.update((_attr(xref, "rid") or "").split())
             return rids
 
+        _CONTRIB_FIELDS = frozenset({"name", "string-name", "email", "contrib-id", "aff", "xref"})
+
         def handle_contrib(
             contrib,
-            group_affs: list[tuple[str | None, str]],
-            referenced: set[str] | frozenset = frozenset(),
+            group_fallback: list[str],
         ) -> None:
             nonlocal idx
             if (_attr(contrib, "contrib-type") or "author") != "author":
                 return
-            # Pruned-descendant lookups: an <email> often sits in <address>,
-            # a CJK name in <name-alternatives> — but a consortium <collab>
-            # may nest member <contrib>s whose fields must not leak out.
-            name = _first_contrib_desc(contrib, "name")
-            if name is None:
-                name = _first_contrib_desc(contrib, "string-name")
+            # Single pruned-descendant pass collecting all author fields at once
+            # instead of five separate tree walks per <contrib>.
+            name_el = None
+            string_name_el = None
+            email_el = None
+            orcid = None
+            aff_els: list = []
+            xref_els: list = []
+            for desc in _iter_contrib_descs(contrib, _CONTRIB_FIELDS):
+                dln = _ln(desc)
+                if dln == "name":
+                    if name_el is None:
+                        name_el = desc
+                elif dln == "string-name":
+                    if string_name_el is None:
+                        string_name_el = desc
+                elif dln == "email":
+                    if email_el is None:
+                        email_el = desc
+                elif dln == "contrib-id":
+                    if orcid is None and _attr(desc, "contrib-id-type") == "orcid":
+                        orcid = canonicalize_orcid(_text(desc))
+                elif dln == "aff":
+                    aff_els.append(desc)
+                elif dln == "xref":
+                    xref_els.append(desc)
+
+            name = name_el if name_el is not None else string_name_el
             given = family = ""
             roles: list[str] = []
             is_group = False
+            collab = None
             if name is not None:
                 if _ln(name) == "string-name":
                     family = _text(name)
@@ -1250,27 +1283,20 @@ class JatsParser:
                 return
             idx += 1
 
-            email_el = _first_contrib_desc(contrib, "email")
             email_text = _text(email_el) if email_el is not None else ""
             email = email_text or None
-
-            orcid = None
-            for cid in _iter_contrib_descs(contrib, {"contrib-id"}):
-                if _attr(cid, "contrib-id-type") == "orcid":
-                    orcid = canonicalize_orcid(_text(cid))
-                    break
 
             corresponding = (_attr(contrib, "corresp") or "").lower() == "yes"
             aff_texts: list[str] = []
             # A repeated rid (or the same affiliation cited twice) adds nothing
             # but a longer string; a hostile @rid can repeat one id 20,000 times.
             seen_affs: set[str] = set()
-            for aff in _iter_contrib_descs(contrib, {"aff"}):
+            for aff in aff_els:
                 text = self._aff_text(aff)
                 if text and text not in seen_affs:
                     seen_affs.add(text)
                     aff_texts.append(text)
-            for xref in _iter_contrib_descs(contrib, {"xref"}):
+            for xref in xref_els:
                 ref_type = (_attr(xref, "ref-type") or "").lower()
                 if ref_type == "corresp":
                     corresponding = True
@@ -1286,9 +1312,7 @@ class JatsParser:
                 # affiliation is an <aff> beside the contribs, else a single
                 # article-meta-level one. An xref-less author must not inherit
                 # affiliations other authors claim by id — only unclaimed ones.
-                aff_texts = _group_fallback(group_affs, set(referenced)) or (
-                    meta_affs if len(meta_affs) == 1 else []
-                )
+                aff_texts = group_fallback or (meta_affs if len(meta_affs) == 1 else [])
 
             affiliation = "; ".join(t for t in aff_texts if t)
             authors.append(
@@ -1303,7 +1327,7 @@ class JatsParser:
                     role=roles,
                 )
             )
-            if is_group:
+            if is_group and collab is not None:
                 # Consortium members nested inside the <collab> are credited
                 # authors in their own right — emit them once, right after
                 # the group, instead of dropping them or folding their names
@@ -1314,8 +1338,9 @@ class JatsParser:
                     ]
                     members = list(_iter_children(group, "contrib"))
                     nested_ref = _referenced_aff_ids(members)
+                    nested_fallback = _group_fallback(nested_affs, nested_ref)
                     for member in members:
-                        handle_contrib(member, nested_affs, nested_ref)
+                        handle_contrib(member, nested_fallback)
 
         # Affiliation ids claimed by any author in <article-meta>: an xref-less
         # author must not inherit an <aff> another author claims, even from a
@@ -1336,9 +1361,10 @@ class JatsParser:
                 group_affs = [
                     (_attr(aff, "id"), self._aff_text(aff)) for aff in _iter_children(child, "aff")
                 ]
+                group_fallback = _group_fallback(group_affs, claimed_everywhere)
                 contribs = list(_iter_children(child, "contrib"))
                 for contrib in contribs:
-                    handle_contrib(contrib, group_affs, claimed_everywhere)
+                    handle_contrib(contrib, group_fallback)
             elif ln == "contrib":
                 handle_contrib(child, [])
         return authors

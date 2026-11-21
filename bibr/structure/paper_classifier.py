@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Literal
 
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.structure.paper_classifier_common import _build_input_text
-from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.locks import LOCAL_INFERENCE_LOCK, inference_lock_for
 
 if TYPE_CHECKING:
     from bibr.pipeline.classifier_resources import ClassifierResources
@@ -451,6 +451,10 @@ async def _get_paper_model_async(
     pay a thread hop. Lock order mirrors the section classifier (inference lock
     OUTSIDE the load lock)."""
 
+    cached = _paper_model_cache
+    if cached is not None:
+        return None if cached is False else cached  # type: ignore[return-value]
+
     def _locked_load() -> PaperClassifierModel | None:
         with LOCAL_INFERENCE_LOCK:
             if settings is None:
@@ -472,7 +476,7 @@ def _paper_prediction_tuple(prediction) -> tuple[str, float, str, float, str, fl
 
 
 def _classify_paper_locked(model, title: str, abstract: str):
-    with LOCAL_INFERENCE_LOCK:
+    with inference_lock_for(getattr(model, "session", None)):
         return model.classify_batch([(title, abstract)])
 
 

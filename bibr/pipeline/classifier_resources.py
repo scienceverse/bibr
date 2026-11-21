@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from bibr.pipeline.inference_batcher import InferenceBatcher
-from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.locks import LOCAL_INFERENCE_LOCK, inference_lock_for
 from bibr.utils.model_overrides import (
     is_model_override,
     onnx_bundle_files,
@@ -277,7 +277,7 @@ def _locked_load(loader, model_id: str, revision: str, device: str):
 
 
 def _locked_forward(model, items):
-    with LOCAL_INFERENCE_LOCK:
+    with inference_lock_for(getattr(model, "session", None)):
         return model.classify_batch(items)
 
 

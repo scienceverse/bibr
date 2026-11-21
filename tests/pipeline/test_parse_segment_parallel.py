@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -93,3 +95,36 @@ async def test_parse_isolates_per_file_errors(monkeypatch):
     assert good.error is None
     assert bad.error is not None
     assert bad.error_code == "parse_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_parse_cancels_the_work_started_beside_it(monkeypatch):
+    """The front-role pass running beside a parse that raises is cancelled, not orphaned."""
+    fs = _make_fs()
+    ctx = _make_ctx([fs])
+    roles_started = threading.Event()
+    outcome: list[str] = []
+
+    def parse_fn(ocr_regions, *, settings, first_page_index=0):  # noqa: ARG001
+        assert roles_started.wait(5)
+        raise RuntimeError("simulated parse failure")
+
+    async def roles(*_args, **_kwargs):
+        roles_started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            outcome.append("cancelled")
+            raise
+        outcome.append("finished")
+
+    monkeypatch.setattr("bibr.pipeline.stages.parse_segment._parse_pdf", parse_fn)
+    monkeypatch.setattr("bibr.pipeline.stages.parse_segment._predict_front_roles", roles)
+    monkeypatch.setattr(
+        "bibr.pipeline.stages.parse_segment._tag_front_matter", AsyncMock(return_value=None)
+    )
+
+    await ParseSegmentStage().run(ctx)
+
+    assert fs.error_code == "parse_failed"
+    assert outcome == ["cancelled"]

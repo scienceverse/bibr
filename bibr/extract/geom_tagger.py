@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -229,7 +228,9 @@ def feature_matrix(lines: list[LineRecord]) -> np.ndarray:
 class GeomLineTagger:
     """Loads a tagger bundle and segments reference lines; safe to share across threads."""
 
-    def __init__(self, path: str | Path, revision: str | None = None) -> None:
+    def __init__(
+        self, path: str | Path, revision: str | None = None, *, probe: bool = True
+    ) -> None:
         self.onnx_path, manifest_path, gate_path = tagger_bundle_files(path, revision)
         _check_manifest(_read_json(manifest_path), manifest_path)
         self.temperature, self._iso_x, self._iso_y, self.threshold = _check_gate(
@@ -248,8 +249,9 @@ class GeomLineTagger:
                 f"{self.onnx_path}: graph inputs {inputs} / outputs {outputs}; want "
                 f"{INPUT_NAME!r} in and {OUTPUT_NAME!r} out"
             )
-        self._lock = threading.Lock()
-        self._check_graph()
+        # CPU ORT InferenceSession.run is thread-safe; no per-instance lock needed.
+        if probe:
+            self._check_graph()
 
     def _check_graph(self) -> None:
         """Run the graph on two reference sections of different lengths, as papers send them.
@@ -284,8 +286,7 @@ class GeomLineTagger:
         if not lines:
             return np.zeros(0, dtype=np.float64)
         x = feature_matrix(lines)
-        with self._lock:
-            logits = self._session.run([OUTPUT_NAME], {INPUT_NAME: x})[0]
+        logits = self._session.run([OUTPUT_NAME], {INPUT_NAME: x})[0]
         z = np.asarray(logits, dtype=np.float64) / self.temperature
         z = z - z.max(axis=1, keepdims=True)
         e = np.exp(z)

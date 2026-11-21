@@ -42,6 +42,25 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0, 
     return parser, contents
 
 
+async def _gather_cancelling(*aws):
+    """``asyncio.gather``, except that a failure cancels the rest and waits for them.
+
+    A bare gather raises the first error and leaves the others running with no
+    owner: a paper whose parse failed would still queue its document-layer
+    rebuild, under the process-wide pdfium lock, and its model passes. A thread
+    that is already running cannot be stopped; this stops a call still queued
+    for the pool and the later steps of a coroutine.
+    """
+    tasks = [asyncio.ensure_future(aw) for aw in aws]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def _document_layer(fs, settings, *, start_page, end_page):
     """The file's document layer with its regions as blocks; never raise."""
     try:
@@ -79,7 +98,14 @@ def _note_override_ran(settings, env: str, paper) -> None:
 
 
 async def _predict_front_roles(
-    rm, ocr_regions, *, first_page_index: int, settings=None, warnings=None, paper=None
+    rm,
+    ocr_regions,
+    *,
+    first_page_index: int,
+    settings=None,
+    warnings=None,
+    paper=None,
+    front_regions=None,
 ):
     """Run the optional front-role classifier off the event loop.
 
@@ -98,9 +124,17 @@ async def _predict_front_roles(
         classifier = await asyncio.to_thread(ensure)
         if classifier is None:
             return None
-        predictions = await asyncio.to_thread(
-            classifier.predict_pages, ocr_regions, first_page_index=first_page_index
-        )
+        kwargs = {"first_page_index": first_page_index}
+        if front_regions is not None:
+            kwargs["regions"] = front_regions
+        try:
+            predictions = await asyncio.to_thread(classifier.predict_pages, ocr_regions, **kwargs)
+        except TypeError:
+            if "regions" not in kwargs:
+                raise
+            predictions = await asyncio.to_thread(
+                classifier.predict_pages, ocr_regions, first_page_index=first_page_index
+            )
     except ModelOverrideError:
         raise  # an overridden model that cannot load (bibr.utils.model_overrides)
     except Exception as exc:  # noqa: BLE001 - an optional prior must never fail parsing
@@ -112,7 +146,14 @@ async def _predict_front_roles(
 
 
 async def _tag_front_matter(
-    rm, ocr_regions, *, first_page_index: int, settings=None, warnings=None, paper=None
+    rm,
+    ocr_regions,
+    *,
+    first_page_index: int,
+    settings=None,
+    warnings=None,
+    paper=None,
+    front_regions=None,
 ):
     """Run the optional front-matter tagger off the event loop.
 
@@ -140,7 +181,11 @@ async def _tag_front_matter(
         from bibr.front_tagger.runtime import tag_front_matter
 
         def run():
-            regions = build_front_regions(ocr_regions, first_page_index=first_page_index)
+            regions = (
+                front_regions
+                if front_regions is not None
+                else build_front_regions(ocr_regions, first_page_index=first_page_index)
+            )
             return tag_front_matter(
                 tagger,
                 regions,
@@ -225,6 +270,14 @@ class ParseSegmentStage:
             try:
                 fs_t0 = time.monotonic()
                 native_parser = getattr(fs, "_native_parser", None)
+                first_page = ctx.config.start_page or 0
+                doc_layer_coro = None
+                roles_coro = None
+                tagger_coro = None
+                role_warnings: list[ProcessingWarning] = []
+                tagger_warnings: list[ProcessingWarning] = []
+                scanned = False
+
                 if native_parser is not None:
                     parser = native_parser
                     contents = fs.contents
@@ -241,75 +294,92 @@ class ParseSegmentStage:
                     parse_args = (fs.ocr_regions,) if outline is None else (fs.ocr_regions, outline)
                     # The PDF's link targets ride along only when it has any.
                     links = LinkTargets.from_uri_dicts(getattr(fs, "pdf_uri_links", None))
-                    parser, contents = await asyncio.to_thread(
+                    parse_coro = asyncio.to_thread(
                         _parse_pdf,
                         *parse_args,
                         settings=ctx.settings,
-                        first_page_index=ctx.config.start_page or 0,
+                        first_page_index=first_page,
                         **({"link_targets": links} if links else {}),
                     )
+
+                    # Document layer, front-role classifier, and front-matter
+                    # tagger depend only on fs.ocr_regions (not on _parse_pdf),
+                    # so run them concurrently with _parse_pdf and share the
+                    # built FrontRegion list between role and tagger models.
+                    if ctx.settings.pipeline.document_layer is True:
+                        doc_layer_coro = _document_layer(
+                            fs,
+                            ctx.settings,
+                            start_page=ctx.config.start_page,
+                            end_page=ctx.config.end_page,
+                        )
+
+                    if fs.ocr_regions:
+                        from bibr.extract.front_role import build_front_regions
+
+                        front_regions = build_front_regions(
+                            fs.ocr_regions, first_page_index=first_page
+                        )
+                        pkey = paper_key(fs)
+                        roles_coro = _predict_front_roles(
+                            rm,
+                            fs.ocr_regions,
+                            first_page_index=first_page,
+                            settings=ctx.settings,
+                            warnings=role_warnings,
+                            paper=pkey,
+                            front_regions=front_regions,
+                        )
+                        scanned = _front_page_was_read(fs, first_page)
+                        # With the tagger alone there is no LLM to leave a scan to.
+                        tagger_alone = ctx.settings.ml.front_tagger_mode == "only"
+                        if scanned and not tagger_alone:
+                            logger.debug(
+                                "%s: front page went through OCR; the front-matter tagger skips it",
+                                fs.path.name,
+                            )
+                        else:
+                            tagger_coro = _tag_front_matter(
+                                rm,
+                                fs.ocr_regions,
+                                first_page_index=first_page,
+                                settings=ctx.settings,
+                                warnings=tagger_warnings,
+                                paper=pkey,
+                                front_regions=front_regions,
+                            )
+
+                    async def _noop_none():
+                        return None
+
+                    (parser, contents), doc_layer, predictions, tagged = await _gather_cancelling(
+                        parse_coro,
+                        doc_layer_coro if doc_layer_coro is not None else _noop_none(),
+                        roles_coro if roles_coro is not None else _noop_none(),
+                        tagger_coro if tagger_coro is not None else _noop_none(),
+                    )
                     fs.contents = contents
+                    if role_warnings:
+                        fs.warnings.extend(role_warnings)
+                    if tagger_warnings:
+                        fs.warnings.extend(tagger_warnings)
 
                 # Hand captured reference-line geometry to the extract stage.
                 if contents is not None:
                     contents.ref_line_geometry = getattr(fs, "ref_line_geometry", None)
                     contents.ref_page_lines = getattr(fs, "ref_page_lines", None)
                     contents.pdf_uri_links = getattr(fs, "pdf_uri_links", None)
-
-                # The document layer, with this run's regions as blocks
-                # (rebuilt from the PDF when an OCR-bundle hit skipped
-                # NativeTextStage). Internal only; it never fails the paper.
-                # "is True" keeps it off under Mock settings in tests.
-                if (
-                    contents is not None
-                    and native_parser is None
-                    and ctx.settings.pipeline.document_layer is True
-                ):
-                    contents.document = await _document_layer(
-                        fs,
-                        ctx.settings,
-                        start_page=ctx.config.start_page,
-                        end_page=ctx.config.end_page,
-                    )
-
-                # Score every OCR region's front-matter role while the raw
-                # regions are still resident (they are freed after this
-                # stage). Evidence only: front_matter.py decides what to do
-                # with it, and a missing model leaves the heuristics alone.
-                if contents is not None and native_parser is None and fs.ocr_regions:
-                    predictions = await _predict_front_roles(
-                        rm,
-                        fs.ocr_regions,
-                        first_page_index=ctx.config.start_page or 0,
-                        settings=ctx.settings,
-                        warnings=fs.warnings,
-                        paper=paper_key(fs),
-                    )
-                    if predictions is not None:
-                        contents.front_role_predictions = predictions
-                    first_page = ctx.config.start_page or 0
-                    scanned = _front_page_was_read(fs, first_page)
-                    # With the tagger alone there is no LLM to leave a scan to.
-                    tagger_alone = ctx.settings.ml.front_tagger_mode == "only"
-                    if scanned and not tagger_alone:
-                        logger.debug(
-                            "%s: front page went through OCR; the front-matter tagger skips it",
-                            fs.path.name,
-                        )
-                    else:
-                        tagged = await _tag_front_matter(
-                            rm,
-                            fs.ocr_regions,
-                            first_page_index=first_page,
-                            settings=ctx.settings,
-                            warnings=fs.warnings,
-                            paper=paper_key(fs),
-                        )
-                        if tagged is not None and scanned:
-                            tagged = replace(
-                                tagged, problems=[*tagged.problems, "scanned_front_page"]
-                            )
-                        contents.front_tagger_result = tagged
+                    if native_parser is None:
+                        if doc_layer_coro is not None:
+                            contents.document = doc_layer
+                        if predictions is not None:
+                            contents.front_role_predictions = predictions
+                        if tagger_coro is not None:
+                            if tagged is not None and scanned:
+                                tagged = replace(
+                                    tagged, problems=[*tagged.problems, "scanned_front_page"]
+                                )
+                            contents.front_tagger_result = tagged
 
                 assembler = parser.assembler
                 if len(assembler):

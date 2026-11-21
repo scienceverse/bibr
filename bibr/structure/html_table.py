@@ -55,14 +55,14 @@ as well.
 
 from __future__ import annotations
 
-import copy
 import logging
 import re
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, CData, NavigableString, Tag
 from pandas.errors import EmptyDataError
 from pandas.io.parsers import TextParser  # type: ignore[attr-defined]  # no stub
 
@@ -195,11 +195,65 @@ def max_table_width(rows: int, cells: int, widest: int) -> int:
     )
 
 
+_CELL_STRING_TYPES = (NavigableString, CData)
+
+
+def _is_hidden_el(tag: Tag) -> bool:
+    """True when *tag* is a ``<style>`` or carries ``display:none`` inline style."""
+    if tag.name == "style":
+        return True
+    style = tag.get("style")
+    return style is not None and _HIDDEN_STYLE_RE.search(str(style)) is not None
+
+
+def _table_has_text(table: Tag) -> bool:
+    """True when *table* has any visible non-newline string (matches ``find(string=re.compile('.+'))``)."""
+    stack: list[Iterator[Any]] = [iter(table.children)]
+    while stack:
+        child = next(stack[-1], None)
+        if child is None:
+            stack.pop()
+            continue
+        if isinstance(child, Tag):
+            if child.name == "br" or _is_hidden_el(child):
+                continue
+            stack.append(iter(child.children))
+        elif isinstance(child, NavigableString) and _ANY_TEXT_RE.search(str(child)) is not None:
+            return True
+    return False
+
+
+def _cell_text(td: Tag) -> str:
+    """Read-only cell text extraction: ``<br>`` -> ``\\n``, skip ``<style>`` and ``display:none``."""
+    parts: list[str] = []
+    stack: list[Iterator[Any]] = [iter(td.children)]
+    while stack:
+        child = next(stack[-1], None)
+        if child is None:
+            stack.pop()
+            continue
+        if isinstance(child, Tag):
+            if child.name == "br":
+                parts.append("\n")
+                continue
+            if _is_hidden_el(child):
+                continue
+            stack.append(iter(child.children))
+        elif type(child) in _CELL_STRING_TYPES:
+            parts.append(str(child))
+    if not parts:
+        return ""
+    raw = "".join(parts).strip()
+    if not raw:
+        return ""
+    return _WHITESPACE_RE.sub(" ", raw)
+
+
 def html_table_frame(source: str | Tag, budget: TableBudget | None = None) -> pd.DataFrame | None:
     """Parse the first table in *source* into a DataFrame of cell strings.
 
     *source* is HTML markup, or a ``<table>`` element already parsed with
-    html5lib (which is read from a copy, never modified). Returns ``None``
+    html5lib (read-only: never modified or copied). Returns ``None``
     when there is no table with text and at least one row, or when that table
     is out of proportion to its markup even with its colspans ended, or over
     the text and slots *budget* has left (by default, a budget of its own).
@@ -207,24 +261,14 @@ def html_table_frame(source: str | Tag, budget: TableBudget | None = None) -> pd
     if budget is None:
         budget = TableBudget()
     if isinstance(source, Tag):
-        root: Tag = copy.copy(source)
+        root: Tag = source
         tables = ([root] if root.name == "table" else []) + root.find_all("table")
     else:
         root = BeautifulSoup(source, "html5lib")
         tables = root.find_all("table")
-    for br in root.find_all("br"):
-        br.replace_with("\n")
-    candidates: list[Tag] = []
     for table in tables:
-        if is_hidden_table(table):
+        if is_hidden_table(table) or not _table_has_text(table):
             continue
-        for element in table.find_all("style"):
-            element.decompose()
-        for element in table.find_all(style=_HIDDEN_STYLE_RE):
-            element.decompose()
-        if table.find(string=_ANY_TEXT_RE) is not None:
-            candidates.append(table)
-    for table in candidates:
         try:
             return _frame(*_sections(table, budget))
         except EmptyDataError:  # no rows: ``read_html`` moves on to the next table
@@ -253,7 +297,11 @@ class _TooManyCells(Exception):
 
 
 def _cells(row: Tag) -> list[Tag]:
-    return row.find_all(("td", "th"), recursive=False)
+    return [
+        child
+        for child in row.children
+        if isinstance(child, Tag) and child.name in ("td", "th") and not _is_hidden_el(child)
+    ]
 
 
 def _sections(
@@ -264,13 +312,42 @@ def _sections(
     The rows of a table nested in a cell are that cell's text, not rows of
     *table* (``read_html`` read them as both).
     """
+    head_rows: list[Tag] = []
+    tbody_rows: list[Tag] = []
+    direct_tr_rows: list[Tag] = []
+    foot_rows: list[Tag] = []
 
-    def own(rows: list[Tag]) -> list[Tag]:
-        return [row for row in rows if row.find_parent("table") is table]
+    # Single read-only walk of *table*'s own structure without soupsieve CSS
+    # selectors or DOM mutation. Never descends into nested <table>, hidden
+    # elements, or inside <tr> cells.
+    stack: list[tuple[Iterator[Any], str | None, bool]] = [(iter(table.children), None, True)]
+    while stack:
+        children, section, is_direct = stack[-1]
+        child = next(children, None)
+        if child is None:
+            stack.pop()
+            continue
+        if not isinstance(child, Tag) or _is_hidden_el(child):
+            continue
+        name = child.name
+        if name == "table":
+            continue
+        if name == "tr":
+            if section == "thead":
+                head_rows.append(child)
+            elif section == "tbody":
+                tbody_rows.append(child)
+            elif section == "tfoot":
+                foot_rows.append(child)
+            elif is_direct:
+                direct_tr_rows.append(child)
+            continue
+        if name in ("thead", "tbody", "tfoot"):
+            stack.append((iter(child.children), name, False))
+        else:
+            stack.append((iter(child.children), section, False))
 
-    head_rows: list[Tag] = own(table.select("thead tr"))
-    body_rows = own(table.select("tbody tr")) + table.find_all("tr", recursive=False)
-    foot_rows = own(table.select("tfoot tr"))
+    body_rows = tbody_rows + direct_tr_rows
     if not head_rows:
         # No <thead>: the leading rows made only of <th> are the header.
         lead = 0
@@ -327,7 +404,7 @@ def _expand_spans(rows: list[Tag], budget: TableBudget) -> list[list[str]]:
                 if prev_rows > 1:
                     still_open.append((prev_index, prev_text, prev_rows - 1))
                 index += 1
-            text = _WHITESPACE_RE.sub(" ", td.text.strip())
+            text = _cell_text(td)
             rowspan = _span(td.get("rowspan"), _MAX_ROWSPAN)
             # A colspan past the table's width ("span every column" over a
             # narrow table) ends there, leaving a slot for each cell and

@@ -34,7 +34,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 # Pure-Python bucket helper, shared with both classifier runtimes (torch-free
 # module, so building the composite dedup key never forces torch).
 from bibr.structure.section_classifier_common import _position_bucket
-from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.locks import LOCAL_INFERENCE_LOCK, inference_lock_for
 from bibr.utils.model_overrides import note_inference_failure, note_inference_success
 from bibr.utils.text import normalize_text
 
@@ -189,6 +189,10 @@ async def _get_trained_model_async(
     bibr.utils.locks).
     """
 
+    cached = _model_cache
+    if cached is not None:
+        return None if cached is False else cached  # type: ignore[return-value]
+
     def _locked_load() -> SectionClassifierModel | None:
         with LOCAL_INFERENCE_LOCK:
             if settings is None:
@@ -257,7 +261,7 @@ async def _classify_trained_batch(
             return []
 
         def _locked_classify():
-            with LOCAL_INFERENCE_LOCK:
+            with inference_lock_for(getattr(model, "session", None)):
                 return model.classify_batch(items)
 
         preds = await asyncio.to_thread(_locked_classify)

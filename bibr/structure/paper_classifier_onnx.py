@@ -94,7 +94,9 @@ class OnnxPaperClassifierModel:
         model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
         for items in (full, short):
             texts = [_build_input_text(title, abstract) for title, abstract in items]
-            batch = encode_batch(self.tokenizer, texts, max_length=self.max_length)
+            batch = encode_batch(
+                self.tokenizer, texts, max_length=self.max_length, need_offsets=False
+            )
             ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
             mask = batch.attention_mask
             if items is short:
@@ -127,17 +129,29 @@ class OnnxPaperClassifierModel:
                 )
 
     def classify_batch(self, items: list[tuple[str, str]]) -> list[PaperClassificationPrediction]:
+        n = len(items)
+        if n <= _MAX_INFERENCE_BATCH:
+            order: list[int] | None = None
+            ordered = items
+        else:
+            order = sorted(range(n), key=lambda i: len(items[i][0] or "") + len(items[i][1] or ""))
+            ordered = [items[i] for i in order]
         results: list[PaperClassificationPrediction] = []
-        for start in range(0, len(items), _MAX_INFERENCE_BATCH):
-            chunk = items[start : start + _MAX_INFERENCE_BATCH]
+        for start in range(0, n, _MAX_INFERENCE_BATCH):
+            chunk = ordered[start : start + _MAX_INFERENCE_BATCH]
             results.extend(self._forward_chunk(chunk))
-        return results
+        if order is None:
+            return results
+        restored: list[PaperClassificationPrediction] = [results[0]] * n
+        for pos, pred in zip(order, results, strict=True):
+            restored[pos] = pred
+        return restored
 
     def _forward_chunk(self, items: list[tuple[str, str]]) -> list[PaperClassificationPrediction]:
         if not items:
             return []
         texts = [_build_input_text(title, abstract) for title, abstract in items]
-        batch = encode_batch(self.tokenizer, texts, max_length=self.max_length)
+        batch = encode_batch(self.tokenizer, texts, max_length=self.max_length, need_offsets=False)
         feeds = {"input_ids": batch.input_ids, "attention_mask": batch.attention_mask}
         feeds = {k: v for k, v in feeds.items() if k in self._input_names}
         l1_logits, l2_logits, pt_logits = self.session.run(

@@ -141,7 +141,12 @@ class TextHandlersMixin:
             return
 
         self._emit_content_without_promotion(
-            text, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+            text,
+            page_number,
+            bbox,
+            region_meta=region_meta,
+            from_ocr=from_ocr,
+            _already_cleaned=True,
         )
 
     def _start_publisher_note_back_matter(
@@ -195,9 +200,10 @@ class TextHandlersMixin:
         *,
         region_meta: dict | None = None,
         from_ocr: bool = True,
+        _already_cleaned: bool = False,
     ) -> None:
         """Emit body text without allowing it to re-enter heading promotion."""
-        text = clean_text_content(content.strip())
+        text = content if _already_cleaned else clean_text_content(content.strip())
         if not text:
             return
 

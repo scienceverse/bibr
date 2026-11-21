@@ -1462,26 +1462,38 @@ def _flatten_latex(text: str, *, single_char: bool) -> str:
     LaTeX.
     """
     result = text
+    has_backslash = "\\" in result
+    has_script = "_" in result or "^" in result
+    if not has_backslash and not has_script and "{" not in result:
+        return result
 
     # 1. Unwrap text-mode commands: \mathrm{n=5} -> n=5
-    result = _sub_braced(_LATEX_TEXT_CMD_RE, result)
+    if has_backslash:
+        result = _sub_braced(_LATEX_TEXT_CMD_RE, result)
 
     # 2. Flatten subscripts and superscripts: _{c} -> c, ^{2} -> 2
-    result = _sub_braced(_LATEX_SUB_RE, result)
-    result = _sub_braced(_LATEX_SUP_RE, result)
-    if single_char:
-        result = _LATEX_SUB_SINGLE_RE.sub(r"\1", result)
-        result = _LATEX_SUP_SINGLE_RE.sub(r"\1", result)
+    if has_script or "_" in result or "^" in result:
+        if "{" in result:
+            result = _sub_braced(_LATEX_SUB_RE, result)
+            result = _sub_braced(_LATEX_SUP_RE, result)
+        if single_char:
+            if "_" in result:
+                result = _LATEX_SUB_SINGLE_RE.sub(r"\1", result)
+            if "^" in result:
+                result = _LATEX_SUP_SINGLE_RE.sub(r"\1", result)
 
     # 3. Replace known LaTeX symbol commands with Unicode equivalents.
-    result = _LATEX_SYMBOL_RE.sub(lambda m: _LATEX_SYMBOL_MAP[m.group()], result)
-
     # 4. Strip any remaining \command sequences (remove backslash + command name).
-    result = _LATEX_BACKSLASH_CMD_RE.sub(r"\1", result)
+    if "\\" in result:
+        result = _LATEX_SYMBOL_RE.sub(lambda m: _LATEX_SYMBOL_MAP[m.group()], result)
+        if "\\" in result:
+            result = _LATEX_BACKSLASH_CMD_RE.sub(r"\1", result)
 
     # 5. Clean up leftover empty brace pairs
-    result = result.replace("{}", "")
-    return result.replace("{ }", "")
+    if "{" in result:
+        result = result.replace("{}", "")
+        result = result.replace("{ }", "")
+    return result
 
 
 def clean_text_content(text: str) -> str | None:
@@ -1537,7 +1549,10 @@ def _mask_protected_spans(text: str, math: Iterable[str] = ()) -> tuple[str, lis
         spans.append(value)
         return f"\x00{len(spans) - 1}\x00"
 
-    masked = _PROTECTED_SPAN_RE.sub(lambda m: _hold(m.group(0)), text)
+    if "://" in text or "@" in text or ("." in text and "www." in text.lower()):
+        masked = _PROTECTED_SPAN_RE.sub(lambda m: _hold(m.group(0)), text)
+    else:
+        masked = text
     wanted = sorted({span for span in math if len(span) > 1}, key=len, reverse=True)
     if wanted:
         # One left-to-right pass, longest span first at each position: two
@@ -1561,6 +1576,8 @@ def _flatten_ocr_prose(text: str) -> str:
     exponent. Inside the ``\(…\)`` inline math Paddle-OCR-VL writes it is
     math, so that span is flattened in full, as ``$…$`` is; its delimiters stay.
     """
+    if r"\(" not in text:
+        return _flatten_latex(text, single_char=False)
     parts: list[str] = []
     pos = 0
     for m in _PAREN_INLINE_MATH_RE.finditer(text):
@@ -1569,6 +1586,9 @@ def _flatten_ocr_prose(text: str) -> str:
         pos = m.end()
     parts.append(_flatten_latex(text[pos:], single_char=False))
     return "".join(parts)
+
+
+_ASCII_DIGIT_RE = re.compile(r"[0-9]")
 
 
 def clean_text_content_late(
@@ -1605,17 +1625,21 @@ def clean_text_content_late(
     ``…/to_err_is_human`` to ``…/toerrishuman``).
     """
     masked, protected = _mask_protected_spans(text, inline_math)
-    parts: list[str] = []
-    pos = 0
-    for m in _inline_math_spans(masked, strict=not from_ocr):
-        outside = masked[pos : m.start()]
+    if "$" in masked:
+        parts: list[str] = []
+        pos = 0
+        for m in _inline_math_spans(masked, strict=not from_ocr):
+            outside = masked[pos : m.start()]
+            parts.append(_flatten_ocr_prose(outside) if from_ocr else outside)
+            parts.append(strip_latex_commands(m.group(1)))
+            pos = m.end()
+        outside = masked[pos:]
         parts.append(_flatten_ocr_prose(outside) if from_ocr else outside)
-        parts.append(strip_latex_commands(m.group(1)))
-        pos = m.end()
-    outside = masked[pos:]
-    parts.append(_flatten_ocr_prose(outside) if from_ocr else outside)
-    result = " ".join("".join(parts).split())
-    if from_ocr:
+        joined = "".join(parts)
+    else:
+        joined = _flatten_ocr_prose(masked) if from_ocr else masked
+    result = " ".join(joined.split())
+    if from_ocr and " " in result and (not result.isascii() or _ASCII_DIGIT_RE.search(result)):
         # Collapse OCR character-spacing in regular text (e.g. "9 0 6" → "906").
         # This handles spaced text that came from formula OCR regions merged
         # into body text, or from the text OCR prompt on dense statistical

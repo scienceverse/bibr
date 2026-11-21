@@ -47,17 +47,44 @@ def viterbi_decode(
     if not (mask[:, 0] | empty).all():
         raise ValueError("mask of the first timestep must all be on")
 
-    batch, length, _num_tags = emissions.shape
+    batch, length, num_tags = emissions.shape
     score = start[None, :] + emissions[:, 0]  # (B, T)
-    history: list[np.ndarray] = []
+    if batch == 1 and bool(mask.all()):
+        # Fast path for single unpadded sequences (e.g. front_tagger, L=1000..3000):
+        # 2D (T, T) ops, no 3D broadcast, no per-step np.where, single history array.
+        sc = score[0]
+        em = emissions[0]
+        history_1 = np.empty((length - 1, num_tags), dtype=np.intp)
+        tag_idx = np.arange(num_tags)
+        for i in range(1, length):
+            cand = sc[:, None] + trans
+            best_prev = cand.argmax(axis=0)
+            sc = cand[best_prev, tag_idx] + em[i]
+            history_1[i - 1] = best_prev
+        best_last = int((sc + end).argmax())
+        best_tags = [best_last]
+        for i in range(length - 2, -1, -1):
+            best_last = int(history_1[i, best_last])
+            best_tags.append(best_last)
+        best_tags.reverse()
+        return [best_tags]
+
+    history = np.empty((length - 1, batch, num_tags), dtype=np.intp)
+    batch_idx = np.arange(batch)[:, None]
+    tag_idx = np.arange(num_tags)[None, :]
+    all_on = mask.all(axis=0)
+    trans_3d = trans[None, :, :]
     for i in range(1, length):
-        # (B, T_prev, 1) + (T_prev, T_next) + (B, 1, T_next)
-        next_score = score[:, :, None] + trans[None, :, :] + emissions[:, i][:, None, :]
-        best_prev = next_score.argmax(axis=1)  # (B, T_next) first max wins
-        best_score = np.take_along_axis(next_score, best_prev[:, None, :], axis=1)[:, 0, :]
-        step_on = mask[:, i][:, None]
-        score = np.where(step_on, best_score, score)
-        history.append(best_prev)
+        # Hoist emissions[:, i] out of the (B, T, T) broadcast: adding a constant
+        # per next-tag column does not change argmax over previous tags.
+        cand = score[:, :, None] + trans_3d
+        best_prev = cand.argmax(axis=1)  # (B, T_next) first max wins
+        best_score = cand[batch_idx, best_prev, tag_idx] + emissions[:, i]
+        if all_on[i]:
+            score = best_score
+        else:
+            score = np.where(mask[:, i][:, None], best_score, score)
+        history[i - 1] = best_prev
 
     score = score + end[None, :]
     seq_ends = mask.sum(axis=1) - 1
@@ -69,8 +96,8 @@ def viterbi_decode(
             continue
         best_last = int(score[idx].argmax())
         best_tags = [best_last]
-        for hist in reversed(history[: int(seq_ends[idx])]):
-            best_last = int(hist[idx][best_tags[-1]])
+        for i in range(int(seq_ends[idx]) - 1, -1, -1):
+            best_last = int(history[i, idx, best_last])
             best_tags.append(best_last)
         best_tags.reverse()
         best_tags_list.append(best_tags)
@@ -106,13 +133,55 @@ def marginals(
     end = np.asarray(end_transitions, dtype=np.float64)
     trans = np.asarray(transitions, dtype=np.float64)
 
+    # Precompute shifted transition exponentials so each forward/backward step
+    # does T scalar exps + a (T, T) BLAS gemv instead of T*T exps. Any entry
+    # whose dot product underflows (<= 1e-300) falls back to exact logsumexp.
+    t_col_max = trans.max(axis=0)
+    t_col_safe = np.where(np.isfinite(t_col_max), t_col_max, 0.0)
+    exp_trans_col = np.ascontiguousarray(np.exp(trans - t_col_safe[None, :]))
+    t_row_max = trans.max(axis=1)
+    t_row_safe = np.where(np.isfinite(t_row_max), t_row_max, 0.0)
+    exp_trans_row = np.ascontiguousarray(np.exp(trans - t_row_safe[:, None]))
+
     alpha = np.empty_like(emissions)
     alpha[0] = start + emissions[0]
     for i in range(1, length):
-        alpha[i] = _logsumexp(alpha[i - 1][:, None] + trans, axis=0) + emissions[i]
+        prev = alpha[i - 1]
+        m = float(prev.max())
+        if np.isfinite(m):
+            s = np.exp(prev - m) @ exp_trans_col
+            if float(s.min()) > 1e-300:
+                alpha[i] = np.log(s) + (m + t_col_safe) + emissions[i]
+            else:
+                step = np.empty_like(prev)
+                good = s > 1e-300
+                if good.any():
+                    step[good] = np.log(s[good]) + (m + t_col_safe[good])
+                bad = ~good
+                step[bad] = _logsumexp(prev[:, None] + trans[:, bad], axis=0)
+                alpha[i] = step + emissions[i]
+        else:
+            alpha[i] = _logsumexp(prev[:, None] + trans, axis=0) + emissions[i]
+
     beta = np.empty_like(emissions)
     beta[-1] = end
     for i in range(length - 2, -1, -1):
-        beta[i] = _logsumexp(trans + (emissions[i + 1] + beta[i + 1])[None, :], axis=1)
+        nxt = emissions[i + 1] + beta[i + 1]
+        m = float(nxt.max())
+        if np.isfinite(m):
+            s = exp_trans_row @ np.exp(nxt - m)
+            if float(s.min()) > 1e-300:
+                beta[i] = np.log(s) + (m + t_row_safe)
+            else:
+                step = np.empty_like(nxt)
+                good = s > 1e-300
+                if good.any():
+                    step[good] = np.log(s[good]) + (m + t_row_safe[good])
+                bad = ~good
+                step[bad] = _logsumexp(trans[bad, :] + nxt[None, :], axis=1)
+                beta[i] = step
+        else:
+            beta[i] = _logsumexp(trans + nxt[None, :], axis=1)
+
     log_z = _logsumexp(alpha[-1] + end, axis=0)
     return np.exp(alpha + beta - log_z)
