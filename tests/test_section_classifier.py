@@ -406,6 +406,8 @@ class TestTrainedClassifierBranch:
                 ]
 
         monkeypatch.setattr(section_classifier, "_get_trained_model", lambda: FakeModel())
+        # The async wrapper short-circuits on a warm cache; start cold so the stub is used.
+        monkeypatch.setattr(section_classifier, "_model_cache", None)
         monkeypatch.setattr(
             Settings.ml,
             "section_classifier_model_id",
@@ -447,6 +449,8 @@ class TestTrainedClassifierBranch:
                 ]
 
         monkeypatch.setattr(section_classifier, "_get_trained_model", lambda: FakeModel())
+        # The async wrapper short-circuits on a warm cache; start cold so the stub is used.
+        monkeypatch.setattr(section_classifier, "_model_cache", None)
         monkeypatch.setattr(
             Settings.ml,
             "section_classifier_model_id",
