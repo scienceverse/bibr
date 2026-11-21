@@ -131,9 +131,7 @@ async def test_crossref_prefetch_mget_and_pipeline_and_expired_404():
         return {"message": {"items": [{"DOI": d, "title": [f"Fetched {d}"]} for d in dois]}}
 
     cr._request = fake_request
-    seeded = await cr.prefetch_works_by_doi(
-        ["10.1000/warm", "10.1000/cold", "10.1000/expired404"]
-    )
+    seeded = await cr.prefetch_works_by_doi(["10.1000/warm", "10.1000/cold", "10.1000/expired404"])
     assert seeded == 2
     assert sorted(requested) == ["10.1000/cold", "10.1000/expired404"]
     assert ops == {"mget": 1, "set": 0, "pipe_exec": 1}
@@ -380,9 +378,7 @@ async def test_upload_store_throttles_sweep_and_hashes_large_uploads(monkeypatch
         await store.close()
 
     # stale_after_seconds=0 still sweeps every call.
-    store0 = UploadStore.create(
-        max_size=1024, spool_memory_bytes=1024, stale_after_seconds=0
-    )
+    store0 = UploadStore.create(max_size=1024, spool_memory_bytes=1024, stale_after_seconds=0)
     sweeps0 = 0
     real_sweep0 = store0.sweep_stale
 

@@ -228,7 +228,9 @@ def feature_matrix(lines: list[LineRecord]) -> np.ndarray:
 class GeomLineTagger:
     """Loads a tagger bundle and segments reference lines; safe to share across threads."""
 
-    def __init__(self, path: str | Path, revision: str | None = None, *, probe: bool = True) -> None:
+    def __init__(
+        self, path: str | Path, revision: str | None = None, *, probe: bool = True
+    ) -> None:
         self.onnx_path, manifest_path, gate_path = tagger_bundle_files(path, revision)
         _check_manifest(_read_json(manifest_path), manifest_path)
         self.temperature, self._iso_x, self._iso_y, self.threshold = _check_gate(

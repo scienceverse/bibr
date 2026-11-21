@@ -194,12 +194,32 @@ def test_document_layer_complete_packed_matches_complete_unpack_bit_for_bit():
 
     packed_a = doc_harvest._pack(
         doc_harvest._PageDraft(
-            _mk_page(), codes, boxes, records, rec_src, rec_flags, rows, origins, loose, gflags, objs
+            _mk_page(),
+            codes,
+            boxes,
+            records,
+            rec_src,
+            rec_flags,
+            rows,
+            origins,
+            loose,
+            gflags,
+            objs,
         )
     )
     packed_b = doc_harvest._pack(
         doc_harvest._PageDraft(
-            _mk_page(), codes, boxes, records, rec_src, rec_flags, rows, origins, loose, gflags, objs
+            _mk_page(),
+            codes,
+            boxes,
+            records,
+            rec_src,
+            rec_flags,
+            rows,
+            origins,
+            loose,
+            gflags,
+            objs,
         )
     )
 
@@ -345,7 +365,14 @@ def test_merge_table_continuations_batched_concat_and_headerless_restore():
         section_id=1,
         caption="Table 1. Summary",
         page_number=1,
-        parts=[PaperTablePart(page_number=1, bbox=None, tbl_html="<table>1</table>", df=pd.DataFrame({"ColA": ["1"], "ColB": ["2"]}))],
+        parts=[
+            PaperTablePart(
+                page_number=1,
+                bbox=None,
+                tbl_html="<table>1</table>",
+                df=pd.DataFrame({"ColA": ["1"], "ColB": ["2"]}),
+            )
+        ],
     )
     t2 = PaperTable(
         table_id=2,
@@ -354,7 +381,14 @@ def test_merge_table_continuations_batched_concat_and_headerless_restore():
         section_id=1,
         caption="Table 1 (Continued)",
         page_number=2,
-        parts=[PaperTablePart(page_number=2, bbox=None, tbl_html="<table>2</table>", df=pd.DataFrame({"Col A": ["3"], "Col B": ["4"]}))],
+        parts=[
+            PaperTablePart(
+                page_number=2,
+                bbox=None,
+                tbl_html="<table>2</table>",
+                df=pd.DataFrame({"Col A": ["3"], "Col B": ["4"]}),
+            )
+        ],
     )
     t3 = PaperTable(
         table_id=3,
@@ -363,7 +397,14 @@ def test_merge_table_continuations_batched_concat_and_headerless_restore():
         section_id=1,
         caption="Table 1 (Continued)",
         page_number=3,
-        parts=[PaperTablePart(page_number=3, bbox=None, tbl_html="<table>3</table>", df=pd.DataFrame({"5": ["7"], "6": ["8"]}))],
+        parts=[
+            PaperTablePart(
+                page_number=3,
+                bbox=None,
+                tbl_html="<table>3</table>",
+                df=pd.DataFrame({"5": ["7"], "6": ["8"]}),
+            )
+        ],
     )
     merged, remap = merge_table_continuations_with_remap([t1, t2, t3])
     assert len(merged) == 1

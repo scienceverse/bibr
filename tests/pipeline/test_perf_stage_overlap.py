@@ -31,7 +31,9 @@ async def test_parse_segment_overlaps_parse_roles_and_tagger_and_preserves_warni
     rm.ensure_segmenter = MagicMock()
     rm.segmenter = MagicMock()
     rm.segmenter.segment_batch = AsyncMock(return_value=[])
-    ctx = PipelineContext(file_states=[fs], progress=NullProgress(), resources=rm, config=RunConfig())
+    ctx = PipelineContext(
+        file_states=[fs], progress=NullProgress(), resources=rm, config=RunConfig()
+    )
 
     parse_entered = threading.Event()
     roles_entered = asyncio.Event()
@@ -105,8 +107,14 @@ async def test_extract_metadata_overlaps_regex_equations_and_keeps_them_on_llm_t
 
     with (
         patch("bibr.extract.extractor.MetadataExtractor", return_value=fake_ext),
-        patch("bibr.extract.equation_extractor.EquationExtractor.extract_from_sentences", side_effect=fake_regex),
-        patch("bibr.extract.equation_extractor.EquationExtractor.extract_with_llm_fallback", side_effect=slow_llm_fb),
+        patch(
+            "bibr.extract.equation_extractor.EquationExtractor.extract_from_sentences",
+            side_effect=fake_regex,
+        ),
+        patch(
+            "bibr.extract.equation_extractor.EquationExtractor.extract_with_llm_fallback",
+            side_effect=slow_llm_fb,
+        ),
     ):
         await _extract_metadata_and_equations(
             contents, "h", False, MagicMock(), extract_equations=True, settings=settings
@@ -114,7 +122,9 @@ async def test_extract_metadata_overlaps_regex_equations_and_keeps_them_on_llm_t
 
     assert meta_saw_eq_running is True
     assert contents.equations == ["eq1"]
-    assert any(w.code == WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT for w in contents.processing_warnings)
+    assert any(
+        w.code == WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT for w in contents.processing_warnings
+    )
 
 
 @pytest.mark.asyncio
@@ -204,7 +214,9 @@ async def test_streaming_text_layer_scales_backhalf_to_max_concurrent_post_parse
         file_states=files,
         progress=NullProgress(),
         resources=rm,
-        config=RunConfig(ocr_backend=TEXT_LAYER_BACKEND, llm_backend="cloud", memory_mode="balanced"),
+        config=RunConfig(
+            ocr_backend=TEXT_LAYER_BACKEND, llm_backend="cloud", memory_mode="balanced"
+        ),
     )
     await stage.run(ctx)
     assert peak == 4

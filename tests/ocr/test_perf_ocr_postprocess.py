@@ -22,7 +22,13 @@ def _regex_reference(s: str, min_unit_len: int = 10, min_repeats: int = 10) -> s
     if max_unit_len < min_unit_len:
         return None
     pattern = re.compile(
-        r"(.{" + str(min_unit_len) + "," + str(max_unit_len) + r"}?)\1{" + str(min_repeats - 1) + ",}",
+        r"(.{"
+        + str(min_unit_len)
+        + ","
+        + str(max_unit_len)
+        + r"}?)\1{"
+        + str(min_repeats - 1)
+        + ",}",
         re.DOTALL,
     )
     match = pattern.search(search_s)
@@ -62,9 +68,9 @@ def test_find_consecutive_repeat_matches_regex_on_diverse_and_random_inputs() ->
         cases.append((s, min_u, min_r))
 
     for s, min_u, min_r in cases:
-        assert _find_consecutive_repeat(s, min_unit_len=min_u, min_repeats=min_r) == _regex_reference(
+        assert _find_consecutive_repeat(
             s, min_unit_len=min_u, min_repeats=min_r
-        )
+        ) == _regex_reference(s, min_unit_len=min_u, min_repeats=min_r)
 
 
 def test_find_consecutive_repeat_is_fast_on_large_html_table() -> None:

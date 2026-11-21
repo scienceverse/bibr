@@ -259,7 +259,9 @@ class TextSegmentation:
 class OnnxTextSegmenter:
     """Loads a text segmenter bundle and splits reference text; safe to share across threads."""
 
-    def __init__(self, path: str | Path, revision: str | None = None, *, probe: bool = True) -> None:
+    def __init__(
+        self, path: str | Path, revision: str | None = None, *, probe: bool = True
+    ) -> None:
         from tokenizers import Tokenizer
 
         from bibr.utils.onnx_providers import create_session

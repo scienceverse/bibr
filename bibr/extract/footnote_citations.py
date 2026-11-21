@@ -993,7 +993,9 @@ def collapse_repeats(refs: list, existing: list | None = None) -> list:
     for ref in refs:
         key = _work_key(ref)
         bkey = _work_bucket_key(key[0])
-        if bkey is not None and any(matches(key, other) for other in existing_buckets.get(bkey, ())):
+        if bkey is not None and any(
+            matches(key, other) for other in existing_buckets.get(bkey, ())
+        ):
             continue
         bucket = kept_buckets.get(bkey, ()) if bkey is not None else ()
         for index in bucket:

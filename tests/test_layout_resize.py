@@ -117,7 +117,9 @@ def test_preprocess_images_hwc_batched_is_bit_identical_for_v3_and_v4():
     )
     for i, img in enumerate(pages):
         chw = np.asarray(img, dtype=np.uint8).transpose(2, 0, 1)
-        ref = (mod.resize_bicubic_no_antialias(chw, 80, 64).astype(np.float32) * factor - mean) / std
+        ref = (
+            mod.resize_bicubic_no_antialias(chw, 80, 64).astype(np.float32) * factor - mean
+        ) / std
         assert np.array_equal(v3_out[i], ref)
 
     # V4 reference

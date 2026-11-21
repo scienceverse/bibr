@@ -367,9 +367,7 @@ def _sentence_starts(candidates, entry_text: str) -> list[int]:
     return starts
 
 
-def _sentence_at_offset(
-    candidates, entry_text: str, offset: int, starts: list[int] | None = None
-):
+def _sentence_at_offset(candidates, entry_text: str, offset: int, starts: list[int] | None = None):
     """Return the candidate sentence covering *offset* in *entry_text* (as JATS)."""
     if not candidates:
         return None

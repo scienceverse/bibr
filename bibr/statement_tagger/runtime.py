@@ -350,9 +350,7 @@ class StatementTagger:
             encoded = self._tokenizer.encode_batch([pairs[j] for j in idx])
             ids = np.asarray([e.ids for e in encoded], dtype=np.int64)
             mask = np.asarray([e.attention_mask for e in encoded], dtype=np.int64)
-            probs = self._session.run(
-                [OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask}
-            )[0]
+            probs = self._session.run([OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask})[0]
             out[idx] = np.asarray(probs, dtype=np.float32)
         return out
 

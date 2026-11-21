@@ -47,7 +47,9 @@ def test_doi_candidates_gate_handles_ascii_and_non_ascii_edge_cases():
         "text_id": 1,
     }
     # Pure ASCII prose without "/" or "10" returns empty fast
-    assert di._candidates_from_text("No identifier is present in this prose sentence.", **prov) == []
+    assert (
+        di._candidates_from_text("No identifier is present in this prose sentence.", **prov) == []
+    )
     # Unicode hyphen inside DOI bypasses ASCII fast gate and repairs properly
     assert di._candidates_from_text("DOI: 10.1234/abc\u2010123", **prov)
     # Control char inside 10. bypasses fast gate and repairs properly
@@ -56,13 +58,51 @@ def test_doi_candidates_gate_handles_ascii_and_non_ascii_edge_cases():
 
 def test_equation_prescan_and_glitch_guards_preserve_latex_and_glitches():
     ex = eq_mod.EquationExtractor()
-    sec = [PaperSection(section_id=1, header="Results", level=1, parent_section_id=0, section_type=CanonicalSection.RESULTS)]
+    sec = [
+        PaperSection(
+            section_id=1,
+            header="Results",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.RESULTS,
+        )
+    ]
     sents = [
-        PaperSentence(text_id=1, text="Plain prose with no math or numbers at all.", section_id=1, paragraph_id=0, page_number=1),
-        PaperSentence(text_id=2, text=r"We found $x \le 5$ and $t(28) = 3.1$.", section_id=1, paragraph_id=1, page_number=1),
-        PaperSentence(text_id=3, text="Glitched stat t(59) 5 0.66, p , .01.", section_id=1, paragraph_id=2, page_number=1),
-        PaperSentence(text_id=4, text="Dropped equals F(1, 208) 5.01, p 0.026.", section_id=1, paragraph_id=3, page_number=1),
-        PaperSentence(text_id=5, text="Cyrillic \u0440 < .05 and math \U0001d461(12) = 2.4.", section_id=1, paragraph_id=4, page_number=1),
+        PaperSentence(
+            text_id=1,
+            text="Plain prose with no math or numbers at all.",
+            section_id=1,
+            paragraph_id=0,
+            page_number=1,
+        ),
+        PaperSentence(
+            text_id=2,
+            text=r"We found $x \le 5$ and $t(28) = 3.1$.",
+            section_id=1,
+            paragraph_id=1,
+            page_number=1,
+        ),
+        PaperSentence(
+            text_id=3,
+            text="Glitched stat t(59) 5 0.66, p , .01.",
+            section_id=1,
+            paragraph_id=2,
+            page_number=1,
+        ),
+        PaperSentence(
+            text_id=4,
+            text="Dropped equals F(1, 208) 5.01, p 0.026.",
+            section_id=1,
+            paragraph_id=3,
+            page_number=1,
+        ),
+        PaperSentence(
+            text_id=5,
+            text="Cyrillic \u0440 < .05 and math \U0001d461(12) = 2.4.",
+            section_id=1,
+            paragraph_id=4,
+            page_number=1,
+        ),
     ]
     out = ex.extract_from_sentences(sents, sec, repair_glitches=True)
     text_ids = {eq.text_id for eq in out}
@@ -123,11 +163,61 @@ def test_footnote_first_sentence_break_matches_sentence_breaks_with_quotes():
 
 def test_footnote_collapse_repeats_exact_with_prefixes_and_single_word_titles():
     refs = [
-        SimpleNamespace(text_id=1, title="Hamlet", authors="Shakespeare, W.", year=1603, container=None, publisher=None, volume=None, first_page=None, doi=None),
-        SimpleNamespace(text_id=2, title="Hamlet", authors="Shakespeare, W.", year=1603, container="Folio", publisher="Blount", volume="1", first_page="1", doi=None),
-        SimpleNamespace(text_id=3, title="Modern History", authors="Smith, J.", year=2020, container=None, publisher=None, volume=None, first_page=None, doi=None),
-        SimpleNamespace(text_id=4, title="Modern History of Europe", authors="Smith, J.", year=2020, container="Oxford", publisher="OUP", volume=None, first_page="10", doi=None),
-        SimpleNamespace(text_id=5, title="Modern History of Asia", authors="Jones, A.", year=2020, container=None, publisher=None, volume=None, first_page=None, doi=None),
+        SimpleNamespace(
+            text_id=1,
+            title="Hamlet",
+            authors="Shakespeare, W.",
+            year=1603,
+            container=None,
+            publisher=None,
+            volume=None,
+            first_page=None,
+            doi=None,
+        ),
+        SimpleNamespace(
+            text_id=2,
+            title="Hamlet",
+            authors="Shakespeare, W.",
+            year=1603,
+            container="Folio",
+            publisher="Blount",
+            volume="1",
+            first_page="1",
+            doi=None,
+        ),
+        SimpleNamespace(
+            text_id=3,
+            title="Modern History",
+            authors="Smith, J.",
+            year=2020,
+            container=None,
+            publisher=None,
+            volume=None,
+            first_page=None,
+            doi=None,
+        ),
+        SimpleNamespace(
+            text_id=4,
+            title="Modern History of Europe",
+            authors="Smith, J.",
+            year=2020,
+            container="Oxford",
+            publisher="OUP",
+            volume=None,
+            first_page="10",
+            doi=None,
+        ),
+        SimpleNamespace(
+            text_id=5,
+            title="Modern History of Asia",
+            authors="Jones, A.",
+            year=2020,
+            container=None,
+            publisher=None,
+            volume=None,
+            first_page=None,
+            doi=None,
+        ),
     ]
     out = fc.collapse_repeats(refs)
     assert [r.text_id for r in out] == [1, 3, 5]
@@ -161,7 +251,19 @@ def test_affiliation_grounding_memoizes_repeated_affiliations(monkeypatch):
 
 
 def test_clean_text_content_late_guards_preserve_math_urls_and_spaced_digits():
-    assert ct.clean_text_content_late("Plain prose without specials.", from_ocr=True) == "Plain prose without specials."
-    assert ct.clean_text_content_late(r"Value $\alpha + \beta = 1$ at https://example.org/a_b_c.", from_ocr=True) == "Value α + β = 1 at https://example.org/a_b_c."
-    assert ct.clean_text_content_late("F ( 1, 2 6 )=1 7. 9 0 6", from_ocr=True) == "F ( 1, 2 6 )=1 7. 9 0 6" or re.search(r"17\.906|906", ct.clean_text_content_late("F ( 1, 2 6 )=1 7. 9 0 6", from_ocr=True))
+    assert (
+        ct.clean_text_content_late("Plain prose without specials.", from_ocr=True)
+        == "Plain prose without specials."
+    )
+    assert (
+        ct.clean_text_content_late(
+            r"Value $\alpha + \beta = 1$ at https://example.org/a_b_c.", from_ocr=True
+        )
+        == "Value α + β = 1 at https://example.org/a_b_c."
+    )
+    assert ct.clean_text_content_late(
+        "F ( 1, 2 6 )=1 7. 9 0 6", from_ocr=True
+    ) == "F ( 1, 2 6 )=1 7. 9 0 6" or re.search(
+        r"17\.906|906", ct.clean_text_content_late("F ( 1, 2 6 )=1 7. 9 0 6", from_ocr=True)
+    )
     assert ct.clean_text_content_late("Item 1 2 3 and 4", from_ocr=True) == "Item 123 and 4"

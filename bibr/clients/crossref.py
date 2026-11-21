@@ -424,9 +424,7 @@ class CrossrefClient:
         if redis_cache is not None and hasattr(redis_cache, "get_many"):
             key_by_doi = {doi: f"works:{doi.casefold()}" for doi in wanted}
             raw_hits = await redis_cache.get_many(list(key_by_doi.values()))
-            redis_hits = {
-                k: v for k, v in raw_hits.items() if not _is_expired_not_found(v)
-            }
+            redis_hits = {k: v for k, v in raw_hits.items() if not _is_expired_not_found(v)}
             if redis_hits:
                 l1_size = self._settings.crossref.cache_size
                 if l1_size > 0:

@@ -87,7 +87,9 @@ class BaseHttpOcrClient:
             allow_insecure_http=self._settings.ocr.allow_insecure_http,
         )
 
-        max_concurrent = max(1, int(getattr(self._settings.ocr, "max_concurrent_regions", 10) or 10))
+        max_concurrent = max(
+            1, int(getattr(self._settings.ocr, "max_concurrent_regions", 10) or 10)
+        )
         self._client = httpx.AsyncClient(
             headers=headers,
             timeout=httpx.Timeout(

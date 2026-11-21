@@ -38,7 +38,9 @@ def _dummy_contents(pdf_uri_links=None) -> PaperContents:
 
 
 def test_geom_tagger_short_circuits_line_stream_without_doi_links() -> None:
-    contents = _dummy_contents(pdf_uri_links=[{"page": 1, "uri": "https://example.org", "bbox": [0, 0, 10, 10]}])
+    contents = _dummy_contents(
+        pdf_uri_links=[{"page": 1, "uri": "https://example.org", "bbox": [0, 0, 10, 10]}]
+    )
     ex = ReferenceExtractor(contents, llm_client=MagicMock())
     ex._segmentation_attempts.append(
         ReferenceSegmentationAttempt("geom_tagger", ((0, 20),), 1, True, ("final",))
@@ -124,18 +126,57 @@ def test_map_bib_text_ids_handles_duplicates_and_taken_rows() -> None:
             )
         ],
         sentences=[
-            PaperSentence(text_id=10, text="Smith (2020). Shared Title Here. J1.", section_id=1, paragraph_id=1),
-            PaperSentence(text_id=20, text="Jones (2021). Shared Title Here. J2.", section_id=1, paragraph_id=2),
-            PaperSentence(text_id=30, text="Brown (2019). Unique Paper Title. J3.", section_id=1, paragraph_id=3),
+            PaperSentence(
+                text_id=10,
+                text="Smith (2020). Shared Title Here. J1.",
+                section_id=1,
+                paragraph_id=1,
+            ),
+            PaperSentence(
+                text_id=20,
+                text="Jones (2021). Shared Title Here. J2.",
+                section_id=1,
+                paragraph_id=2,
+            ),
+            PaperSentence(
+                text_id=30,
+                text="Brown (2019). Unique Paper Title. J3.",
+                section_id=1,
+                paragraph_id=3,
+            ),
         ],
         tables=[],
         links=[],
         sections_text="",
     )
     refs = [
-        PaperReference(bib_id=1, title="Shared Title Here", authors="Smith", year=2020, container="J1", volume="1", first_page="1"),
-        PaperReference(bib_id=2, title="Shared Title Here", authors="Jones", year=2021, container="J2", volume="2", first_page="2"),
-        PaperReference(bib_id=3, title="Unique Paper Title", authors="Brown", year=2019, container="J3", volume="3", first_page="3"),
+        PaperReference(
+            bib_id=1,
+            title="Shared Title Here",
+            authors="Smith",
+            year=2020,
+            container="J1",
+            volume="1",
+            first_page="1",
+        ),
+        PaperReference(
+            bib_id=2,
+            title="Shared Title Here",
+            authors="Jones",
+            year=2021,
+            container="J2",
+            volume="2",
+            first_page="2",
+        ),
+        PaperReference(
+            bib_id=3,
+            title="Unique Paper Title",
+            authors="Brown",
+            year=2019,
+            container="J3",
+            volume="3",
+            first_page="3",
+        ),
     ]
     _map_bib_text_ids(refs, contents)
     assert [r.text_id for r in refs] == [10, 20, 30]

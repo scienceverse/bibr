@@ -275,7 +275,11 @@ async def prefetch_enrichment(
             except Exception as e:  # noqa: BLE001 — must fall through to per-ref lookups
                 logger.debug("Crossref bulk DOI prefetch skipped: %s", e)
 
-        if resolver_client is not None and not resolver_authoritative and effective.crossref.bulk_doi_lookup:
+        if (
+            resolver_client is not None
+            and not resolver_authoritative
+            and effective.crossref.bulk_doi_lookup
+        ):
             # Non-authoritative resolver and Crossref bulk DOI prefetch are independent:
             # overlap their network round-trips concurrently.
             await asyncio.gather(_run_resolver_prefetch(), _run_crossref_prefetch())
@@ -1301,11 +1305,7 @@ def _best_title_candidate(
         if ref_year and ref_year > 0 and cand.year and abs(ref_year - cand.year) > 2:
             score *= 0.5
         cand_families = [a.family for a in cand.authors if a.family]
-        if (
-            ref_authors
-            and cand_families
-            and not _families_overlap(ref_authors, cand_families)
-        ):
+        if ref_authors and cand_families and not _families_overlap(ref_authors, cand_families):
             score *= 0.7
         if score > best_score:
             best_score = score

@@ -2139,7 +2139,9 @@ def _ungrounded_affiliation_components(
     """
     total = 0
     missing: list[str] = []
-    resolved_folded: str | None = folded_document_key if isinstance(folded_document_key, str) else None
+    resolved_folded: str | None = (
+        folded_document_key if isinstance(folded_document_key, str) else None
+    )
     for component in part.split(","):
         component = component.strip()
         if not _AFFILIATION_ORG_RE.search(component):

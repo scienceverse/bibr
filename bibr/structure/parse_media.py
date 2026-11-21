@@ -1820,7 +1820,9 @@ class MediaHandlersMixin:
             frames = pending_frames.get(pid)
             if frames is None:
                 frames = pending_frames[pid] = [previous.df]
-            pieces = None if compatible_columns else _continuation_pieces(previous.df.columns, table.df)
+            pieces = (
+                None if compatible_columns else _continuation_pieces(previous.df.columns, table.df)
+            )
             if pieces is not None:
                 frames.extend(pieces)
             else:

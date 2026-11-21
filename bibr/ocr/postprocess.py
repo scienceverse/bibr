@@ -49,6 +49,7 @@ def _strip_trailing_tabs(s: str) -> str:
         return s[:end] + "\n"
     return s
 
+
 # Punctuation that attaches to the token before it: a space in front of it
 # would split "(1)–(3)" or "(a), (b)".
 _ATTACHED_PUNCTUATION = frozenset(",.;:!?)]}…-–—_^/\\%")
@@ -166,7 +167,11 @@ def _find_consecutive_repeat(
                     ):
                         l_start -= 1
                     # If the match extends back to g - step, g - step already found it.
-                    if l_start == l_limit and l_limit > 0 and search_s[l_limit - 1] == search_s[l_limit - 1 + unit_len]:
+                    if (
+                        l_start == l_limit
+                        and l_limit > 0
+                        and search_s[l_limit - 1] == search_s[l_limit - 1 + unit_len]
+                    ):
                         pos = search_s.find(anchor, pos + 1, p_end)
                         continue
                     needed_r = l_start + min_repeats * unit_len
@@ -194,7 +199,11 @@ def _find_consecutive_repeat(
                         and search_s[l_start - 1] == search_s[l_start - 1 + unit_len]
                     ):
                         l_start -= 1
-                    if l_start == l_limit and l_limit > 0 and search_s[l_limit - 1] == search_s[l_limit - 1 + unit_len]:
+                    if (
+                        l_start == l_limit
+                        and l_limit > 0
+                        and search_s[l_limit - 1] == search_s[l_limit - 1 + unit_len]
+                    ):
                         pos = search_s.find(anchor, pos + 1, p_end)
                         continue
                     needed_r = l_start + 2 * unit_len

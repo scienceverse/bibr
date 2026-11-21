@@ -2060,9 +2060,7 @@ def _distinct_count(segments: list[str]) -> int:
         bucket = buckets[segment_years]
         if (
             not bucket
-            or process.extractOne(
-                key, bucket, scorer=fuzz.ratio, score_cutoff=_REPEAT_MIN_RATIO
-            )
+            or process.extractOne(key, bucket, scorer=fuzz.ratio, score_cutoff=_REPEAT_MIN_RATIO)
             is None
         ):
             distinct += 1

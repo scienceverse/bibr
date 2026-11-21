@@ -850,9 +850,7 @@ def read_text_layer(
             if slot >= len(layouts):
                 break
             with pdfium_lock:
-                page = _load_page(
-                    doc, page_index, read_ocr_layer=read_ocr_layer, defer_lines=True
-                )
+                page = _load_page(doc, page_index, read_ocr_layer=read_ocr_layer, defer_lines=True)
             page._materialize()
             regions = layouts[slot]
             verdict = _read_page(page, regions, result, min_printable_ratio=min_printable_ratio)

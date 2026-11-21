@@ -500,7 +500,9 @@ def _heading_level(
     level = _heading_level_from_style(traits.name)
     if level is not None:
         if traits.name in _TITLE_STYLES:
-            resolved_text = text_getter() if text is None and text_getter is not None else (text or "")
+            resolved_text = (
+                text_getter() if text is None and text_getter is not None else (text or "")
+            )
             if starts_as_caption(resolved_text):
                 return None
         return level

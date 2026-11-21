@@ -497,9 +497,7 @@ def preprocess_images(
     def _process_one(i: int) -> None:
         hwc = np.asarray(rgb_images[i], dtype=np.uint8)
         if rescale_before_resize:
-            resized = _resize_float_from_u8_hwc(
-                hwc, out_h, out_w, factor, parallel=inner_parallel
-            )
+            resized = _resize_float_from_u8_hwc(hwc, out_h, out_w, factor, parallel=inner_parallel)
             np.clip(resized, np.float32(0.0), upper, out=resized)
             chw = resized.transpose(2, 0, 1)
             batch[i] = (chw - mean) / std

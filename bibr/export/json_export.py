@@ -940,9 +940,7 @@ def _export_paper_payload(
                         editor=_authors_to_dicts(m.editors),
                         publisher=m.publisher,
                         year=m.year,
-                        published_date=_conformed(
-                            m.date, _ISO_DATE_RE, "bib_match.published_date"
-                        ),
+                        published_date=_conformed(m.date, _ISO_DATE_RE, "bib_match.published_date"),
                         container=m.container,
                         volume=m.volume,
                         issue=m.issue,

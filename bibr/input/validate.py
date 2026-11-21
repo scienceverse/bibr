@@ -202,7 +202,9 @@ def _inspect_docx(file_content: bytes) -> tuple[bool, bool]:
         with zipfile.ZipFile(io.BytesIO(file_content)) as zf:
             entries = zf.infolist()
             encrypted = any(info.flag_bits & 0x1 for info in entries)
-            doc_info = next((info for info in entries if info.filename == "word/document.xml"), None)
+            doc_info = next(
+                (info for info in entries if info.filename == "word/document.xml"), None
+            )
             if doc_info is None:
                 return True, encrypted
             if encrypted:

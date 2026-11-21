@@ -1055,9 +1055,7 @@ def _complete_packed(packed: _PackedDraft) -> tuple[Page, list[RoleTag]]:
         baseline = (-b * ox + a * oy) / norm if norm > 0 else oy
         key = obj_keys[row]
         if cur_start >= 0 and cur_key is not None:
-            same_size = abs(size - cur_size) <= _SPAN_SIZE_TOLERANCE * max(
-                abs(size), abs(cur_size)
-            )
+            same_size = abs(size - cur_size) <= _SPAN_SIZE_TOLERANCE * max(abs(size), abs(cur_size))
             same_baseline = abs(baseline - cur_baseline) <= _SPAN_BASELINE_TOLERANCE * max(
                 abs(cur_size), 1e-6
             )

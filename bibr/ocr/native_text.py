@@ -916,7 +916,9 @@ def _page_char_records(
     meta: list[tuple[int, int]] | None = None
     record_raw = trace is not None or raw_out is not None
     codes: list[int] = [0] * n_chars if record_raw else []
-    char_boxes: list[tuple[float, float, float, float] | None] = [None] * n_chars if record_raw else []
+    char_boxes: list[tuple[float, float, float, float] | None] = (
+        [None] * n_chars if record_raw else []
+    )
     if trace is not None:
         meta = []
         trace.codes = codes
