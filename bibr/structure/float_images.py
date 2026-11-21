@@ -67,9 +67,8 @@ def composite_panel_image(parts: Sequence[PaperFigurePart]) -> str | None:
 
     canvas = Image.new("RGB", (width, height), "white")
     for img, (x1, y1, _x2, _y2) in zip(images, boxes, strict=True):
-        canvas.paste(
-            img.convert("RGB"), (round((x1 - left) * scale_x), round((y1 - top) * scale_y))
-        )
+        src = img if img.mode == "RGB" else img.convert("RGB")
+        canvas.paste(src, (round((x1 - left) * scale_x), round((y1 - top) * scale_y)))
     fmt = "PNG" if images[0].format == "PNG" else "JPEG"
     out = io.BytesIO()
     canvas.save(out, format=fmt, **({"quality": 90} if fmt == "JPEG" else {}))

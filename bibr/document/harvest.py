@@ -68,6 +68,7 @@ from bibr.ocr import native_text as nt
 _NAN = float("nan")
 _NAN_BOX = (_NAN, _NAN, _NAN, _NAN)
 _IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+_ASCII_SPACE = tuple(chr(c).isspace() for c in range(128))
 
 # pdfium functions the harvest reads with; a build without one leaves its
 # fields unread and names it in Presence.missing_apis.
@@ -800,11 +801,12 @@ def _pack(draft: _PageDraft) -> _PackedDraft:
     rec_cp: list[int] = []
     rec_text: dict[int, str] = {}
     for index, record in enumerate(draft.records):
-        if len(record[0]) == 1:
-            rec_cp.append(ord(record[0]))
+        ch = record[0]
+        if len(ch) == 1:
+            rec_cp.append(ord(ch))
         else:
-            rec_cp.append(0)
-            rec_text[index] = record[0]
+            rec_cp.append(ord(ch[0]) if ch else 0)
+            rec_text[index] = ch
     objects = draft.objects
     return _PackedDraft(
         page=draft.page,
@@ -928,6 +930,258 @@ def _complete(draft: _PageDraft) -> tuple[Page, list[RoleTag]]:
     return built, tags
 
 
+def _complete_packed(packed: _PackedDraft) -> tuple[Page, list[RoleTag]]:
+    """Build columns, spans, lines and script tags directly from a packed draft.
+
+    Avoids the ``_unpack`` round-trip to Python lists and the subsequent
+    reconstruction of every numpy column in ``PageColumns``.
+    """
+    built = packed.page
+    n_chars = int(packed.codes.size)
+    if n_chars == 0:
+        return built, []
+
+    rec_cp_list = packed.rec_cp.tolist()
+    rec_text = packed.rec_text
+    rec_newline_list = packed.rec_newline.tolist()
+    rec_src_list = packed.record_src.tolist()
+    rows_list = packed.rows.tolist()
+    gflags_list = packed.gflags.tolist()
+    boxes_arr = packed.boxes
+    bx0_list = boxes_arr[:, 0].tolist()
+    by0_list = boxes_arr[:, 1].tolist()
+    bx1_list = boxes_arr[:, 2].tolist()
+    by1_list = boxes_arr[:, 3].tolist()
+    origins_list = packed.origins.tolist()
+
+    objs = packed.objects
+    n_obj = int(objs["font"].size)
+    obj_font_list = objs["font"].tolist()
+    obj_fill_list = objs["fill"].tolist()
+    obj_mode_list = objs["mode"].tolist()
+    obj_mcid_list = objs["mcid"].tolist()
+    obj_size_eff_list = objs["size_eff"].tolist()
+    obj_matrix_list = objs["matrix"].tolist()
+
+    # Precompute per-object span key and baseline basis vectors once per object
+    # rather than recomputing math.hypot and allocating a 4-tuple per glyph.
+    obj_keys = [
+        (obj_font_list[r], obj_fill_list[r], obj_mode_list[r], obj_mcid_list[r])
+        for r in range(n_obj)
+    ]
+    obj_basis: list[tuple[float, float, float]] = []
+    for r in range(n_obj):
+        a, b = obj_matrix_list[r][0], obj_matrix_list[r][1]
+        obj_basis.append((a, b, math.hypot(a, b)))
+
+    ascii_space = _ASCII_SPACE
+    has_rec_text = bool(rec_text)
+    n_rec = len(rec_cp_list)
+
+    # Track per-record whitespace once so _script_tags does not re-check it.
+    rec_is_space = [False] * n_rec
+    spans: list[tuple[int, int, int, Box, float]] = []
+    lines: list[tuple[int, int]] = []
+    line_start = 0
+
+    cur_start = -1
+    cur_obj = -1
+    cur_key: tuple[int, int, int, int] | None = None
+    cur_size = 0.0
+    cur_baseline = 0.0
+    has_span_box = False
+    sx0 = sy0 = sx1 = sy1 = 0.0
+
+    has_prev_box = False
+    px0 = py0 = 0.0
+
+    def close_span(end: int) -> None:
+        nonlocal cur_start, cur_obj, cur_key, cur_size, cur_baseline, has_span_box
+        if cur_start >= 0 and end > cur_start:
+            bbox = (sx0, sy0, sx1, sy1) if has_span_box else _NAN_BOX
+            spans.append((cur_start, end, cur_obj, bbox, cur_baseline))
+        cur_start = -1
+        cur_obj = -1
+        cur_key = None
+        cur_size = 0.0
+        cur_baseline = 0.0
+        has_span_box = False
+
+    def close_line(end: int) -> None:
+        nonlocal line_start
+        close_span(end)
+        if len(spans) > line_start:
+            lines.append((line_start, len(spans)))
+        line_start = len(spans)
+
+    for index in range(n_rec):
+        if rec_newline_list[index]:
+            rec_is_space[index] = True
+            close_line(index)
+            has_prev_box = False
+            continue
+        if has_rec_text and index in rec_text:
+            is_sp = rec_text[index].isspace()
+        else:
+            cp = rec_cp_list[index]
+            is_sp = ascii_space[cp] if cp < 128 else chr(cp).isspace()
+        if is_sp:
+            rec_is_space[index] = True
+        src = rec_src_list[index]
+        row = rows_list[src] if src >= 0 else -1
+        if is_sp or row < 0:
+            if cur_start < 0:
+                cur_start = index
+            continue
+        has_box = not (gflags_list[src] & GLYPH_NO_BOX)
+        if has_box:
+            bx0 = bx0_list[src]
+            by0 = by0_list[src]
+            bx1 = bx1_list[src]
+            by1 = by1_list[src]
+            if has_prev_box and by1 <= py0 and bx0 < px0:
+                close_line(index)
+            has_prev_box = True
+            px0 = bx0
+            py0 = by0
+        size = obj_size_eff_list[row]
+        a, b, norm = obj_basis[row]
+        ox = origins_list[2 * src]
+        oy = origins_list[2 * src + 1]
+        baseline = (-b * ox + a * oy) / norm if norm > 0 else oy
+        key = obj_keys[row]
+        if cur_start >= 0 and cur_key is not None:
+            same_size = abs(size - cur_size) <= _SPAN_SIZE_TOLERANCE * max(
+                abs(size), abs(cur_size)
+            )
+            same_baseline = abs(baseline - cur_baseline) <= _SPAN_BASELINE_TOLERANCE * max(
+                abs(cur_size), 1e-6
+            )
+            if key != cur_key or not same_size or not same_baseline:
+                close_span(index)
+        if cur_start < 0:
+            cur_start = index
+        if cur_key is None:
+            cur_key = key
+            cur_obj = row
+            cur_size = size
+            cur_baseline = baseline
+        if has_box:
+            if not has_span_box:
+                sx0, sy0, sx1, sy1 = bx0, by0, bx1, by1
+                has_span_box = True
+            else:
+                if bx0 < sx0:
+                    sx0 = bx0
+                if by0 < sy0:
+                    sy0 = by0
+                if bx1 > sx1:
+                    sx1 = bx1
+                if by1 > sy1:
+                    sy1 = by1
+    close_line(n_rec)
+
+    # Script tags (superscript / subscript) using cached rec_is_space.
+    page_index = built.index
+    tags: list[RoleTag] = []
+    for line_index, (first, end) in enumerate(lines):
+        weighted: list[tuple[int, float, float, int]] = []
+        for span_index in range(first, end):
+            start, stop, row, _bbox, baseline = spans[span_index]
+            if row < 0 or not math.isfinite(baseline):
+                continue
+            glyphs = 0
+            for k in range(start, stop):
+                if not rec_is_space[k]:
+                    glyphs += 1
+            size = obj_size_eff_list[row]
+            if glyphs and math.isfinite(size) and size > 0:
+                weighted.append((span_index, size, baseline, glyphs))
+        if len(weighted) < 2:
+            continue
+        sizes: Counter[float] = Counter()
+        for _span, size, _baseline, glyphs in weighted:
+            sizes[round(size, 2)] += glyphs
+        dominant = max(sizes.items(), key=lambda item: (item[1], item[0]))[0]
+        base = _weighted_median(
+            [
+                (baseline, glyphs)
+                for _span, size, baseline, glyphs in weighted
+                if abs(round(size, 2) - dominant) <= _SPAN_SIZE_TOLERANCE * dominant
+            ]
+        )
+        for span_index, size, baseline, _glyphs in weighted:
+            if size > _SCRIPT_MAX_SIZE_RATIO * dominant:
+                continue
+            shift = (baseline - base) / dominant
+            if shift >= _SUPERSCRIPT_MIN_RAISE:
+                role = "superscript"
+            elif shift <= -_SUBSCRIPT_MIN_DROP:
+                role = "subscript"
+            else:
+                continue
+            tags.append(
+                RoleTag(
+                    ids.span(page_index, span_index),
+                    role,
+                    Decided(
+                        SCRIPT_RULE.component,
+                        SCRIPT_RULE.version,
+                        score=round(shift, 4),
+                        calibrated=False,
+                        evidence=(ids.line(page_index, line_index),),
+                    ),
+                )
+            )
+
+    line_boxes = [
+        _union([spans[k][3] for k in range(first, end) if not math.isnan(spans[k][3][0])])
+        for first, end in lines
+    ]
+    built.cols = PageColumns(
+        cp=packed.codes,
+        box=packed.boxes.astype(np.dtype(COLUMN_DTYPES["box"]), copy=False).reshape(n_chars, 4),
+        loose=packed.loose.astype(np.dtype(COLUMN_DTYPES["loose"]), copy=False).reshape(n_chars, 4),
+        origin=packed.origins.astype(np.dtype(COLUMN_DTYPES["origin"]), copy=False).reshape(
+            n_chars, 2
+        ),
+        obj=packed.rows,
+        gflags=packed.gflags,
+        obj_font=objs["font"],
+        obj_tf=objs["tf"].astype(np.dtype(COLUMN_DTYPES["obj_tf"]), copy=False),
+        obj_size_eff=objs["size_eff"].astype(np.dtype(COLUMN_DTYPES["obj_size_eff"]), copy=False),
+        obj_matrix=objs["matrix"]
+        .astype(np.dtype(COLUMN_DTYPES["obj_matrix"]), copy=False)
+        .reshape(n_obj, 4),
+        obj_fill=objs["fill"],
+        obj_stroke=objs["stroke"],
+        obj_render_mode=objs["mode"],
+        obj_mcid=objs["mcid"],
+        obj_artifact=objs["artifact"],
+        obj_flags=objs["flags"],
+        rec_cp=packed.rec_cp,
+        rec_cx=packed.rec_cx.astype(np.dtype(COLUMN_DTYPES["rec_cx"]), copy=False),
+        rec_cy=packed.rec_cy.astype(np.dtype(COLUMN_DTYPES["rec_cy"]), copy=False),
+        rec_newline=packed.rec_newline,
+        rec_src=packed.record_src,
+        rec_flags=packed.record_flags,
+        span_rec=_array([(span[0], span[1]) for span in spans], "span_rec", (len(spans), 2)),
+        span_obj=_array([span[2] for span in spans], "span_obj"),
+        span_bbox=_array([span[3] for span in spans], "span_bbox", (len(spans), 4)),
+        span_baseline=_array([span[4] for span in spans], "span_baseline"),
+        line_span=_array(lines, "line_span", (len(lines), 2)),
+        line_bbox=_array(line_boxes, "line_bbox", (len(lines), 4)),
+        line_block=np.full(len(lines), -1, dtype=np.dtype(COLUMN_DTYPES["line_block"])),
+        rec_text=rec_text,
+    )
+    return built, tags
+
+
+_DEFAULT_SPANS_AND_LINES = _spans_and_lines
+_DEFAULT_SCRIPT_TAGS = _script_tags
+_DEFAULT_COMPLETE = _complete
+
+
 class LayerBuilder:
     """Collects a document's pages into a :class:`DocumentLayer`.
 
@@ -937,9 +1191,17 @@ class LayerBuilder:
     is released.
     """
 
-    def __init__(self, pdf_bytes: bytes, budget: RenderBudget | None) -> None:
+    def __init__(
+        self,
+        pdf_bytes: bytes,
+        budget: RenderBudget | None,
+        *,
+        source_sha256: str | None = None,
+    ) -> None:
         self.version = pdfium_version()
-        self.source_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+        self.source_sha256 = (
+            source_sha256 if source_sha256 is not None else hashlib.sha256(pdf_bytes).hexdigest()
+        )
         self.budget = budget
         self.fonts = FontTable()
         # Drafted pages, and the pages that failed before a draft, in page order.
@@ -1260,7 +1522,14 @@ class LayerBuilder:
                 pages.append(packed)
                 continue
             try:
-                built, tags = _complete(_unpack(packed))
+                if (
+                    _spans_and_lines is _DEFAULT_SPANS_AND_LINES
+                    and _script_tags is _DEFAULT_SCRIPT_TAGS
+                    and _complete is _DEFAULT_COMPLETE
+                ):
+                    built, tags = _complete_packed(packed)
+                else:
+                    built, tags = _complete(_unpack(packed))
             except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
                 key = f"harvest:{packed.page.index}"
                 self.errors[key] = _error_text(exc)

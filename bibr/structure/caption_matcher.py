@@ -245,6 +245,34 @@ def _maximum_weight_assignment(rows: list[dict[int, float]], column_count: int) 
     row_count = len(rows)
     if row_count == 0:
         return []
+    # Exact fast path: when every row is non-empty, has a strictly unique
+    # positive maximum-weight column, and no two rows claim the same column,
+    # the global optimum is strictly unique at every index. (When empty rows
+    # exist, their zero-weight dummy permutation depends on Hungarian's
+    # augmenting order, so we keep exact parity via the full solver below.)
+    if all(rows):
+        claimed_best: set[int] = set()
+        fast_selected: list[int] = []
+        uncontested = True
+        for row in rows:
+            best_col = -1
+            best_val = 0.0
+            tied = False
+            for col, val in row.items():
+                if val > best_val:
+                    best_val = val
+                    best_col = col
+                    tied = False
+                elif val == best_val and best_col >= 0:
+                    tied = True
+            if best_col < 0 or tied or best_col in claimed_best:
+                uncontested = False
+                break
+            claimed_best.add(best_col)
+            fast_selected.append(best_col)
+        if uncontested:
+            return fast_selected
+
     # The caller appends one zero-weight dummy column per row, so rows <= columns.
     # Column 0 is the algorithm's virtual start column.
     width = column_count + 1
@@ -257,27 +285,39 @@ def _maximum_weight_assignment(rows: list[dict[int, float]], column_count: int) 
     potentials_cols = np.zeros(width)
     matched_row = np.zeros(width, dtype=np.intp)
     predecessor = np.zeros(width, dtype=np.intp)
-    cost = np.empty(width)
+    cost = np.empty(width, dtype=np.float64)
+    min_value = np.empty(width, dtype=np.float64)
+    used = np.empty(width, dtype=bool)
+    not_used = np.empty(width, dtype=bool)
+    reduced = np.empty(width, dtype=np.float64)
+    improved = np.empty(width, dtype=bool)
+    candidates = np.empty(width, dtype=np.float64)
     for row in range(1, row_count + 1):
         matched_row[0] = row
-        min_value = np.full(width, np.inf)
-        used = np.zeros(width, dtype=bool)
+        min_value.fill(np.inf)
+        used.fill(False)
         column = 0
         while True:
             used[column] = True
             current_row = matched_row[column]
             cost.fill(-0.0)
-            cost[row_columns[current_row - 1]] = row_costs[current_row - 1]
-            reduced = cost - potentials_rows[current_row] - potentials_cols
-            improved = ~used & (reduced < min_value)
+            cols_r = row_columns[current_row - 1]
+            if cols_r.size:
+                cost[cols_r] = row_costs[current_row - 1]
+            np.subtract(cost, potentials_rows[current_row], out=reduced)
+            np.subtract(reduced, potentials_cols, out=reduced)
+            np.logical_not(used, out=not_used)
+            np.less(reduced, min_value, out=improved)
+            np.logical_and(not_used, improved, out=improved)
             np.copyto(min_value, reduced, where=improved)
             np.copyto(predecessor, column, where=improved)
-            candidates = np.where(used, np.inf, min_value)
+            np.copyto(candidates, min_value)
+            candidates[used] = np.inf
             next_column = int(candidates.argmin())
             delta = candidates[next_column]
             potentials_rows[matched_row[used]] += delta
             np.subtract(potentials_cols, delta, out=potentials_cols, where=used)
-            np.subtract(min_value, delta, out=min_value, where=~used)
+            np.subtract(min_value, delta, out=min_value, where=not_used)
             column = next_column
             if matched_row[column] == 0:
                 break
@@ -428,10 +468,39 @@ def assign_captions(
             row = {}
         edges.append(row)
 
-    selected = _maximum_weight_assignment(
-        [{column: edge.score for column, edge in row.items()} for row in edges],
-        len(ordered_targets) + len(ordered_captions),
-    )
+    # Exact fast path for assign_captions: empty rows never receive a target
+    # regardless of which dummy column Hungarian assigns them, so if every
+    # non-empty row has a strictly unique positive best target and no two
+    # claim the same target, the optimal caption assignment is unique.
+    fast_selected: list[int] | None = [-1] * len(edges)
+    claimed_targets: set[int] = set()
+    for row_idx, row in enumerate(edges):
+        if not row:
+            continue
+        best_col = -1
+        best_val = 0.0
+        tied = False
+        for col, edge in row.items():
+            val = edge.score
+            if val > best_val:
+                best_val = val
+                best_col = col
+                tied = False
+            elif val == best_val and best_col >= 0:
+                tied = True
+        if best_col < 0 or tied or best_col in claimed_targets:
+            fast_selected = None
+            break
+        claimed_targets.add(best_col)
+        fast_selected[row_idx] = best_col
+
+    if fast_selected is not None:
+        selected = fast_selected
+    else:
+        selected = _maximum_weight_assignment(
+            [{column: edge.score for column, edge in row.items()} for row in edges],
+            len(ordered_targets) + len(ordered_captions),
+        )
     assignments: list[CaptionAssignment] = []
     for caption_index, caption in enumerate(ordered_captions):
         column = selected[caption_index]

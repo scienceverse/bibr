@@ -191,45 +191,30 @@ def _check_epub_corruption(file_content: bytes) -> tuple[bool, object | None]:
     return False, document
 
 
-def _check_docx_corruption(file_content: bytes) -> bool:
-    """Check if a DOCX file appears corrupted.
-
-    A DOCX is a zip archive containing ``word/document.xml``. Truncated
-    archives, non-zip bytes, zips without the wordprocessing part
-    (e.g. an xlsx renamed to .docx), and archives whose declared
-    uncompressed sizes exceed sane ceilings (zip bombs) are all flagged
-    so they fail at validation rather than deep in the parse stage.
-
-    Args:
-        file_content: Raw DOCX bytes.
-
-    Returns:
-        True if the file appears corrupted.
-    """
+def _inspect_docx(file_content: bytes) -> tuple[bool, bool]:
+    """Return ``(is_corrupted, is_encrypted)`` for DOCX input in a single ZIP open."""
     import io
 
     if file_content.startswith(_CFB_MAGIC):
-        # Encrypted container is handled by the encryption check; a CFB
-        # without it is a legacy binary .doc renamed to .docx — unparseable.
-        return not _cfb_has_encrypted_package(file_content)
+        has_enc = _cfb_has_encrypted_package(file_content)
+        return (not has_enc), has_enc
     try:
         with zipfile.ZipFile(io.BytesIO(file_content)) as zf:
-            if "word/document.xml" not in zf.namelist():
-                return True
             entries = zf.infolist()
-            if any(info.flag_bits & 0x1 for info in entries):
-                # Zip-level member encryption. The archive is intact and
-                # readable-with-a-password, so it is not corrupt — return
-                # False and let _check_docx_encryption own the classification
-                # (the pipeline reports is_corrupted before is_encrypted).
-                return False
+            encrypted = any(info.flag_bits & 0x1 for info in entries)
+            doc_info = next((info for info in entries if info.filename == "word/document.xml"), None)
+            if doc_info is None:
+                return True, encrypted
+            if encrypted:
+                # Zip-level member encryption: intact archive, not corrupt.
+                return False, True
             if not only_standard_methods(zf):
                 logger.warning("DOCX uses a compression method OPC does not permit")
-                return True
+                return True, False
             if len(entries) > _DOCX_MAX_ENTRIES:
                 logger.warning("DOCX contains too many archive entries: %d", len(entries))
-                return True
-            document_size = zf.getinfo("word/document.xml").file_size
+                return True, False
+            document_size = doc_info.file_size
             total_size = sum(info.file_size for info in entries)
             total_compressed = sum(info.compress_size for info in entries)
             compression_ratio = total_size / max(total_compressed, 1)
@@ -246,33 +231,62 @@ def _check_docx_corruption(file_content: bytes) -> bool:
                     total_compressed,
                     compression_ratio,
                 )
-                return True
-            # The declared sizes above come from the attacker-controlled
-            # central directory, so confirm document.xml's *real* decompressed
-            # size too. CPython already truncates member output at the declared
-            # file_size and raises BadZipFile on the CRC mismatch a lying
-            # header causes, so this pass is defense in depth: it keeps the
-            # rejection at validation (rather than deep in the parse stage)
-            # however the archive is read downstream.
+                return True, False
             if not uncompressed_size_within(
                 zf, "word/document.xml", max_bytes=_DOCX_DOCUMENT_XML_MAX_BYTES
             ):
                 logger.warning("DOCX document.xml exceeds real-byte expansion limit")
-                return True
-            return False
+                return True, False
+            return False, False
     except zipfile.BadZipFile:
-        return True
+        return True, False
     except (RuntimeError, OSError, EOFError, ValueError, zlib.error):
-        # Reading a member — not just opening the archive — can fail in ways
-        # BadZipFile does not cover: zipfile raises RuntimeError for a
-        # password-protected entry and NotImplementedError (a RuntimeError)
-        # for a compression method it cannot inflate, and a truncated or
-        # damaged deflate stream surfaces as zlib.error or EOFError from the
-        # streaming size check. Every one of them means the archive is
-        # unreadable, which is exactly what this function reports; letting
-        # them escape crashed validation instead of classifying the file.
         logger.warning("DOCX archive could not be read", exc_info=True)
-        return True
+        return True, False
+
+
+def _check_docx_corruption(file_content: bytes) -> bool:
+    """Check if a DOCX file appears corrupted.
+
+    A DOCX is a zip archive containing ``word/document.xml``. Truncated
+    archives, non-zip bytes, zips without the wordprocessing part
+    (e.g. an xlsx renamed to .docx), and archives whose declared
+    uncompressed sizes exceed sane ceilings (zip bombs) are all flagged
+    so they fail at validation rather than deep in the parse stage.
+
+    Args:
+        file_content: Raw DOCX bytes.
+
+    Returns:
+        True if the file appears corrupted.
+    """
+    corrupted, _ = _inspect_docx(file_content)
+    return corrupted
+
+
+def _inspect_jats_root_with_tree(file_content: bytes) -> tuple[bool, str, int, object | None]:
+    """Return ``(is_corrupted, effective_root, article_children, parsed_root)`` for XML input."""
+    from lxml import etree
+
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
+    try:
+        root = etree.fromstring(file_content, parser=parser)
+    except Exception:
+        return True, "", 0, None
+
+    def _localname(el) -> str:
+        tag = el.tag
+        return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+    localname = _localname(root)
+    if localname != "pmc-articleset":
+        return False, localname, 0, root
+    articles = [
+        child for child in root if isinstance(child.tag, str) and _localname(child) == "article"
+    ]
+    if len(articles) == 1:
+        return False, "article", 1, articles[0]
+    return False, "pmc-articleset", len(articles), None
 
 
 def _inspect_jats_root(file_content: bytes) -> tuple[bool, str, int]:
@@ -284,27 +298,8 @@ def _inspect_jats_root(file_content: bytes) -> tuple[bool, str, int]:
     of ``<article>`` children keeps the ``pmc-articleset`` root and reports
     the count, so callers reject multi-article sets with a specific message.
     """
-    from lxml import etree
-
-    parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
-    try:
-        root = etree.fromstring(file_content, parser=parser)
-    except Exception:
-        return True, "", 0
-
-    def _localname(el) -> str:
-        tag = el.tag
-        return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
-
-    localname = _localname(root)
-    if localname != "pmc-articleset":
-        return False, localname, 0
-    articles = [
-        child for child in root if isinstance(child.tag, str) and _localname(child) == "article"
-    ]
-    if len(articles) == 1:
-        return False, "article", 1
-    return False, "pmc-articleset", len(articles)
+    corrupted, localname, count, _ = _inspect_jats_root_with_tree(file_content)
+    return corrupted, localname, count
 
 
 def _check_jats_article(file_content: bytes) -> tuple[bool, bool]:
@@ -471,10 +466,11 @@ def validate_input_file(
         input_file.is_corrupted = _check_pdf_corruption(file_content, verdict=pdf_verdict)
         input_file.is_encrypted = _check_pdf_encryption(file_content, verdict=pdf_verdict)
     elif extension == ".docx":
-        input_file.is_corrupted = _check_docx_corruption(file_content)
-        input_file.is_encrypted = _check_docx_encryption(file_content)
+        input_file.is_corrupted, input_file.is_encrypted = _inspect_docx(file_content)
     elif extension == ".xml":
-        corrupted, root_localname, article_count = _inspect_jats_root(file_content)
+        corrupted, root_localname, article_count, parsed_root = _inspect_jats_root_with_tree(
+            file_content
+        )
         is_article = root_localname == "article"
         input_file.is_corrupted = corrupted
         # Well-formed XML whose root is not <article> is not something bibr can
@@ -493,6 +489,8 @@ def validate_input_file(
                 logger.warning(message)
                 raise InputValidationError(message)
             raise InputValidationError("XML input must be a JATS <article> document")
+        if not corrupted and is_article and parsed_root is not None:
+            input_file.native_artifact = parsed_root
     elif extension in (".html", ".htm"):
         input_file.is_corrupted, input_file.native_artifact = _check_html_corruption(file_content)
     elif extension == ".epub":

@@ -30,6 +30,7 @@ could not be read keeps its links, without the spans they cover.
 
 from __future__ import annotations
 
+import bisect
 import ctypes
 import math
 import re
@@ -489,14 +490,89 @@ def covered_spans(page: Page, link: RawLink) -> tuple[str, ...]:
     return _span_ids(page.index, cols, np.flatnonzero(hit))
 
 
+class _PageSpanIndex:
+    """Per-page spatial index over drawn character records for fast ``covered_spans``."""
+
+    __slots__ = ("page_index", "rec_span", "cx", "cy", "cy_list", "cx_list", "span_list")
+
+    def __init__(self, page: Page) -> None:
+        self.page_index = page.index
+        cols = page.cols
+        if cols is None or not len(cols.rec_cp) or not len(cols.span_rec):
+            self.rec_span = np.empty(0, dtype=np.intp)
+            self.cx = np.empty(0, dtype=np.float32)
+            self.cy = np.empty(0, dtype=np.float32)
+            self.cy_list: list[float] = []
+            self.cx_list: list[float] = []
+            self.span_list: list[int] = []
+            return
+        drawn = np.flatnonzero(
+            ~((cols.rec_cp <= 32) | (cols.rec_cp == 0xA0) | cols.rec_newline)
+            & ~np.isnan(cols.rec_cy)
+            & ~np.isnan(cols.rec_cx)
+        )
+        if not drawn.size:
+            self.rec_span = np.empty(0, dtype=np.intp)
+            self.cx = np.empty(0, dtype=np.float32)
+            self.cy = np.empty(0, dtype=np.float32)
+            self.cy_list = []
+            self.cx_list = []
+            self.span_list = []
+            return
+        cy_d = cols.rec_cy[drawn]
+        order = np.argsort(cy_d, kind="mergesort")
+        rec_sorted = drawn[order]
+        self.rec_span = _span_of(cols, rec_sorted)
+        self.cx = cols.rec_cx[rec_sorted]
+        self.cy = cy_d[order]
+        self.cy_list = self.cy.tolist()
+        self.cx_list = self.cx.tolist()
+        self.span_list = self.rec_span.tolist()
+
+    def covered(self, link: RawLink) -> tuple[str, ...]:
+        cy_list = self.cy_list
+        if not cy_list:
+            return ()
+        boxes = [
+            (min(quad[0::2]), min(quad[1::2]), max(quad[0::2]), max(quad[1::2]))
+            for quad in link.quads
+        ] or [link.rect]
+        cx_list = self.cx_list
+        span_list = self.span_list
+        found: set[int] = set()
+        for left, bottom, right, top in boxes:
+            lo = bisect.bisect_left(cy_list, bottom)
+            hi = bisect.bisect_right(cy_list, top)
+            for idx in range(lo, hi):
+                x = cx_list[idx]
+                if left <= x <= right:
+                    s = span_list[idx]
+                    if s >= 0:
+                        found.add(s)
+        if not found:
+            return ()
+        pidx = self.page_index
+        if len(found) == 1:
+            return (ids.span(pidx, next(iter(found))),)
+        return tuple(ids.span(pidx, s) for s in sorted(found))
+
+
 def build_links(raws: list[RawLink], pages: list[Page]) -> list[Link]:
     """The layer's links: *raws* in page order, each with its class and the spans it covers."""
     by_index = {page.index: page for page in pages}
     words: dict[int, PageWords] = {}
+    span_indices: dict[int, _PageSpanIndex] = {}
     links = []
     for raw in sorted(raws, key=lambda raw: (raw.page, raw.number)):
         source = by_index.get(raw.page)
         target_class, decided = _classify(raw, by_index, words)
+        if source is not None:
+            idx = span_indices.get(raw.page)
+            if idx is None:
+                idx = span_indices[raw.page] = _PageSpanIndex(source)
+            source_spans = idx.covered(raw)
+        else:
+            source_spans = ()
         links.append(
             Link(
                 link_id=ids.make(raw.page, KIND, raw.number),
@@ -511,7 +587,7 @@ def build_links(raws: list[RawLink], pages: list[Page]) -> list[Link]:
                 target_xy=raw.target_xy,
                 target_class=target_class,
                 target=decided,
-                source_span_ids=covered_spans(source, raw) if source is not None else (),
+                source_span_ids=source_spans,
             )
         )
     return links

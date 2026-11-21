@@ -34,12 +34,18 @@ class JatsHandlingStage:
                 if fs.pdf_bytes is None:
                     raise RuntimeError("XML bytes missing — validate stage did not load file")
                 content = fs.pdf_bytes
+                artifact = fs.native_validation_artifact
 
-                def _parse(content=content):
-                    parser = JatsParser(content)
+                def _parse(content=content, artifact=artifact):
+                    parser = (
+                        JatsParser(content, parsed_root=artifact)
+                        if artifact is not None
+                        else JatsParser(content)
+                    )
                     return parser, parser.parse()
 
                 parser, fs.contents = await asyncio.to_thread(_parse)
+                fs.native_validation_artifact = None
                 fs._native_parser = parser
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
             except Exception as e:  # noqa: BLE001
