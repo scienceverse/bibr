@@ -182,7 +182,9 @@ def iter_pdf_pages_with_index(
                             f"exceeding the {max_pixels:,}-pixel limit"
                         )
 
-                    bitmap = page.render(scale=page_dpi / 72)
+                    # Render directly in RGB byte order so PIL's raw decoder copies
+                    # without a pixel-by-pixel BGR->RGB channel swap (bit-identical).
+                    bitmap = page.render(scale=page_dpi / 72, rev_byteorder=True)
                     try:
                         pil_img = bitmap.to_pil()
                     finally:

@@ -35,7 +35,7 @@ from bibr.structure.float_labels import (
     normalize_label,
 )
 from bibr.structure.floats_normalize import _continuation_pieces
-from bibr.structure.html_table import html_table_frame
+from bibr.structure.html_table import HtmlParserName, html_table_frame, resolved_html_parser
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -222,12 +222,14 @@ class MediaHandlersMixin:
         # still used for the flattened ``contents`` grid.
         source_html: str | None = None
         if text.lstrip().startswith("<table") or text.lstrip().startswith("<TABLE"):
-            df = self._parse_html_table(text)
+            html_parser = resolved_html_parser(getattr(self, "_settings", None))
+            parse_kwargs = {"parser": html_parser} if html_parser != "html5lib" else {}
+            df = self._parse_html_table(text, **parse_kwargs)
             source_html = text
             if df is None or len(df.columns) == 0:
                 salvaged = self._TABLE_TAG_RE.sub(r"<\1\2>", text)
                 if salvaged != text:
-                    df = self._parse_html_table(salvaged)
+                    df = self._parse_html_table(salvaged, **parse_kwargs)
                     source_html = salvaged
         else:
             df = self._parse_markdown_table(text)
@@ -2307,7 +2309,7 @@ class MediaHandlersMixin:
         )
 
     @staticmethod
-    def _parse_html_table(html: str) -> pd.DataFrame | None:
+    def _parse_html_table(html: str, *, parser: HtmlParserName = "html5lib") -> pd.DataFrame | None:
         """Parse an HTML ``<table>`` string into a DataFrame.
 
         Handles the ``<tr>/<td>/<th>`` markup returned by the OCR engine with
@@ -2315,7 +2317,7 @@ class MediaHandlersMixin:
         the text as printed.  Returns ``None`` on any parse failure.
         """
         try:
-            df = html_table_frame(html)
+            df = html_table_frame(html, parser=parser)
             if df is not None:
                 # When OCR HTML lacks <th> tags, the columns are numbered
                 # (0, 1, 2, …).  Promote the first data row to headers — even
