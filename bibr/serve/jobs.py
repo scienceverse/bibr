@@ -162,6 +162,9 @@ class Job:
     # Encoded-result byte count for a status-only read that left the body behind
     # (shared stores); the memory store derives it from ``result_json``.
     result_size_hint: int | None = field(default=None, repr=False)
+    # Optional pre-wrapped RFC-1952 gzip bytes produced without recompression by
+    # shared stores when serving gzip-capable ``/result`` requests.
+    result_gzip: bytes | None = field(default=None, repr=False)
     task: object | None = field(default=None, repr=False)  # asyncio.Task ref
 
     @property
@@ -331,6 +334,7 @@ class MemoryJobStore:
         self._clock = clock
         self._wall_clock = wall_clock
         self._replica_id = replica_id or default_replica_id()
+        self._last_limits: tuple[int, int] | None = None
 
     @property
     def replica_id(self) -> str:
@@ -349,6 +353,7 @@ class MemoryJobStore:
 
         max_retained = Settings.jobs.max_retained
         max_bytes = Settings.jobs.max_retained_bytes
+        self._last_limits = (max_retained, max_bytes)
         finished = sorted(
             (job for job in self._jobs.values() if job.finished_mono is not None),
             key=lambda job: job.finished_mono or 0.0,
@@ -388,9 +393,24 @@ class MemoryJobStore:
 
     async def get(self, job_id: str, *, include_result: bool = True) -> Job | None:  # noqa: ARG002
         # The body is already in memory, so a status-only read costs nothing extra.
+        # Mutating transitions (create/cancel/set_succeeded/set_failed) already enforce
+        # count and byte retention budgets, so steady-state polls only need an O(1)
+        # lookup + per-job TTL check unless retention settings changed at runtime.
         async with self._lock:
-            self._purge_locked()
-            return self._jobs.get(job_id)
+            limits = (Settings.jobs.max_retained, Settings.jobs.max_retained_bytes)
+            if self._last_limits is not None and self._last_limits != limits:
+                self._purge_locked()
+                return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if (
+                job.finished_mono is not None
+                and (self._clock() - job.finished_mono) > Settings.jobs.ttl_seconds
+            ):
+                del self._jobs[job_id]
+                return None
+            return job
 
     async def discard(self, job_id: str) -> None:
         """Remove a job that failed before it could be admitted to dispatch."""
@@ -968,16 +988,7 @@ def register_job_routes(
             return JSONResponse({"detail": "job not found"}, status_code=404)
         return JSONResponse(job.status_dict())
 
-    async def _succeeded_job(job_id: str) -> tuple[Job, bytes] | JSONResponse:
-        """The job and its result body, or the response that says why there is none."""
-        # No per-job ownership check (L2): bibr authenticates with a single shared
-        # API key, so every authenticated caller is the same principal — there is no
-        # "other user" to isolate against. The 128-bit random job_id is the boundary
-        # that keeps results unguessable by unauthenticated callers.
-        try:
-            job = await store.get(job_id)
-        except JobStoreUnavailableError as exc:
-            return _store_unavailable(job_id, exc)
+    def _non_succeeded_response(job: Job | None) -> JSONResponse | None:
         if job is None:
             return JSONResponse({"detail": "job not found"}, status_code=404)
         if job.status in _ACTIVE_STATUSES:
@@ -988,6 +999,22 @@ def register_job_routes(
         if job.status == "failed":
             status = job.http_status or 500
             return JSONResponse(job.error or {"detail": "job failed"}, status_code=status)
+        return None
+
+    async def _succeeded_job(job_id: str) -> tuple[Job, bytes] | JSONResponse:
+        """The job and its result body, or the response that says why there is none."""
+        # No per-job ownership check (L2): bibr authenticates with a single shared
+        # API key, so every authenticated caller is the same principal — there is no
+        # "other user" to isolate against. The 128-bit random job_id is the boundary
+        # that keeps results unguessable by unauthenticated callers.
+        try:
+            job = await store.get(job_id)
+        except JobStoreUnavailableError as exc:
+            return _store_unavailable(job_id, exc)
+        err = _non_succeeded_response(job)
+        if err is not None:
+            return err
+        assert job is not None
         if job.result_json is None:
             # A shared store keeps the body under its own key: it can expire (or be
             # pruned) a moment before the status record does.
@@ -996,14 +1023,32 @@ def register_job_routes(
 
     @app.get("/papers/jobs/{job_id}/result")
     async def job_result(job_id: str, request: Request):  # pyright: ignore[reportUnusedFunction]
-        found = await _succeeded_job(job_id)
-        if isinstance(found, JSONResponse):
-            return found
-        # succeeded — the body was rendered once at completion.
-        _, body = found
-        if len(body) >= _RESULT_GZIP_MIN_BYTES and "gzip" in request.headers.get(
-            "accept-encoding", ""
-        ):
+        wants_gzip = "gzip" in request.headers.get("accept-encoding", "")
+        if wants_gzip and hasattr(store, "get_with_gzip"):
+            try:
+                job = await store.get_with_gzip(job_id, min_bytes=_RESULT_GZIP_MIN_BYTES)
+            except JobStoreUnavailableError as exc:
+                return _store_unavailable(job_id, exc)
+            err = _non_succeeded_response(job)
+            if err is not None:
+                return err
+            assert job is not None
+            if job.result_gzip is not None:
+                return Response(
+                    content=job.result_gzip,
+                    media_type="application/json",
+                    headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+                )
+            if job.result_json is None:
+                return JSONResponse({"detail": "job result no longer available"}, status_code=404)
+            body = job.result_json
+        else:
+            found = await _succeeded_job(job_id)
+            if isinstance(found, JSONResponse):
+                return found
+            # succeeded — the body was rendered once at completion.
+            _, body = found
+        if wants_gzip and len(body) >= _RESULT_GZIP_MIN_BYTES:
             # Compress a large body here, off the loop. The app's GZipMiddleware (same
             # Accept-Encoding test) would do it on the loop, and passes an already
             # encoded response through untouched.

@@ -1059,6 +1059,7 @@ def _paragraph_drafts(
     policy: FrontRolePolicy | None = None,
     front_gap: frozenset[int] = frozenset(),
     reading: _SectionReading | None = None,
+    summaries: _RegionIndex | None = None,
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
     reading = reading or _SectionReading()
@@ -1082,7 +1083,8 @@ def _paragraph_drafts(
         groups.setdefault(key, []).append((source_order, sentence))
 
     drafts: list[_CandidateDraft] = []
-    summaries = _RegionIndex(contents.region_summaries or [])
+    if summaries is None:
+        summaries = _RegionIndex(contents.region_summaries or [])
     for (section_id, paragraph_id), members in groups.items():
         raw_text = " ".join(
             sentence.text.strip() for _, sentence in members if sentence.text.strip()
@@ -1173,11 +1175,13 @@ def _heading_drafts(
     policy: FrontRolePolicy | None = None,
     front_gap: frozenset[int] = frozenset(),
     reading: _SectionReading | None = None,
+    summaries: _RegionIndex | None = None,
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
     reading = reading or _SectionReading()
     predictions = contents.front_role_predictions
-    summaries = _RegionIndex(contents.region_summaries or [])
+    if summaries is None:
+        summaries = _RegionIndex(contents.region_summaries or [])
     # A heading is placed just before the first paragraph of its own or any
     # later section: the earliest paragraph order from each section id on.
     first_order_by_section: dict[int, int] = {}
@@ -1947,6 +1951,7 @@ def _collect_candidates(
     reading = _section_reading(contents, first_page)
     front_gap = _front_gap_section_ids(contents, first_page, reading)
     reading = _read_front_gap_as_untyped(reading, contents, front_gap)
+    summaries = _RegionIndex(contents.region_summaries or [])
     paragraph_drafts = _paragraph_drafts(
         contents,
         first_page=first_page,
@@ -1954,6 +1959,7 @@ def _collect_candidates(
         policy=policy,
         front_gap=front_gap,
         reading=reading,
+        summaries=summaries,
     )
     drafts = paragraph_drafts + _heading_drafts(
         contents,
@@ -1963,6 +1969,7 @@ def _collect_candidates(
         policy=policy,
         front_gap=front_gap,
         reading=reading,
+        summaries=summaries,
     )
     if page_heads:
         # A page head counts as author text only on a first page that prints

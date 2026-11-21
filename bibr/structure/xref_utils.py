@@ -164,7 +164,10 @@ SECTION_XREF_RE = re.compile(
 # section, and the section sign. A necessary condition, so a sentence that
 # fails it can skip every pass — ~6.5 ms/paper of the shared serve event
 # loop, verified match-identical on 200 real papers.
-_XREF_PRESCAN_RE = re.compile(r"tab|tbl|fig|supplementa|eq|section|§", re.IGNORECASE)
+_XREF_PRESCAN_RE = re.compile(
+    r"(?<![A-Za-z])(?:tab|tbl|fig|supplementa|eq(?:uation|[s.\s(\d])|(?:sub)?section)|§",
+    re.IGNORECASE,
+)
 
 # Helper to parse number references like "1, 2, 3" or "1-3"
 NUM_SEP_RE = re.compile(r"\d+")

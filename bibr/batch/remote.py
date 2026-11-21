@@ -51,6 +51,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -325,6 +326,14 @@ class RemoteExecutor:
 
     # -- one paper -------------------------------------------------------
 
+    _READ_OFFLOAD_MIN_BYTES = 1024 * 1024
+
+    @staticmethod
+    def _read_and_hash(path: Path) -> tuple[bytes, str]:
+        """Read input bytes once and compute their SHA-256 digest."""
+        data = path.read_bytes()
+        return data, hashlib.sha256(data).hexdigest()
+
     async def process(self, client: httpx.AsyncClient, item: BatchItem) -> Outcome:
         """Run one paper to a terminal :class:`Outcome`; never raises for it."""
         started_at = utc_now_iso()
@@ -333,8 +342,12 @@ class RemoteExecutor:
         last_transient: TransientError | None = None
         timeout_retried = False
         try:
-            # One read: the hash comes from the bytes already in hand.
-            data = item.path.read_bytes()
+            # One read: the hash comes from the bytes already in hand. Offload large
+            # inputs (>= 1 MiB) so disk I/O + SHA-256 never stalls the event loop.
+            if item.path.stat().st_size >= self._READ_OFFLOAD_MIN_BYTES:
+                data, sha256 = await asyncio.to_thread(self._read_and_hash, item.path)
+            else:
+                data, sha256 = self._read_and_hash(item.path)
         except OSError as exc:
             return self._finish(
                 Outcome("failed", error_code="unreadable_input", error=str(exc)),
@@ -344,7 +357,6 @@ class RemoteExecutor:
                 size=None,
                 retries=0,
             )
-        sha256 = hashlib.sha256(data).hexdigest()
         size = len(data)
 
         for attempt in range(self.options.retries + 1):
@@ -543,7 +555,12 @@ class RemoteExecutor:
 
     async def _poll(self, client: httpx.AsyncClient, job_id: str) -> dict[str, Any]:
         deadline = self._clock() + self.options.poll_timeout
-        interval = self.options.poll_interval
+        poll_target = self.options.poll_interval
+        max_interval = max(poll_target, MAX_POLL_INTERVAL)
+        # Progressive initial ramp: notice fast jobs promptly instead of waiting a
+        # full initial poll_interval (default 4s), then settle onto the configured
+        # backoff cadence.
+        interval = min(poll_target, 0.25)
         errors = 0
         while self._clock() < deadline:
             await self._sleep(interval)
@@ -580,7 +597,10 @@ class RemoteExecutor:
                 continue
             if isinstance(body, dict) and body.get("status") in TERMINAL:
                 return body
-            interval = min(interval * 1.5, max(self.options.poll_interval, MAX_POLL_INTERVAL))
+            if interval < poll_target:
+                interval = min(interval * 2.0, poll_target)
+            else:
+                interval = min(interval * 1.5, max_interval)
         raise PermanentError(
             "poll_timeout",
             f"job not finished after {self.options.poll_timeout:.0f}s",

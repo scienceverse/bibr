@@ -414,23 +414,25 @@ _DOI_REGISTRANT_WRAP_RE = re.compile(
 
 
 _DOI_RUN_RE = re.compile(r"\b10\.\d{4,9}/\S*")
+_DOI_HYPHEN_WRAP_RE = re.compile(
+    r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]*-)\s+"
+    r"([-._;()/:A-Za-z0-9]*[\d.][-._;()/:A-Za-z0-9]*)"
+)
 
 
 def _repair_doi_text(text: str) -> str:
     # Typeset hyphens end the DOI pattern early: read them as ASCII inside a
     # DOI-shaped run, before the wrap repairs below look for a trailing hyphen.
-    if "10." in text:
+    has_10_dot = "10." in text
+    if has_10_dot:
         text = _DOI_RUN_RE.sub(lambda m: m.group().translate(DOI_HYPHENS), text)
     # Bridge the registrant wrap first: the downstream ``consolidate_text``
     # bridges (dot wrap, slash-space) only engage on an intact registrant.
-    bridged = _DOI_REGISTRANT_WRAP_RE.sub(r"\1", text) if "10." in text else text
+    bridged = _DOI_REGISTRANT_WRAP_RE.sub(r"\1", text) if has_10_dot else text
     cleaned = fix_ocr_artifacts(bridged)
-    return re.sub(
-        r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]*-)\s+"
-        r"([-._;()/:A-Za-z0-9]*[\d.][-._;()/:A-Za-z0-9]*)",
-        r"\1\2",
-        cleaned,
-    )
+    if "10." in cleaned and "-" in cleaned:
+        return _DOI_HYPHEN_WRAP_RE.sub(r"\1\2", cleaned)
+    return cleaned
 
 
 # The repairs are local, so the source and the repaired text are walked in step
@@ -613,6 +615,16 @@ def _raw_source_match(
 
 def _candidates_from_text(text: str, **provenance) -> list[DoiCandidate]:
     source = text or ""
+    if not source:
+        return []
+    # Fast necessary-condition gate: on pure ASCII text without control chars,
+    # _repair_doi_text cannot synthesize "10.", "." or "/" where none existed.
+    if source.isascii() and (
+        "/" not in source
+        or "." not in source
+        or ("10" not in source and not CONTROL_CHAR_RE.search(source))
+    ):
+        return []
     cleaned = _repair_doi_text(source)
     matches = tuple(_DOI_RE.finditer(cleaned))
     if not matches:

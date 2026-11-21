@@ -702,85 +702,79 @@ def _register_readiness_route(server, Settings) -> None:
         return state.get("cache")
 
     async def _probe_services() -> tuple[dict[str, str], list[bool]]:
-        """Check OCR, Redis and the job store: the probes that cost requests."""
-        checks: dict[str, str] = {}
-        check_results: list[bool] = []
-        if text_layer_route:
-            checks["ocr"] = _TEXT_LAYER_OCR_CHECK
-            check_results.append(True)
-        else:
-            await _probe_ocr(checks, check_results)
-        await _probe_stores(checks, check_results)
+        """Check OCR, Redis and the job store concurrently."""
+        ocr_res, redis_res, jobs_res = await asyncio.gather(
+            _probe_ocr_result(),
+            _probe_redis_result(),
+            _probe_jobs_store_result(),
+        )
+        checks: dict[str, str] = {"ocr": ocr_res[0]}
+        check_results: list[bool] = [ocr_res[1]]
+        if redis_res is not None:
+            checks["redis"] = redis_res[0]
+            check_results.append(redis_res[1])
+        if jobs_res is not None:
+            checks["jobs_store"] = jobs_res[0]
+            check_results.append(jobs_res[1])
         return checks, check_results
 
-    async def _probe_ocr(checks: dict[str, str], check_results: list[bool]) -> None:
+    async def _probe_ocr_result() -> tuple[str, bool]:
+        if text_layer_route:
+            return _TEXT_LAYER_OCR_CHECK, True
         client = await _get_http_client()
         try:
             resp = await client.get(f"{ocr_base_url}/health")
             if resp.status_code != 200:
-                checks["ocr"] = f"unhealthy ({resp.status_code})"
-                check_results.append(False)
-            else:
-                # /health answers without auth and before any model loads;
-                # extraction needs /v1/models to list the served alias with
-                # the same headers the backend sends, so probe that too.
+                return f"unhealthy ({resp.status_code})", False
+            # /health answers without auth and before any model loads;
+            # extraction needs /v1/models to list the served alias with
+            # the same headers the backend sends, so probe that too.
+            try:
+                models_resp = await client.get(f"{ocr_base_url}/v1/models")
+                if models_resp.status_code == 401:
+                    return "unauthorized (401; check OCR_API_KEY)", False
+                if models_resp.status_code != 200:
+                    return f"unhealthy ({models_resp.status_code})", False
                 try:
-                    models_resp = await client.get(f"{ocr_base_url}/v1/models")
-                    if models_resp.status_code == 401:
-                        checks["ocr"] = "unauthorized (401; check OCR_API_KEY)"
-                        check_results.append(False)
-                    elif models_resp.status_code != 200:
-                        checks["ocr"] = f"unhealthy ({models_resp.status_code})"
-                        check_results.append(False)
-                    else:
-                        try:
-                            served_ids = [item["id"] for item in models_resp.json()["data"]]
-                        except Exception:
-                            checks["ocr"] = "unhealthy (bad /v1/models body)"
-                            check_results.append(False)
-                        else:
-                            if expected_ocr_model in served_ids:
-                                checks["ocr"] = "ok"
-                                check_results.append(True)
-                            else:
-                                checks["ocr"] = f"model_missing ({expected_ocr_model})"
-                                check_results.append(False)
+                    served_ids = [item["id"] for item in models_resp.json()["data"]]
                 except Exception:
-                    logger.warning("Readiness OCR model check failed", exc_info=True)
-                    checks["ocr"] = "unreachable"
-                    check_results.append(False)
+                    return "unhealthy (bad /v1/models body)", False
+                if expected_ocr_model in served_ids:
+                    return "ok", True
+                return f"model_missing ({expected_ocr_model})", False
+            except Exception:
+                logger.warning("Readiness OCR model check failed", exc_info=True)
+                return "unreachable", False
         except Exception:
             logger.warning("Readiness OCR check failed", exc_info=True)
-            checks["ocr"] = "unreachable"
-            check_results.append(False)
+            return "unreachable", False
 
-    async def _probe_stores(checks: dict[str, str], check_results: list[bool]) -> None:
+    async def _probe_redis_result() -> tuple[str, bool] | None:
         cache = await _get_cache()
-        if cache is not None:
-            try:
-                # Bound the ping so an unresponsive (vs unreachable) Redis
-                # can't hang the readiness probe indefinitely.
-                await asyncio.wait_for(cache._redis.ping(), timeout=3.0)
-                checks["redis"] = "ok"
-                check_results.append(True)
-            except Exception:
-                logger.warning("Readiness Redis check failed", exc_info=True)
-                checks["redis"] = "error"
-                check_results.append(False)
+        if cache is None:
+            return None
+        try:
+            # Bound the ping so an unresponsive (vs unreachable) Redis
+            # can't hang the readiness probe indefinitely.
+            await asyncio.wait_for(cache._redis.ping(), timeout=3.0)
+            return "ok", True
+        except Exception:
+            logger.warning("Readiness Redis check failed", exc_info=True)
+            return "error", False
 
+    async def _probe_jobs_store_result() -> tuple[str, bool] | None:
         # The shared job store is a hard dependency of the job routes when it is
         # configured: a replica that cannot reach it answers 503 on every job call,
         # so it must not receive traffic. The memory store needs no probe.
         job_store = getattr(app.state, "job_store", None)
-        if Settings.jobs.enabled and Settings.jobs.store == "redis" and job_store is not None:
-            try:
-                await asyncio.wait_for(job_store.ping(), timeout=3.0)
-                checks["jobs_store"] = "ok"
-                check_results.append(True)
-            except Exception:
-                logger.warning("Readiness job-store check failed", exc_info=True)
-                checks["jobs_store"] = "error"
-                check_results.append(False)
+        if not (Settings.jobs.enabled and Settings.jobs.store == "redis" and job_store is not None):
+            return None
+        try:
+            await asyncio.wait_for(job_store.ping(), timeout=3.0)
+            return "ok", True
+        except Exception:
+            logger.warning("Readiness job-store check failed", exc_info=True)
+            return "error", False
 
     async def _refresh_services() -> tuple[dict[str, str], list[bool]]:
         result = await _probe_services()

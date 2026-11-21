@@ -469,6 +469,14 @@ class AuthorEmailHarvester:
         strict_emails = self._marker_sentence_emails(sentences)
 
         claimed_emails: set[str] = {a.email.lower() for a in authors if a.email}
+        family_pats: dict[str, re.Pattern[str]] = {
+            family: re.compile(r"\b" + re.escape(family) + r"\b", re.IGNORECASE)
+            for family in authors_by_family
+            if family
+        }
+        family_folds: dict[str, tuple[str, ...]] = {
+            family: _folds(family) for family in authors_by_family if family
+        }
 
         harvested = 0
         for i, sent in enumerate(sentences):
@@ -499,7 +507,7 @@ class AuthorEmailHarvester:
                     if not family:
                         order_idx += len(family_authors)
                         continue
-                    family_pat = re.compile(r"\b" + re.escape(family) + r"\b", re.IGNORECASE)
+                    family_pat = family_pats[family]
                     best_dist: int | None = None
                     for j in window_indices:
                         if family_pat.search(sentences[j].text):
@@ -509,7 +517,7 @@ class AuthorEmailHarvester:
                     if best_dist is None:
                         order_idx += len(family_authors)
                         continue
-                    affinity = int(any(f and f in local_compact for f in _folds(family)))
+                    affinity = int(any(f and f in local_compact for f in family_folds[family]))
                     for author in family_authors:
                         # Only disambiguate on the given name when the surname
                         # is genuinely shared, so ranking between distinct

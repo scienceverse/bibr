@@ -397,7 +397,8 @@ class CrossrefClient:
 
         if not dois:
             return 0
-        if self._settings.crossref.cache_size <= 0 and await self._ensure_response_cache() is None:
+        redis_cache = await self._ensure_response_cache()
+        if self._settings.crossref.cache_size <= 0 and redis_cache is None:
             # Warming caches that cannot hold anything still costs one
             # rate-limited slot per chunk while seeding nothing.
             return 0
@@ -418,6 +419,28 @@ class CrossrefClient:
         if not wanted:
             return 0
 
+        # Pre-check tier-2 Redis in one MGET round-trip so DOIs already cached
+        # by another worker or run skip Crossref API calls altogether.
+        if redis_cache is not None and hasattr(redis_cache, "get_many"):
+            key_by_doi = {doi: f"works:{doi.casefold()}" for doi in wanted}
+            raw_hits = await redis_cache.get_many(list(key_by_doi.values()))
+            redis_hits = {
+                k: v for k, v in raw_hits.items() if not _is_expired_not_found(v)
+            }
+            if redis_hits:
+                l1_size = self._settings.crossref.cache_size
+                if l1_size > 0:
+                    cache = self.__dict__.get("_response_cache")
+                    if cache is None:
+                        cache = self.__dict__["_response_cache"] = OrderedDict()
+                    for key, payload in redis_hits.items():
+                        cache[key] = payload
+                        while len(cache) > l1_size:
+                            cache.popitem(last=False)
+                wanted = [doi for doi in wanted if key_by_doi[doi] not in redis_hits]
+                if not wanted:
+                    return 0
+
         seeded = 0
         for start in range(0, len(wanted), _BULK_DOI_CHUNK):
             chunk = wanted[start : start + _BULK_DOI_CHUNK]
@@ -434,14 +457,30 @@ class CrossrefClient:
             except Exception as e:  # noqa: BLE001 — degrade to the per-ref path
                 logger.debug("Crossref bulk DOI prefetch failed for %d DOIs: %s", len(chunk), e)
                 continue
+            batch_entries: dict[str, dict[str, Any]] = {}
             for item in (data.get("message") or {}).get("items") or []:
                 item_doi = item.get("DOI")
                 if not item_doi:
                     continue
                 # Store the single-work shape so the cached value is
                 # indistinguishable from what /works/{doi} would have returned.
-                await self._cache_store(f"works:{item_doi.casefold()}", {"message": item})
+                batch_entries[f"works:{item_doi.casefold()}"] = {"message": item}
                 seeded += 1
+            if batch_entries:
+                if redis_cache is not None and hasattr(redis_cache, "set_many"):
+                    await redis_cache.set_many(batch_entries)
+                    l1_size = self._settings.crossref.cache_size
+                    if l1_size > 0:
+                        cache = self.__dict__.get("_response_cache")
+                        if cache is None:
+                            cache = self.__dict__["_response_cache"] = OrderedDict()
+                        for key, payload in batch_entries.items():
+                            cache[key] = payload
+                            while len(cache) > l1_size:
+                                cache.popitem(last=False)
+                else:
+                    for key, payload in batch_entries.items():
+                        await self._cache_store(key, payload)
         if seeded:
             logger.debug(
                 "Crossref bulk DOI prefetch seeded %d/%d works in %d request(s)",

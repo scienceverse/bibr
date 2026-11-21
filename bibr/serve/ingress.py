@@ -26,7 +26,8 @@ from starlette.responses import JSONResponse, Response
 from bibr.serve.admission import UploadAdmission
 
 PUBLIC_EXTRACT_PATH = "/papers/extract"
-_CHUNK_SIZE = 64 * 1024
+_CHUNK_SIZE = 256 * 1024
+_STALE_SWEEP_MAX_INTERVAL_SECONDS = 30.0
 #: The gzip level for responses: Starlette's default 9 takes about 2.5x the
 #: time of 6 on JSON text for about 2% fewer bytes, and GZipMiddleware
 #: compresses on the event loop.
@@ -160,6 +161,12 @@ class StoredUpload:
         }
 
 
+def _write_and_hash(handle: Any, digest: Any, chunk: bytes) -> None:
+    """Hash and write one upload chunk off the event loop in a single worker hop."""
+    digest.update(chunk)
+    handle.write(chunk)
+
+
 @dataclass
 class UploadStore:
     root: Path
@@ -169,6 +176,7 @@ class UploadStore:
     _leased_uploads: set[str] = field(default_factory=set, init=False, repr=False)
     _lease_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _last_sweep_mono: float = field(default=float("-inf"), init=False, repr=False)
 
     @classmethod
     def create(
@@ -188,7 +196,11 @@ class UploadStore:
         )
 
     async def persist(self, upload: UploadFile) -> StoredUpload:
-        await asyncio.to_thread(self.sweep_stale)
+        interval = min(_STALE_SWEEP_MAX_INTERVAL_SECONDS, max(0.0, float(self.stale_after_seconds)))
+        now_mono = time.monotonic()
+        if interval <= 0.0 or (now_mono - self._last_sweep_mono) >= interval:
+            self._last_sweep_mono = now_mono
+            await asyncio.to_thread(self.sweep_stale)
         filename = bounded_upload_filename(upload.filename)
 
         upload_id = uuid.uuid4().hex
@@ -203,8 +215,7 @@ class UploadStore:
                     size += len(chunk)
                     if size > self.max_size:
                         raise UploadTooLargeError(f"upload exceeds {self.max_size} bytes")
-                    digest.update(chunk)
-                    await asyncio.to_thread(handle.write, chunk)
+                    await asyncio.to_thread(_write_and_hash, handle, digest, chunk)
                 if size == 0:
                     raise EmptyUploadError("empty upload")
             finally:

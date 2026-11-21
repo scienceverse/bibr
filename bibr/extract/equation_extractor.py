@@ -790,13 +790,22 @@ def _fold_math_alnum(text: str) -> str:
     return _MATH_ALNUM_RE.sub(fold, text)
 
 
+# Necessary condition for ANY of the 4 extraction passes: passes 1, 2 and 4
+# require a comparator (ASCII =<>~, Unicode ≤≥⩽⩾≈≠≪≫, or a LaTeX \le/\ge/…
+# command), and pass 3 requires "$". Sentences failing this skip bytearray
+# allocation, paren grouping, and all 4 regex passes.
+_EQ_FAST_PRESCAN_RE = re.compile(r"[$=<>~≤≥⩽⩾≈≠≪≫\\]")
+
+_FIVE_FOR_EQUALS_RULE = _stand_in_for("=", _FIVE_FOR_EQUALS_RE)
+_COMMA_FOR_LESS_RULE = _stand_in_for("<", _COMMA_FOR_LESS_RE)
+
 # The rules of ``repair_statistic_glitches``, in the order they apply
 _GLITCH_RULES: tuple[Callable[[str], str], ...] = (
     _fold_math_alnum,
     lambda text: text.replace(_BOX, " "),
     lambda text: _CYRILLIC_P_RE.sub("p", text),
-    _stand_in_for("=", _FIVE_FOR_EQUALS_RE),
-    _stand_in_for("<", _COMMA_FOR_LESS_RE),
+    _FIVE_FOR_EQUALS_RULE,
+    _COMMA_FOR_LESS_RULE,
     lambda text: _DROPPED_EQUALS_RE.sub(r"\1=", text),
     lambda text: _DROPPED_P_EQUALS_RE.sub(r"\1=", text),
 )
@@ -813,8 +822,19 @@ def repair_statistic_glitches(text: str) -> str:
     (to "<"), and the space that stands for a dropped "=" between a name and
     a decimal before a p-value, or between "p" and its value after a number.
     """
-    for rule in _GLITCH_RULES:
-        text = rule(text)
+    if not text.isascii():
+        text = _fold_math_alnum(text)
+        if _BOX in text:
+            text = text.replace(_BOX, " ")
+        if "\u0440" in text:
+            text = _CYRILLIC_P_RE.sub("p", text)
+    if "5" in text:
+        text = _FIVE_FOR_EQUALS_RULE(text)
+    if "," in text and "p" in text:
+        text = _COMMA_FOR_LESS_RULE(text)
+    if "." in text and ("p" in text or "P" in text):
+        text = _DROPPED_EQUALS_RE.sub(r"\1=", text)
+        text = _DROPPED_P_EQUALS_RE.sub(r"\1=", text)
     return text
 
 
@@ -898,6 +918,8 @@ class EquationExtractor:
             text = printed = _single_char_line_breaks(sent.text)
             if repair_glitches:
                 text = repair_statistic_glitches(printed)
+            if not _EQ_FAST_PRESCAN_RE.search(text):
+                continue
             # Each pass marks the characters of the components it emitted,
             # and a later pass skips any match overlapping them. Only those
             # characters: a statistic the structured patterns do not know,

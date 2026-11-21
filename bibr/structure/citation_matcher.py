@@ -635,13 +635,13 @@ def _find_candidates(text: str, text_id: int, *, rules: bool = False) -> list[_C
 
     # Narrative: walk every "(YYYY...)" paren where the year comes first,
     # allowing trailing content like "(2010; Study 1)" or "(2010a, 2010b)".
+    depth = 0
+    depth_pos = 0
     for ym in _YEAR_PAREN_OPEN_RE.finditer(text):
-        depth = 0
-        for ch in text[: ym.start()]:
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
+        pos = ym.start()
+        if pos > depth_pos:
+            depth += text.count("(", depth_pos, pos) - text.count(")", depth_pos, pos)
+            depth_pos = pos
         # Allow one level of nesting: a "(YYYY" at depth 1 is an inner work of a
         # group cite "(Salter et al. (1969), Caves (1992), ...)". Deeper nesting is
         # pathological, and ordinary asides "(... (n=2500))" carry no "(YYYY" so
@@ -706,13 +706,13 @@ def _find_candidates(text: str, text_id: int, *, rules: bool = False) -> list[_C
                 )
 
     # Narrative in-press: "Smith (in press)".
+    depth = 0
+    depth_pos = 0
     for ipm in _IN_PRESS_PAREN_RE.finditer(text):
-        depth = 0
-        for ch in text[: ipm.start()]:
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
+        pos = ipm.start()
+        if pos > depth_pos:
+            depth += text.count("(", depth_pos, pos) - text.count(")", depth_pos, pos)
+            depth_pos = pos
         if depth > 0:
             continue
         lookback_start = max(0, ipm.start() - 120)
@@ -1071,10 +1071,23 @@ def _year_pool(
     return pool
 
 
+def _listed_compact_names(
+    by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
+) -> frozenset[str]:
+    return frozenset(
+        _compact(_full_key(author))
+        for refs in by_year.values()
+        for other in refs
+        for author in other.family_key_sets
+    )
+
+
 def _spelt_as_listed_elsewhere(
     cand: _Candidate,
     ref: _RefIdx,
     by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
+    *,
+    listed_compact: frozenset[str] | None = None,
 ) -> bool:
     """Whether a cited family, as spelt, is an author of another year's reference.
 
@@ -1086,12 +1099,7 @@ def _spelt_as_listed_elsewhere(
     cited = [_exact_keys(family) for family in cand.families]
     if any(_overlap_exact(keys, author) for keys in cited for author in ref.family_key_sets):
         return False
-    listed = {
-        _compact(_full_key(author))
-        for refs in by_year.values()
-        for other in refs
-        for author in other.family_key_sets
-    }
+    listed = _listed_compact_names(by_year) if listed_compact is None else listed_compact
     return any(_compact(_full_key(keys)) in listed for keys in cited)
 
 
@@ -1114,6 +1122,7 @@ def _match_reading(
     in_press_refs: list[_RefIdx],
     *,
     rules: bool = False,
+    listed_compact: frozenset[str] | None = None,
 ) -> tuple[_RefIdx | None, list[int], str | None]:
     """``_match``, and how the reference was placed (a key of ``_READING_EVIDENCE``)."""
     pool = _year_pool(cand, by_year, in_press_refs)
@@ -1128,7 +1137,9 @@ def _match_reading(
     for reading in _LOOSE_READINGS:
         ref, tied, _by_tie_break = _match_pool(pool, cand, reading)
         if ref is not None:
-            if reading.name == "fuzzy" and _spelt_as_listed_elsewhere(cand, ref, by_year):
+            if reading.name == "fuzzy" and _spelt_as_listed_elsewhere(
+                cand, ref, by_year, listed_compact=listed_compact
+            ):
                 return None, [], None
             return ref, [], reading.name
         if tied:
@@ -1142,6 +1153,7 @@ def _match(
     in_press_refs: list[_RefIdx],
     *,
     rules: bool = False,
+    listed_compact: frozenset[str] | None = None,
 ) -> tuple[_RefIdx | None, list[int]]:
     """Resolve a candidate to a ref.
 
@@ -1160,7 +1172,9 @@ def _match(
     reference or none, and never offer a shortlist, so a citation the exact
     keys could not place is never narrowed to a wrong pair.
     """
-    ref, tied, _reading = _match_reading(cand, by_year, in_press_refs, rules=rules)
+    ref, tied, _reading = _match_reading(
+        cand, by_year, in_press_refs, rules=rules, listed_compact=listed_compact
+    )
     return ref, tied
 
 
@@ -1207,6 +1221,7 @@ def match_with_candidates(
         return [], [], []
 
     _refs, by_year, in_press_refs = _build_ref_index(references, rules=rules)
+    listed_compact = _listed_compact_names(by_year) if rules else None
 
     xrefs: list[PaperXref] = []
     ambiguous: list[AmbiguousCandidate] = []
@@ -1218,7 +1233,9 @@ def match_with_candidates(
         if not sent.text:
             continue
         for cand in _find_candidates(sent.text, sent.text_id, rules=rules):
-            ref, tied, reading = _match_reading(cand, by_year, in_press_refs, rules=rules)
+            ref, tied, reading = _match_reading(
+                cand, by_year, in_press_refs, rules=rules, listed_compact=listed_compact
+            )
             surface_evidence = (
                 ("separated_possessive", "work_noun_bridge")
                 if cand.surface_kind == "separated_possessive"
@@ -1514,11 +1531,14 @@ def resolve_citations_by_rules(
     if not references:
         return [(text_id, text, ()) for text_id, text in cites]
     _refs, by_year, in_press_refs = _build_ref_index(references, rules=True)
+    listed_compact = _listed_compact_names(by_year)
     resolved: list[tuple[int, str, tuple[int, ...]]] = []
     for text_id, text in cites:
         linked: set[int] = set()
         for cand in _rule_candidates(text, text_id):
-            ref, _tied = _match(cand, by_year, in_press_refs, rules=True)
+            ref, _tied = _match(
+                cand, by_year, in_press_refs, rules=True, listed_compact=listed_compact
+            )
             if ref is None and not _tied:
                 pool = _year_pool(cand, by_year, in_press_refs)
                 ref = _match_any_author(pool, cand) or _match_by_initials(pool, cand)

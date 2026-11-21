@@ -13,6 +13,7 @@ import difflib
 import logging
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -2125,7 +2126,9 @@ def _grounding_key(text: str) -> str:
 
 
 def _ungrounded_affiliation_components(
-    part: str, document_key: str, folded_document_key: str = ""
+    part: str,
+    document_key: str,
+    folded_document_key: str | Callable[[], str] = "",
 ) -> tuple[int, list[str]]:
     """(organisation components of *part*, those the document does not print).
 
@@ -2136,6 +2139,7 @@ def _ungrounded_affiliation_components(
     """
     total = 0
     missing: list[str] = []
+    resolved_folded: str | None = folded_document_key if isinstance(folded_document_key, str) else None
     for component in part.split(","):
         component = component.strip()
         if not _AFFILIATION_ORG_RE.search(component):
@@ -2146,7 +2150,9 @@ def _ungrounded_affiliation_components(
         total += 1
         if key in document_key:
             continue
-        if folded_document_key and _grounding_key(component) in folded_document_key:
+        if resolved_folded is None:
+            resolved_folded = folded_document_key() if callable(folded_document_key) else ""
+        if resolved_folded and _grounding_key(component) in resolved_folded:
             continue
         if partial_ratio(key, document_key, score_cutoff=_AFFILIATION_GROUNDING_FUZZY_FLOOR):
             continue
@@ -3665,10 +3671,18 @@ class CoreMetadataExtractor:
         document = ""
         if "text" in meta_df.columns:
             document = " ".join(str(value) for value in meta_df["text"].values if pd.notna(value))
-        printed = _normalize_affiliation_match_text(document).casefold()
-        document_key = affiliation_key(f"{document} {context_text}")
-        folded_document_key = _grounding_key(f"{document} {context_text}")
+        printed: str | None = None
+        full_source = f"{document} {context_text}"
+        document_key = affiliation_key(full_source)
+        folded_cache: list[str] = []
+
+        def _get_folded_document_key() -> str:
+            if not folded_cache:
+                folded_cache.append(_grounding_key(full_source))
+            return folded_cache[0]
+
         dropped: list[tuple[int, str]] = []
+        grounding_cache: dict[str, tuple[int, list[str]]] = {}
         for author in authors:
             parts: list[str] = []
             previous: str | None = None
@@ -3677,12 +3691,13 @@ class CoreMetadataExtractor:
                 if not _AFFILIATION_ALPHA_RUN_RE.search(part):
                     previous = None
                     continue
-                if (
-                    previous is not None
-                    and not _looks_like_affiliation(part)
-                    and f"{previous}; {part}".casefold() in printed
-                ):
-                    parts[-1] = f"{parts[-1]}, {part}"
+                if previous is not None and not _looks_like_affiliation(part):
+                    if printed is None:
+                        printed = _normalize_affiliation_match_text(document).casefold()
+                    if f"{previous}; {part}".casefold() in printed:
+                        parts[-1] = f"{parts[-1]}, {part}"
+                    else:
+                        parts.append(part)
                 else:
                     parts.append(part)
                 previous = part
@@ -3690,9 +3705,13 @@ class CoreMetadataExtractor:
             kept: list[str] = []
             for part in parts:
                 if document_key:
-                    total, missing = _ungrounded_affiliation_components(
-                        part, document_key, folded_document_key
-                    )
+                    cached = grounding_cache.get(part)
+                    if cached is None:
+                        cached = _ungrounded_affiliation_components(
+                            part, document_key, _get_folded_document_key
+                        )
+                        grounding_cache[part] = cached
+                    total, missing = cached
                     if missing and len(missing) == total:
                         dropped.append((author.author_id, part))
                         continue
