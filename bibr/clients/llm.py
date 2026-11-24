@@ -1153,6 +1153,36 @@ def _sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+@functools.lru_cache(maxsize=64)
+def _schema_json_for_type(model_cls: type) -> str:
+    return json.dumps(model_cls.model_json_schema(), sort_keys=True)
+
+
+@functools.lru_cache(maxsize=64)
+def _schema_sha256_for_type(model_cls: type) -> str:
+    return _sha256_text(
+        json.dumps(model_cls.model_json_schema(), sort_keys=True, ensure_ascii=False)
+    )
+
+
+def _cached_schema_json(response_model: Any) -> str:
+    """Canonical sorted JSON schema string, cached per Pydantic model class."""
+    if isinstance(response_model, type) and hasattr(response_model, "model_json_schema"):
+        return _schema_json_for_type(response_model)
+    if hasattr(response_model, "model_json_schema"):
+        return json.dumps(response_model.model_json_schema(), sort_keys=True)
+    return ""
+
+
+def _cached_schema_sha256(response_model: Any) -> str:
+    """SHA-256 of the canonical JSON schema string, cached per Pydantic model class."""
+    if isinstance(response_model, type) and hasattr(response_model, "model_json_schema"):
+        return _schema_sha256_for_type(response_model)
+    return _sha256_text(
+        json.dumps(response_model.model_json_schema(), sort_keys=True, ensure_ascii=False)
+    )
+
+
 class InstructorBackend:
     """Default :class:`~bibr.clients.structured.StructuredBackend`: one
     structured call through the configured Instructor chat client.
@@ -1205,13 +1235,7 @@ class InstructorBackend:
                     {
                         "request_document_sha256": _sha256_text(request_document),
                         "instruction_sha256": _sha256_text(str(full_messages[0]["content"])),
-                        "converted_template_sha256": _sha256_text(
-                            json.dumps(
-                                response_model.model_json_schema(),
-                                sort_keys=True,
-                                ensure_ascii=False,
-                            )
-                        ),
+                        "converted_template_sha256": _cached_schema_sha256(response_model),
                     }
                 )
             except Exception:  # noqa: BLE001 — provenance must not affect extraction
@@ -2528,7 +2552,7 @@ class LLMClient:
                 # A caller-supplied client is the JSON-mode re-roll, which
                 # resends identical text expecting a different answer.
                 mode=f"{protocol}:{'override' if client_override is not None else 'default'}",
-                schema_json=json.dumps(response_model.model_json_schema(), sort_keys=True),
+                schema_json=_cached_schema_json(response_model),
                 chat_template_json=json.dumps(
                     self._settings.llm.chat_template_kwargs, sort_keys=True
                 ),

@@ -1009,27 +1009,31 @@ async def _extract_metadata_and_equations(
         from bibr.extract.equation_extractor import EquationExtractor
 
         eq_extractor = EquationExtractor()
-        # The regex pass is synchronous and always completes; only the LLM
-        # fan-out can exceed the budget. Running it inside the wait_for meant a
-        # timeout destroyed equations that had already been extracted, and the
-        # export shipped "eq": [] with nothing in the log. Threaded because
-        # this runs on the shared serve event loop.
-        regex_equations = await asyncio.to_thread(
-            eq_extractor.extract_from_sentences,
-            contents.sentences,
-            contents.sections,
-            repair_glitches=effective_settings.EQUATION_REPAIR_GLITCHES,
-        )
-        eq_coro = asyncio.wait_for(
-            eq_extractor.extract_with_llm_fallback(
+
+        async def _run_equations():
+            nonlocal regex_equations
+            # The regex pass is synchronous and always completes; only the LLM
+            # fan-out can exceed the budget. Running it inside this coroutine
+            # (outside wait_for) lets it overlap with metadata extraction while
+            # preserving regex equations on an LLM timeout.
+            regex_equations = await asyncio.to_thread(
+                eq_extractor.extract_from_sentences,
                 contents.sentences,
                 contents.sections,
-                llm_client,
-                min_regex_stats=effective_settings.EQUATION_LLM_FALLBACK_MIN_REGEX_STATS,
-                regex_equations=regex_equations,
-            ),
-            timeout=float(effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS),
-        )
+                repair_glitches=effective_settings.EQUATION_REPAIR_GLITCHES,
+            )
+            return await asyncio.wait_for(
+                eq_extractor.extract_with_llm_fallback(
+                    contents.sentences,
+                    contents.sections,
+                    llm_client,
+                    min_regex_stats=effective_settings.EQUATION_LLM_FALLBACK_MIN_REGEX_STATS,
+                    regex_equations=regex_equations,
+                ),
+                timeout=float(effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS),
+            )
+
+        eq_coro = _run_equations()
 
     if eq_coro is None:
         metadata = await meta_coro
@@ -1722,6 +1726,7 @@ async def post_parse(
     # duplicate files don't share a bucket; popped below to stay bounded.
     usage_key = new_usage_context_key(file_hash)
     terminal_processing_error: ProcessingError | None = None
+    stmt_task: asyncio.Task | None = None
     with usage_file_context(usage_key):
         try:
             # --- Sections: classify then normalize (implicit + enforce) ---
@@ -1763,6 +1768,19 @@ async def post_parse(
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
             )
+            # Start the statement tagger's CPU ONNX forward pass now, so it
+            # overlaps the printed-citation read, the title decision and the
+            # integrity rules below. Not earlier: content_blocks(contents)
+            # skips REFERENCES sections, and reference extraction retypes
+            # sections to and from REFERENCES (RefLocator), so a snapshot taken
+            # while it runs depends on thread timing. From here to the await
+            # below nothing changes a section's type or a sentence's text.
+            if effective_settings.ml.statement_tagger_model_id and not no_llm:
+                from bibr.statement_tagger.pipeline import predict_statement_tags
+
+                stmt_task = asyncio.create_task(
+                    asyncio.to_thread(predict_statement_tags, contents, effective_settings)
+                )
             # The paper's own printed citation, parsed now with the reference
             # parser that just parsed its reference list (it may be unloaded
             # after this stage). The identity stage, which knows the DOI,
@@ -1862,15 +1880,24 @@ async def post_parse(
                     (author.given, author.family) for author in paper_metadata.authors
                 ),
             )
-            if effective_settings.ml.statement_tagger_model_id and not no_llm:
+            if stmt_task is not None:
                 # The statement tagger: its statements join the resolution
                 # (bibr/statement_tagger/pipeline.py). Null, nothing loads; a
                 # --no-llm run, which uses no extraction model, does not run it.
                 from bibr.statement_tagger.pipeline import apply_statement_tagger
 
-                integrity_resolution = await asyncio.to_thread(
-                    apply_statement_tagger, contents, integrity_resolution, effective_settings
-                )
+                precomputed = await stmt_task
+                stmt_task = None
+                if precomputed is not None:
+                    # Threaded like the rules above: candidate building runs
+                    # over every statement and block, off the serve loop.
+                    integrity_resolution = await asyncio.to_thread(
+                        apply_statement_tagger,
+                        contents,
+                        integrity_resolution,
+                        effective_settings,
+                        precomputed=precomputed,
+                    )
 
             # Citation linking must see the raw superscript/LaTeX patterns.
             # Structured integrity is intentionally sequenced later because it
@@ -1950,6 +1977,12 @@ async def post_parse(
             terminal_processing_error = exc
             raise
         finally:
+            if stmt_task is not None and not stmt_task.done():
+                stmt_task.cancel()
+                try:
+                    await asyncio.gather(stmt_task, return_exceptions=True)
+                except asyncio.CancelledError:
+                    pass
             # Post-parse failed (or was cancelled) after the reference task
             # kicked off the enrichment prefetch: nothing will consume it, so
             # cancel rather than let it run to completion on its own.

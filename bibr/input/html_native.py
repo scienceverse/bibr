@@ -9,12 +9,14 @@ contract used by the other native inputs.
 
 from __future__ import annotations
 
+import bisect
 import codecs
 import itertools
 import logging
 import re
 import unicodedata
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -168,11 +170,18 @@ _DOI_RE = re.compile(r"\b10\.\d{4,9}/\S+\b", re.IGNORECASE)
 _DATE_RE = re.compile(r"(\d{4})(?:[-/](\d{1,2})(?:[-/](\d{1,2}))?)?")
 
 
+@dataclass(slots=True)
+class _InlineRun:
+    """Read-only virtual paragraph wrapping a contiguous run of inline DOM nodes."""
+
+    nodes: list[Any]
+
+
 def _tag_name(tag: Any) -> str:
     return (getattr(tag, "name", "") or "").lower()
 
 
-def _flatten(tag: Tag) -> str:
+def _flatten(tag: Tag | _InlineRun) -> str:
     """Concatenate *tag*'s text the way a browser lays it out.
 
     ``get_text(" ")`` put a space around every element, so ``H<sub>2</sub>O``
@@ -189,7 +198,12 @@ def _flatten(tag: Tag) -> str:
     except where it keeps two words apart (:mod:`bibr.input.mathml_whitespace`).
     """
     flat = FlatText()
-    name = _tag_name(tag)
+    if isinstance(tag, _InlineRun):
+        name = "p"
+        root_children = iter(tag.nodes)
+    else:
+        name = _tag_name(tag)
+        root_children = iter(tag.children)
     serials = itertools.count()
 
     # One frame per open element: its remaining children, whether the element
@@ -197,7 +211,7 @@ def _flatten(tag: Tag) -> str:
     # whether it sits inside ``<math>``, and the serial numbers of the element
     # and of its parent.
     stack: list[tuple[Iterator[Any], bool, str, bool, int, int]] = [
-        (iter(tag.children), False, name, name == "math", next(serials), next(serials))
+        (root_children, False, name, name == "math", next(serials), next(serials))
     ]
     while stack:
         children, separates, name, in_math, serial, parent = stack[-1]
@@ -316,10 +330,11 @@ def _resolve_link_sentence(
     fallback_id: int | None,
     entry_text: str = "",
     anchor_offset: int | None = None,
+    starts: list[int] | None = None,
 ):
     """Pick the sentence of one deferred entry that holds an anchor (as JATS)."""
     if anchor_offset is not None and entry_text:
-        picked = _sentence_at_offset(candidates, entry_text, anchor_offset)
+        picked = _sentence_at_offset(candidates, entry_text, anchor_offset, starts)
         if picked is not None:
             needle = (link_text or "").strip()
             if not needle or needle in picked.text or url in picked.text:
@@ -340,21 +355,26 @@ def _resolve_link_sentence(
     return candidates[-1] if candidates else None
 
 
-def _sentence_at_offset(candidates, entry_text: str, offset: int):
-    """Return the candidate sentence covering *offset* in *entry_text* (as JATS)."""
-    if not candidates:
-        return None
-    chosen = candidates[0]
+def _sentence_starts(candidates, entry_text: str) -> list[int]:
+    """Start offsets of each candidate sentence in *entry_text*, computed once per entry."""
+    starts: list[int] = []
     cursor = 0
     for sent in candidates:
         found = entry_text.find(sent.text, cursor)
         start = found if found >= 0 else cursor
-        if start <= offset:
-            chosen = sent
-        else:
-            break
+        starts.append(start)
         cursor = start + len(sent.text)
-    return chosen
+    return starts
+
+
+def _sentence_at_offset(candidates, entry_text: str, offset: int, starts: list[int] | None = None):
+    """Return the candidate sentence covering *offset* in *entry_text* (as JATS)."""
+    if not candidates:
+        return None
+    if starts is None:
+        starts = _sentence_starts(candidates, entry_text)
+    idx = bisect.bisect_right(starts, offset) - 1
+    return candidates[max(0, idx)]
 
 
 def _nfc_cut(text: str, start: int) -> int:
@@ -459,7 +479,18 @@ class _CollapsedLength:
         return length - 1 if trail and length else length
 
 
-def _anchor_offsets(block: Tag, anchors: list[tuple[Tag, str]]) -> list[int]:
+def _iter_block_nodes(block: Tag | _InlineRun) -> Iterator[Any]:
+    """Yield every node inside *block* in document order without DOM mutation."""
+    if isinstance(block, _InlineRun):
+        for node in block.nodes:
+            yield node
+            if isinstance(node, Tag):
+                yield from node.descendants
+    else:
+        yield from block.descendants
+
+
+def _anchor_offsets(block: Tag | _InlineRun, anchors: list[tuple[Tag, str]]) -> list[int]:
     """Character offsets where each anchor's display text starts in the block
     text, for ``(anchor, display text)`` pairs.
 
@@ -475,7 +506,7 @@ def _anchor_offsets(block: Tag, anchors: list[tuple[Tag, str]]) -> list[int]:
     offsets = [0] * len(anchors)
     prefix = _CollapsedLength()
     last = ""
-    for node in block.descendants:
+    for node in _iter_block_nodes(block):
         i = order.get(id(node))
         if i is not None:
             anchor, display = anchors[i]
@@ -508,27 +539,50 @@ def _block_holders(root: Tag) -> set[int]:
     return holders
 
 
-def _bold_throughout(block: Tag) -> bool:
+def _is_bold_el(el: Tag) -> bool:
+    if _tag_name(el) in _BOLD_TAGS:
+        return True
+    style = el.get("style")
+    return style is not None and _BOLD_STYLE_RE.search(str(style)) is not None
+
+
+def _bold_throughout(block: Tag | _InlineRun) -> bool:
     """Whether every piece of text in *block* is bold: inside ``<b>`` or
     ``<strong>``, or under an element whose style sets a bold font weight
     (the block's own included)."""
     seen = False
-    for string in block.find_all(string=True):
-        if type(string) not in (NavigableString, CData) or not string.strip():
+    if isinstance(block, _InlineRun):
+        stack: list[tuple[Iterator[Any], bool]] = [(iter(block.nodes), False)]
+    else:
+        stack = [(iter(block.children), _is_bold_el(block))]
+    while stack:
+        children, in_bold = stack[-1]
+        child = next(children, None)
+        if child is None:
+            stack.pop()
             continue
-        seen = True
-        element = string.parent
-        while element is not None:
-            if _tag_name(element) in _BOLD_TAGS or _BOLD_STYLE_RE.search(
-                str(element.get("style") or "")
-            ):
-                break
-            if element is block:
+        if isinstance(child, Tag):
+            stack.append((iter(child.children), in_bold or _is_bold_el(child)))
+        elif type(child) in (NavigableString, CData) and child.strip():
+            if not in_bold:
                 return False
-            element = element.parent
-        else:
-            return False
+            seen = True
     return seen
+
+
+def _run_has_text(nodes: list[Any]) -> bool:
+    """True when any node in *nodes* holds non-whitespace text (matches ``get_text().strip()``)."""
+    stack: list[Iterator[Any]] = [iter(nodes)]
+    while stack:
+        child = next(stack[-1], None)
+        if child is None:
+            stack.pop()
+            continue
+        if isinstance(child, Tag):
+            stack.append(iter(child.children))
+        elif type(child) in (NavigableString, CData) and child.strip():
+            return True
+    return False
 
 
 class HtmlParser:
@@ -676,6 +730,7 @@ class HtmlParser:
         for sent in self.sentences:
             by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
+        entry_starts: dict[int, list[int]] = {}
         for url, link_text, section_id, deferred_index, anchor_offset in self._pending_url_links:
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
@@ -689,8 +744,11 @@ class HtmlParser:
             entry_text = ""
             if 0 <= deferred_index < len(self.assembler.entries):
                 entry_text = self.assembler.entries[deferred_index].text
+            starts = entry_starts.get(deferred_index)
+            if starts is None:
+                starts = entry_starts[deferred_index] = _sentence_starts(candidates, entry_text)
             sentence = _resolve_link_sentence(
-                candidates, url, link_text or "", fallback_id, entry_text, anchor_offset
+                candidates, url, link_text or "", fallback_id, entry_text, anchor_offset, starts
             )
             if sentence is None:
                 continue
@@ -775,12 +833,15 @@ class HtmlParser:
 
     @staticmethod
     def _remove_noise(soup: BeautifulSoup) -> None:
+        if getattr(soup, "_bibr_noise_removed", False):
+            return
         for tag in soup.find_all(_DROP_TAGS):
             tag.decompose()
         for tag in soup.find_all(attrs={"role": True}):
             role = str(tag.get("role") or "").lower()
             if role in {"navigation", "complementary", "banner", "contentinfo", "search"}:
                 tag.decompose()
+        soup._bibr_noise_removed = True  # type: ignore[attr-defined]
 
     def _parse_metadata(self, soup: BeautifulSoup) -> PaperMetadata:
         meta = PaperMetadata(doi="", title="")
@@ -868,6 +929,9 @@ class HtmlParser:
             if child is None:
                 stack.pop()
                 continue
+            if isinstance(child, _InlineRun):
+                self._handle_text_block(child)
+                continue
             if not isinstance(child, Tag):
                 continue
             name = _tag_name(child)
@@ -902,7 +966,7 @@ class HtmlParser:
 
     def _blocks(self, container: Tag) -> list[Any]:
         """*container*'s children, each run of inline content between them
-        (text, inline elements, line breaks) wrapped in a ``<p>`` of its own.
+        (text, inline elements, line breaks) wrapped in a read-only ``_InlineRun``.
 
         A browser lays out such a run as a paragraph whatever element holds
         it, but the walk only read text from blocks: the paragraphs of a page
@@ -915,18 +979,11 @@ class HtmlParser:
         run: list[Any] = []
 
         def flush() -> None:
-            if any(
-                (node.get_text() if isinstance(node, Tag) else str(node)).strip() for node in run
-            ):
-                assert self._soup is not None
-                wrapper = self._soup.new_tag("p")
-                run[0].insert_before(wrapper)
-                for node in run:
-                    wrapper.append(node.extract())
-                out.append(wrapper)
+            if run and _run_has_text(run):
+                out.append(_InlineRun(list(run)))
             run.clear()
 
-        for child in list(container.children):
+        for child in container.children:
             if isinstance(child, Tag):
                 if _tag_name(child) in _RUN_TAGS and id(child) not in self._block_holders:
                     run.append(child)
@@ -981,11 +1038,12 @@ class HtmlParser:
         self._heading_stack.append((level, section_id))
         self._current_section_id = section_id
 
-    def _handle_text_block(self, tag: Tag) -> None:
+    def _handle_text_block(self, tag: Tag | _InlineRun) -> None:
         text = _text(tag)
         if not text:
             return
-        if _tag_name(tag) == "p":
+        is_run = isinstance(tag, _InlineRun)
+        if is_run or _tag_name(tag) == "p":
             if reads_as_reference_heading(text):
                 # A paragraph reading "References" heads the list whatever its
                 # markup; under a references heading already, it repeats it.
@@ -995,7 +1053,7 @@ class HtmlParser:
             if self._bold_headings and reads_as_bold_heading(text) and _bold_throughout(tag):
                 self._open_section(text, self._top_heading_level())
                 return
-            if _BIBLIOGRAPHY_CLASSES & set(_attr_tokens(tag, "class").split()):
+            if not is_run and (_BIBLIOGRAPHY_CLASSES & set(_attr_tokens(tag, "class").split())):
                 if not self._in_references():
                     self._ensure_references_section()
                 self._reference_list = True
@@ -1011,15 +1069,23 @@ class HtmlParser:
             return
         deferred_index = self.assembler.append(text, None, self._current_section_id, True, False)
         links: list[tuple[Tag, str, str]] = []
-        for a in tag.find_all("a", href=True):
-            url = clean_extracted_url(str(a.get("href") or ""))
-            if url:
-                links.append((a, url, _text(a)))
-        offsets = _anchor_offsets(tag, [(a, display) for a, _, display in links])
-        for (_, url, display), offset in zip(links, offsets, strict=True):
-            self._pending_url_links.append(
-                (url, display, self._current_section_id, deferred_index, offset)
-            )
+        if is_run:
+            for node in _iter_block_nodes(tag):
+                if isinstance(node, Tag) and _tag_name(node) == "a" and node.has_attr("href"):
+                    url = clean_extracted_url(str(node.get("href") or ""))
+                    if url:
+                        links.append((node, url, _text(node)))
+        else:
+            for a in tag.find_all("a", href=True):
+                url = clean_extracted_url(str(a.get("href") or ""))
+                if url:
+                    links.append((a, url, _text(a)))
+        if links:
+            offsets = _anchor_offsets(tag, [(a, display) for a, _, display in links])
+            for (_, url, display), offset in zip(links, offsets, strict=True):
+                self._pending_url_links.append(
+                    (url, display, self._current_section_id, deferred_index, offset)
+                )
 
     def _process_list(self, tag: Tag) -> None:
         for li in tag.find_all("li", recursive=False):
@@ -1067,6 +1133,9 @@ class HtmlParser:
             child = next(stack[-1], None)
             if child is None:
                 stack.pop()
+                continue
+            if isinstance(child, _InlineRun):
+                self._append_reference(_text(child))
                 continue
             name = _tag_name(child)
             if name in _HEADING_TAGS or name in _NON_CONTENT_TAGS:

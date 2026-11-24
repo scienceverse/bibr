@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
     from bibr.document.model import DocumentLayer
+    from bibr.extract.pdf_doi_evidence import PdfDoiEvidence
     from bibr.input.docx_native import DocxParser
     from bibr.input.epub_native import EpubParser
     from bibr.input.html_native import HtmlParser
@@ -100,6 +101,9 @@ class FileState:
     # Guarded PDF doc-info metadata (title/doi/keywords) harvested by
     # NativeTextStage; consumed as post_parse's fill-empty backstop.
     native_metadata: dict[str, Any] | None = None
+    # Front-page PDF DOI evidence harvested during NativeTextStage's single PDF
+    # open; kept past free_pre_ocr() for IdentityValidationStage and freed in free_all().
+    pdf_doi_evidence: "PdfDoiEvidence | None" = field(default=None, compare=False, repr=False)
     # Reusable HTML DOM or parsed ePub package produced during validation.
     native_validation_artifact: object | None = None
     contents: "PaperContents | None" = None
@@ -216,6 +220,7 @@ class FileState:
         self.ref_page_lines = None
         self.pdf_uri_links = None
         self.pdf_outline = None
+        self.pdf_doi_evidence = None
         self.native_validation_artifact = None
         self.doc_layer = None
         self.contents = None

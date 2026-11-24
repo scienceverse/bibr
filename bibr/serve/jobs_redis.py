@@ -63,8 +63,10 @@ job's duration, nothing else.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
+import struct
 import time
 import uuid
 import zlib
@@ -185,7 +187,8 @@ return 1
 # ARGV[5] = http_status ('' = none), ARGV[6] = error JSON ('' = none),
 # ARGV[7] = result_size, ARGV[8] = compressed result body ('' for failures),
 # ARGV[9] = key prefix, ARGV[10] = max_retained, ARGV[11] = max_retained_bytes,
-# ARGV[12] = the status the record must have now ('' = any; a cancel passes 'queued')
+# ARGV[12] = the status the record must have now ('' = any; a cancel passes 'queued'),
+# ARGV[13] = optional CRC-32 of uncompressed result_json ('' when unavailable)
 # Returns 1, or 0 when ARGV[12] is set and the record is missing or in another status
 # (then nothing changes). A transition that applies also drops the job's lease.
 _FINISH_SCRIPT = """
@@ -200,9 +203,17 @@ end
 redis.call('SREM', active_set, job_id)
 redis.call('DEL', prefix .. ':lease:' .. job_id)
 if redis.call('EXISTS', job_key) == 1 then
-  redis.call('HSET', job_key,
-    'status', status, 'finished_at', finished_at,
-    'http_status', ARGV[5], 'error', ARGV[6], 'result_size', ARGV[7])
+  local crc32 = ARGV[13]
+  if crc32 and crc32 ~= '' then
+    redis.call('HSET', job_key,
+      'status', status, 'finished_at', finished_at,
+      'http_status', ARGV[5], 'error', ARGV[6], 'result_size', ARGV[7],
+      'result_crc32', crc32)
+  else
+    redis.call('HSET', job_key,
+      'status', status, 'finished_at', finished_at,
+      'http_status', ARGV[5], 'error', ARGV[6], 'result_size', ARGV[7])
+  end
   redis.call('EXPIRE', job_key, ttl)
   if status == 'succeeded' then
     redis.call('SET', result_key, ARGV[8], 'EX', ttl)
@@ -250,6 +261,26 @@ for i = 1, evict do
 end
 return 1
 """
+
+
+_GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
+
+
+def _zlib_to_gzip(raw: bytes, crc32: int, size: int) -> bytes | None:
+    """Wrap a standard RFC-1950 zlib DEFLATE stream as an RFC-1952 gzip stream.
+
+    Both formats carry the identical raw DEFLATE payload; replacing the 2-byte
+    zlib header and 4-byte Adler-32 trailer with the 10-byte gzip header and
+    8-byte CRC32/ISIZE trailer avoids decompressing and recompressing large
+    results on gzip-encoded HTTP responses.
+    """
+    if len(raw) < 6:
+        return None
+    cmf, flg = raw[0], raw[1]
+    if (cmf & 0x0F) != 8 or (flg & 0x20) != 0 or ((cmf << 8) + flg) % 31 != 0:
+        return None
+    trailer = struct.pack("<II", crc32 & 0xFFFFFFFF, size & 0xFFFFFFFF)
+    return b"".join((_GZIP_HEADER, memoryview(raw)[2:-4], trailer))
 
 
 def _text(value: bytes | str | None) -> str | None:
@@ -533,6 +564,53 @@ class RedisJobStore:
                 logger.error("job %s: stored result is not valid zlib data; dropping it", job_id)
         return job
 
+    async def get_with_gzip(self, job_id: str, *, min_bytes: int = 0) -> Job | None:
+        """Fetch job status + result, serving a zero-recompress gzip stream when eligible.
+
+        When the stored result is at least *min_bytes* uncompressed and carries its
+        ``result_crc32`` in the job hash, ``job.result_gzip`` is populated directly by
+        rewrapping the stored RFC-1950 DEFLATE bitstream as RFC-1952 gzip without
+        decompressing or recompressing. Legacy records without ``result_crc32`` (or
+        results smaller than *min_bytes*) fall back to ``job.result_json``.
+        """
+        pipe = self._redis.pipeline(transaction=False)
+        pipe.hgetall(self.job_key(job_id))
+        pipe.get(self.result_key(job_id))
+        fields, raw = await self._bounded("get", pipe.execute())
+        if not fields:
+            return None
+        job = self._job_from_fields(job_id, fields)
+        if self._expired(job):
+            return None
+        if raw is not None:
+            crc_raw = _text(fields.get(b"result_crc32") or fields.get("result_crc32"))
+            if (
+                crc_raw
+                and crc_raw.isdigit()
+                and job.result_size_hint is not None
+                and job.result_size_hint >= min_bytes
+            ):
+                gz = _zlib_to_gzip(raw, int(crc_raw), job.result_size_hint)
+                if gz is not None:
+                    job.result_gzip = gz
+                    return job
+            try:
+                job.result_json = await asyncio.to_thread(zlib.decompress, raw)
+            except zlib.error:
+                logger.error("job %s: stored result is not valid zlib data; dropping it", job_id)
+        return job
+
+    async def get_result_gzip(self, job_id: str) -> bytes | None:
+        """Return gzip-encoded result bytes for *job_id* without recompression when possible."""
+        job = await self.get_with_gzip(job_id, min_bytes=0)
+        if job is None:
+            return None
+        if job.result_gzip is not None:
+            return job.result_gzip
+        if job.result_json is not None:
+            return await asyncio.to_thread(gzip.compress, job.result_json, self._compress_level)
+        return None
+
     async def discard(self, job_id: str) -> None:
         # Let go first: a record left behind is failed once its lease lapses.
         self._owned.discard(job_id)
@@ -574,14 +652,18 @@ class RedisJobStore:
             self._owned.discard(job_id)
         return await self.get(job_id, include_result=False)
 
-    def _render(self, result: dict) -> tuple[bytes, bytes]:
+    def _render(self, result: dict) -> tuple[bytes, bytes, int]:
         encoded = encode_result(result)
-        return encoded, zlib.compress(encoded, self._compress_level)
+        return (
+            encoded,
+            zlib.compress(encoded, self._compress_level),
+            zlib.crc32(encoded) & 0xFFFFFFFF,
+        )
 
     async def set_succeeded(self, job_id: str, result: dict) -> None:
         # Encode first so an unrenderable result raises exactly like the memory
         # store's; both steps run off the loop, a large export takes real CPU time.
-        encoded, compressed = await asyncio.to_thread(self._render, result)
+        encoded, compressed, crc32 = await asyncio.to_thread(self._render, result)
         await self._finish(
             job_id,
             status="succeeded",
@@ -589,6 +671,7 @@ class RedisJobStore:
             error=None,
             result=compressed,
             result_size=len(encoded),
+            result_crc32=crc32,
         )
 
     async def set_failed(
@@ -614,6 +697,7 @@ class RedisJobStore:
         result: bytes,
         result_size: int,
         required: str = "",
+        result_crc32: int | None = None,
     ) -> None:
         keys, args = self._finish_call(
             job_id,
@@ -623,6 +707,7 @@ class RedisJobStore:
             result=result,
             result_size=result_size,
             required=required,
+            result_crc32=result_crc32,
         )
         try:
             # The script is idempotent (the same finished_at on every attempt), so a
@@ -652,6 +737,7 @@ class RedisJobStore:
         result: bytes,
         result_size: int,
         required: str = "",
+        result_crc32: int | None = None,
     ) -> tuple[list[str], list[Any]]:
         """KEYS and ARGV for ``_FINISH_SCRIPT``."""
         ttl = max(1, int(Settings.jobs.ttl_seconds))
@@ -668,6 +754,7 @@ class RedisJobStore:
             Settings.jobs.max_retained,
             Settings.jobs.max_retained_bytes,
             required,
+            "" if result_crc32 is None else str(result_crc32),
         ]
         keys = [
             self.job_key(job_id),

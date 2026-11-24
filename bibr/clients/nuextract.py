@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 from bibr.clients.nuextract_schema import (
     NativeSchemaContract,
     NuExtractSchemaPolicy,
+    _cached_native_contract,
     contract_wire_value_is_valid,
     native_contract_for_model,
 )
@@ -451,6 +452,18 @@ def _max_tokens_kw(
     return {}
 
 
+def _readonly_native_contract(response_model: type[BaseModel]) -> NativeSchemaContract:
+    """The shared, memoized NuExtract contract, for callers here that only read it.
+
+    ``native_contract_for_model`` deep-copies the contract on every call so a
+    caller may change its copy; a request only reads it, so it takes the one
+    built object. Nothing returned from here may be mutated.
+    """
+    if not isinstance(response_model, type) or not issubclass(response_model, BaseModel):
+        raise TypeError("response_model must be a Pydantic BaseModel subclass")
+    return _cached_native_contract(response_model)
+
+
 def build_native_request_kwargs(
     *,
     settings: GlobalSettings,
@@ -466,7 +479,7 @@ def build_native_request_kwargs(
 
     projected_messages, instructions = _project_native_prompt(messages)
     if contract is None:
-        contract = native_contract_for_model(response_model)
+        contract = _readonly_native_contract(response_model)
     chat_template_kwargs = {
         "template": json.dumps(contract.template, ensure_ascii=False, indent=2),
         "instructions": instructions or _GENERIC_INSTRUCTIONS,
@@ -628,7 +641,7 @@ class NuExtractNativeBackend:
             )
 
         client = self._get_client()
-        contract = native_contract_for_model(response_model)
+        contract = _readonly_native_contract(response_model)
         request_kwargs = build_native_request_kwargs(
             settings=self._settings,
             response_model=response_model,

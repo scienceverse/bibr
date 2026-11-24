@@ -80,6 +80,7 @@ async def test_classifier_load_holds_inference_lock(monkeypatch):
         return None
 
     monkeypatch.setattr(sc_mod, "_get_trained_model", fake_get_trained_model)
+    monkeypatch.setattr(sc_mod, "_model_cache", None)
     model = await sc_mod._get_trained_model_async()
     assert model is None
     assert held["locked_during_load"] is True

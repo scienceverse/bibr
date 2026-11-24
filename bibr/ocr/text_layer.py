@@ -227,6 +227,19 @@ class _PageText:
     # The characters are a scan's embedded OCR layer (invisible text over a
     # page-sized image), read because the caller asked for it.
     ocr_layer: bool = False
+    # Raw PDF-point chars deferred until after pdfium_lock is released.
+    _raw_chars: list[tuple[str, tuple[float, float, float, float]]] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def _materialize(self, broken_lines: list[Any] | None = None) -> None:
+        raw = self._raw_chars
+        if raw is None:
+            return
+        self._raw_chars = None
+        self.chars, self.lines = _build_layout_chars_and_lines(
+            raw, self.index, self.crop_box, self.rotation, broken_lines=broken_lines
+        )
 
     @property
     def glyphs(self) -> list[tuple[str, tuple[float, float, float, float]]]:
@@ -236,6 +249,90 @@ class _PageText:
             for ch, box in self.chars
             if ch and not ch.isspace() and box[2] > box[0] and box[3] > box[1]
         ]
+
+
+def _build_layout_chars_and_lines(
+    chars: list[tuple[str, tuple[float, float, float, float]]],
+    page_index: int,
+    crop_box: tuple[float, float, float, float],
+    rotation: int,
+    *,
+    broken_lines: list[Any] | None = None,
+) -> tuple[
+    list[tuple[str, tuple[float, float, float, float]]],
+    list[tuple[str, tuple[float, float, float, float], float]],
+]:
+    """Convert raw PDF-point chars and lines to 0..1000 layout coordinates."""
+    from bibr.ocr.native_text import _pdf_points_to_normalized_bbox
+    from bibr.ocr.pdf_inspection import _break_wrapped_lines
+    from bibr.ocr.ref_geometry import group_chars_into_lines
+
+    cx0, cy0, cx1, cy1 = crop_box
+    crop_w = (cx1 - cx0) or 1.0
+    crop_h = (cy1 - cy0) or 1.0
+
+    if rotation == 0:
+        layout_chars: list[tuple[str, tuple[float, float, float, float]]] = []
+        append_char = layout_chars.append
+        for ch, box in chars:
+            if not ch:
+                continue
+            left, bottom, right, top = box
+            u1 = (left - cx0) / crop_w * 1000.0
+            u2 = (right - cx0) / crop_w * 1000.0
+            v1 = (cy1 - top) / crop_h * 1000.0
+            v2 = (cy1 - bottom) / crop_h * 1000.0
+            append_char(
+                (
+                    ch,
+                    (
+                        u1 if u1 <= u2 else u2,
+                        v1 if v1 <= v2 else v2,
+                        u2 if u2 >= u1 else u1,
+                        v2 if v2 >= v1 else v1,
+                    ),
+                )
+            )
+        src_lines = (
+            broken_lines
+            if broken_lines is not None
+            else group_chars_into_lines(_break_wrapped_lines(chars), page_index)
+        )
+        lines: list[tuple[str, tuple[float, float, float, float], float]] = []
+        append_line = lines.append
+        for line in src_lines:
+            u1 = (line.x0 - cx0) / crop_w * 1000.0
+            u2 = (line.x1 - cx0) / crop_w * 1000.0
+            v1 = (cy1 - line.y_top) / crop_h * 1000.0
+            v2 = (cy1 - line.y_bottom) / crop_h * 1000.0
+            append_line(
+                (
+                    line.text,
+                    (
+                        u1 if u1 <= u2 else u2,
+                        v1 if v1 <= v2 else v2,
+                        u2 if u2 >= u1 else u1,
+                        v2 if v2 >= v1 else v1,
+                    ),
+                    line.font_size,
+                )
+            )
+        return layout_chars, lines
+
+    def to_layout(box: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        return _pdf_points_to_normalized_bbox(box, crop_box, rotation)
+
+    layout_chars = [(ch, to_layout(box)) for ch, box in chars if ch]
+    src_lines = (
+        broken_lines
+        if broken_lines is not None
+        else group_chars_into_lines(_break_wrapped_lines(chars), page_index)
+    )
+    lines = [
+        (line.text, to_layout((line.x0, line.y_bottom, line.x1, line.y_top)), line.font_size)
+        for line in src_lines
+    ]
+    return layout_chars, lines
 
 
 def _region_task(region: dict[str, Any]) -> str:
@@ -253,7 +350,9 @@ def _centre_in(box: tuple[float, float, float, float], bbox: Sequence[float]) ->
     return bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]
 
 
-def _load_page(doc: Any, page_index: int, *, read_ocr_layer: bool = False) -> _PageText:
+def _load_page(
+    doc: Any, page_index: int, *, read_ocr_layer: bool = False, defer_lines: bool = False
+) -> _PageText:
     """Read one page's text layer under the (caller-held) PDFium lock.
 
     With *read_ocr_layer*, a scanned page's embedded OCR layer is read like
@@ -271,7 +370,13 @@ def _load_page(doc: Any, page_index: int, *, read_ocr_layer: bool = False) -> _P
         textpage = open_text_page(page)
         try:
             return _page_text(
-                page, textpage, page_index, crop_box, rotation, read_ocr_layer=read_ocr_layer
+                page,
+                textpage,
+                page_index,
+                crop_box,
+                rotation,
+                read_ocr_layer=read_ocr_layer,
+                defer_lines=defer_lines,
             )
         finally:
             textpage.close()
@@ -289,6 +394,8 @@ def _page_text(
     read_ocr_layer: bool,
     records: list[tuple[str, float, float, bool]] | None = None,
     chars: list[tuple[str, tuple[float, float, float, float]]] | None = None,
+    page_cache: dict[str, object] | None = None,
+    defer_lines: bool = False,
 ) -> _PageText:
     """One page's text layer from its open text page (see :func:`_load_page`).
 
@@ -300,45 +407,76 @@ def _page_text(
         _coverage_qualifies,
         _invisible_text_share,
         _page_image_coverage,
-        _pdf_points_to_normalized_bbox,
         _share_qualifies,
     )
-    from bibr.ocr.pdf_inspection import _break_wrapped_lines
-    from bibr.ocr.ref_geometry import _extract_page_chars, group_chars_into_lines
+    from bibr.ocr.ref_geometry import _extract_page_chars
 
     char_count = textpage.count_chars()
     if not char_count:
         return _PageText(page_index, crop_box, rotation, 0, False, [], [], [])
-    try:
-        # Mostly invisible text is a hidden OCR layer, not printed text.
-        # The native pass also asks for a page-sized image; scans
-        # cropped to their text block have smaller ones (dev scans:
-        # 0.55 and 0.67 of the page), and no OCR reads them here.
-        invisible = _share_qualifies(_invisible_text_share(textpage))
-    except Exception:  # noqa: BLE001 - an unreadable check keeps the layer
-        logger.debug("Invisible-layer check failed on page %d", page_index, exc_info=True)
-        invisible = False
+    if page_cache is not None and "invisible_share" in page_cache:
+        invisible = _share_qualifies(page_cache["invisible_share"])  # type: ignore[arg-type]
+    else:
+        try:
+            # Mostly invisible text is a hidden OCR layer, not printed text.
+            # The native pass also asks for a page-sized image; scans
+            # cropped to their text block have smaller ones (dev scans:
+            # 0.55 and 0.67 of the page), and no OCR reads them here.
+            codes = page_cache.get("codes") if page_cache is not None else None
+            share = _invisible_text_share(textpage, codes=codes)  # type: ignore[arg-type]
+            if page_cache is not None:
+                page_cache["invisible_share"] = share
+            invisible = _share_qualifies(share)
+        except Exception:  # noqa: BLE001 - an unreadable check keeps the layer
+            logger.debug("Invisible-layer check failed on page %d", page_index, exc_info=True)
+            invisible = False
     ocr_layer = False
     if invisible and read_ocr_layer:
-        try:
-            ocr_layer = _coverage_qualifies(_page_image_coverage(page, crop_box))
-        except Exception:  # noqa: BLE001 - an unreadable check leaves the page unread
-            logger.debug("Image-coverage check failed on page %d", page_index, exc_info=True)
+        if page_cache is not None and "image_coverage" in page_cache:
+            ocr_layer = _coverage_qualifies(page_cache["image_coverage"])  # type: ignore[arg-type]
+        else:
+            try:
+                coverage = _page_image_coverage(page, crop_box)
+                if page_cache is not None:
+                    page_cache["image_coverage"] = coverage
+                ocr_layer = _coverage_qualifies(coverage)
+            except Exception:  # noqa: BLE001 - an unreadable check leaves the page unread
+                logger.debug("Image-coverage check failed on page %d", page_index, exc_info=True)
     if invisible and not ocr_layer:
         return _PageText(page_index, crop_box, rotation, char_count, True, [], [], [])
+    raw_out: dict[str, object] | None = None
     if records is None:
-        records = _build_page_char_records(textpage)
+        if chars is None:
+            raw_out = {}
+        records = _build_page_char_records(textpage, raw_out=raw_out)
     if chars is None:
-        chars = _extract_page_chars(textpage)
+        codes = (
+            raw_out.get("codes")
+            if raw_out is not None
+            else (page_cache.get("codes") if page_cache is not None else None)
+        )
+        boxes = (
+            raw_out.get("boxes")
+            if raw_out is not None
+            else (page_cache.get("boxes") if page_cache is not None else None)
+        )
+        chars = _extract_page_chars(textpage, codes=codes, char_boxes=boxes)  # type: ignore[arg-type]
 
-    def to_layout(box: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-        return _pdf_points_to_normalized_bbox(box, crop_box, rotation)
+    if defer_lines:
+        return _PageText(
+            page_index,
+            crop_box,
+            rotation,
+            char_count,
+            False,
+            records,
+            [],
+            [],
+            ocr_layer,
+            _raw_chars=chars,
+        )
 
-    layout_chars = [(ch, to_layout(box)) for ch, box in chars if ch]
-    lines = [
-        (line.text, to_layout((line.x0, line.y_bottom, line.x1, line.y_top)), line.font_size)
-        for line in group_chars_into_lines(_break_wrapped_lines(chars), page_index)
-    ]
+    layout_chars, lines = _build_layout_chars_and_lines(chars, page_index, crop_box, rotation)
     return _PageText(
         page_index, crop_box, rotation, char_count, False, records, layout_chars, lines, ocr_layer
     )
@@ -620,10 +758,10 @@ def _judge(
     """Gate one page whose readable regions *outcomes* records."""
     from bibr.ocr.text_layer_quality import (
         PageGateResult,
+        _area,
         covered_regions,
         judge_page,
         lexical_profile,
-        text_coverage,
     )
     from bibr.scan.page_kind import _TEXT_LABELS
 
@@ -636,8 +774,13 @@ def _judge(
         return PageGateResult("invisible_ocr_layer")
     prose_boxes = [tuple(float(v) for v in r["bbox_2d"][:4]) for r in prose]
     glyph_boxes = [box for _, box in page.glyphs if 0 <= box[0] <= 1000 and 0 <= box[1] <= 1000]
-    coverage = text_coverage(prose_boxes, glyph_boxes)
     covered = covered_regions(prose_boxes, glyph_boxes)
+    total_area = sum(_area(box) for box in prose_boxes)
+    coverage = (
+        sum(_area(box) for box, hit in zip(prose_boxes, covered, strict=True) if hit) / total_area
+        if total_area > 0
+        else None
+    )
     region_coverage = sum(covered) / len(covered) if covered else None
     read = [id(r) for r in prose if outcomes.get(id(r)) in ("filled", "rejected")]
     rejected = sum(1 for key in read if outcomes.get(key) == "rejected")
@@ -707,7 +850,8 @@ def read_text_layer(
             if slot >= len(layouts):
                 break
             with pdfium_lock:
-                page = _load_page(doc, page_index, read_ocr_layer=read_ocr_layer)
+                page = _load_page(doc, page_index, read_ocr_layer=read_ocr_layer, defer_lines=True)
+            page._materialize()
             regions = layouts[slot]
             verdict = _read_page(page, regions, result, min_printable_ratio=min_printable_ratio)
             result.pages.append(verdict)
@@ -742,6 +886,7 @@ class TextLayerStream:
         self._min_printable_ratio = min_printable_ratio
         self._read_ocr_layer = read_ocr_layer
         self._read: dict[int, list[dict[str, Any]]] = {}
+        self._pending: list[tuple[int, int, _PageText, list[dict[str, Any]], bool]] = []
         self._result = TextLayerRead(layout_results=[], pages=[], warnings=[])
         self._failed = False
 
@@ -757,11 +902,19 @@ class TextLayerStream:
         *,
         records: list[tuple[str, float, float, bool]] | None = None,
         chars: list[tuple[str, tuple[float, float, float, float]]] | None = None,
+        page_cache: dict[str, object] | None = None,
+        copy_regions: bool = True,
     ) -> None:
-        """Read one page, under the caller's PDFium lock; *regions* are left as they are."""
+        """Capture detached PDFium data for one page under the caller's PDFium lock.
+
+        Pure-Python layout coordinate projection, region filling, table
+        rebuilding, and page gating are deferred to :meth:`process_pending`
+        (called by ``inspect_pdf`` after releasing ``pdfium_lock``, or lazily
+        by :meth:`finish`). *regions* are never modified.
+        """
         if self._failed:
             return
-        expected = len(self._read)
+        expected = len(self._read) + len(self._pending)
         if slot != expected or (self._indices is not None and self._indices[slot] != page_index):
             self._failed = True
             return
@@ -775,22 +928,47 @@ class TextLayerStream:
                 read_ocr_layer=self._read_ocr_layer,
                 records=records,
                 chars=chars,
+                page_cache=page_cache,
+                defer_lines=True,
             )
-            copied = deepcopy(regions)
-            verdict = _read_page(
-                text, copied, self._result, min_printable_ratio=self._min_printable_ratio
-            )
+            stored_regions = deepcopy(regions) if copy_regions else regions
         except Exception:  # noqa: BLE001 - the caller reads the text layer again
             logger.debug("Streamed text-layer read failed on page %d", page_index, exc_info=True)
             self._failed = True
             return
-        self._read[slot] = copied
-        self._result.pages.append(verdict)
-        if text.ocr_layer and verdict.ok:
-            self._result.ocr_layer_pages.append(page_index + 1)
+        self._pending.append((slot, page_index, text, stored_regions, copy_regions))
+
+    def process_pending(self, broken_lines_by_slot: dict[int, list[Any]] | None = None) -> None:
+        """Run the deferred pure-Python text-layer reading & gating outside ``pdfium_lock``."""
+        if self._failed or not self._pending:
+            self._pending.clear()
+            return
+        pending = self._pending
+        self._pending = []
+        for slot, page_index, text, regions, already_copied in pending:
+            try:
+                broken_lines = (
+                    broken_lines_by_slot.get(slot) if broken_lines_by_slot is not None else None
+                )
+                text._materialize(broken_lines=broken_lines)
+                copied = regions if already_copied else deepcopy(regions)
+                verdict = _read_page(
+                    text, copied, self._result, min_printable_ratio=self._min_printable_ratio
+                )
+            except Exception:  # noqa: BLE001 - the caller reads the text layer again
+                logger.debug(
+                    "Streamed text-layer read failed on page %d", page_index, exc_info=True
+                )
+                self._failed = True
+                return
+            self._read[slot] = copied
+            self._result.pages.append(verdict)
+            if text.ocr_layer and verdict.ok:
+                self._result.ocr_layer_pages.append(page_index + 1)
 
     def finish(self, layout_results: list[list[dict[str, Any]]]) -> TextLayerRead | None:
         """The read of *layout_results* (the inspection's), or None to read it again."""
+        self.process_pending()
         indices = self._indices if self._indices is not None else range(len(layout_results))
         if self._failed or len(self._read) != min(len(indices), len(layout_results)):
             return None

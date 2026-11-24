@@ -1505,8 +1505,14 @@ def _build_lexical_candidates(
     return candidates
 
 
-def _render_candidate(contents: PaperContents, candidate: IntegrityStatementCandidate) -> str:
-    by_id = {sentence.text_id: sentence for sentence in contents.sentences}
+def _render_candidate(
+    contents: PaperContents,
+    candidate: IntegrityStatementCandidate,
+    *,
+    by_id: dict[int, PaperSentence] | None = None,
+) -> str:
+    if by_id is None:
+        by_id = {sentence.text_id: sentence for sentence in contents.sentences}
     parts = []
     for text_id in candidate.text_ids:
         sentence = by_id.get(text_id)
@@ -1519,19 +1525,30 @@ def _render_candidate(contents: PaperContents, candidate: IntegrityStatementCand
 
 
 def _render_legacy_candidate(
-    contents: PaperContents, candidate: IntegrityStatementCandidate
+    contents: PaperContents,
+    candidate: IntegrityStatementCandidate,
+    *,
+    by_id: dict[int, PaperSentence] | None = None,
+    section_by_id: dict[int, PaperSection] | None = None,
 ) -> str:
     """Render a compatibility value from the current sentence text.
 
     Each row is clipped at publisher furniture around the field's anchor, and
     rendering stops at the first clipped row.
     """
-    by_id = {sentence.text_id: sentence for sentence in contents.sentences}
+    if by_id is None:
+        by_id = {sentence.text_id: sentence for sentence in contents.sentences}
     parts = []
     if "heading_tail" in candidate.reason_flags:
-        section = next(
-            (s for s in contents.sections if s.section_id in candidate.section_ids), None
-        )
+        if section_by_id is not None:
+            section = next(
+                (section_by_id[sid] for sid in candidate.section_ids if sid in section_by_id),
+                None,
+            )
+        else:
+            section = next(
+                (s for s in contents.sections if s.section_id in candidate.section_ids), None
+            )
         tail = _heading_declaration_tail(
             candidate.field, section.header if section is not None else candidate.heading
         )
@@ -1562,7 +1579,14 @@ def _render_indices(
     contents: PaperContents,
     resolution: IntegrityStatementResolution,
     indices: tuple[int, ...],
+    *,
+    by_id: dict[int, PaperSentence] | None = None,
+    section_by_id: dict[int, PaperSection] | None = None,
 ) -> str | None:
+    if not indices:
+        return None
+    if by_id is None:
+        by_id = {sentence.text_id: sentence for sentence in contents.sentences}
     parts = [
         (resolution.candidates[index], rendered)
         for index in indices
@@ -1570,10 +1594,15 @@ def _render_indices(
             rendered := (
                 # Rows the statement tagger chose are rendered as the compatibility
                 # copies are: whole rows, clipped at publisher furniture.
-                _render_legacy_candidate(contents, resolution.candidates[index])
+                _render_legacy_candidate(
+                    contents,
+                    resolution.candidates[index],
+                    by_id=by_id,
+                    section_by_id=section_by_id,
+                )
                 if resolution.candidates[index].method.startswith("legacy_")
                 or resolution.candidates[index].method == "statement_tagger"
-                else _render_candidate(contents, resolution.candidates[index])
+                else _render_candidate(contents, resolution.candidates[index], by_id=by_id)
             )
         )
     ]
@@ -1684,6 +1713,9 @@ def _comparison_issues(
     legacy: tuple[tuple[str, tuple[int, ...]], ...],
     selected: tuple[tuple[str, tuple[int, ...]], ...],
     legacy_snapshots: tuple[tuple[str, str | None], ...],
+    *,
+    by_id: dict[int, PaperSentence] | None = None,
+    section_by_id: dict[int, PaperSection] | None = None,
 ) -> tuple[ValidationIssue, ...]:
     temporary = IntegrityStatementResolution(
         mode="shadow",
@@ -1693,12 +1725,19 @@ def _comparison_issues(
         legacy_statement_snapshots=legacy_snapshots,
         issues=(),
     )
+    legacy_map = dict(legacy)
+    selected_map = dict(selected)
+    snapshots_map = dict(legacy_snapshots)
+    if by_id is None:
+        by_id = {sentence.text_id: sentence for sentence in contents.sentences}
     issues = []
     for field in _FIELDS:
-        legacy_indices = dict(legacy).get(field, ())
-        selected_indices = dict(selected).get(field, ())
-        legacy_text = dict(legacy_snapshots).get(field)
-        selected_text = _render_indices(contents, temporary, dict(selected).get(field, ()))
+        legacy_indices = legacy_map.get(field, ())
+        selected_indices = selected_map.get(field, ())
+        legacy_text = snapshots_map.get(field)
+        selected_text = _render_indices(
+            contents, temporary, selected_indices, by_id=by_id, section_by_id=section_by_id
+        )
         if _comparison_key(candidates, legacy_indices, legacy_text) == _comparison_key(
             candidates, selected_indices, selected_text
         ):
@@ -1790,15 +1829,31 @@ def resolve_integrity_statements(
         legacy_statement_snapshots=(),
         issues=(),
     )
+    by_id = {sentence.text_id: sentence for sentence in contents.sentences}
+    legacy_map = dict(legacy)
     legacy_snapshots = tuple(
         (
             field,
-            _render_indices(contents, snapshot_resolution, dict(legacy).get(field, ())),
+            _render_indices(
+                contents,
+                snapshot_resolution,
+                legacy_map.get(field, ()),
+                by_id=by_id,
+                section_by_id=section_by_id,
+            ),
         )
         for field in _FIELDS
     )
     issues = (
-        _comparison_issues(contents, frozen_candidates, legacy, selected, legacy_snapshots)
+        _comparison_issues(
+            contents,
+            frozen_candidates,
+            legacy,
+            selected,
+            legacy_snapshots,
+            by_id=by_id,
+            section_by_id=section_by_id,
+        )
         if mode == "shadow"
         else ()
     )

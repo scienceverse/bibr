@@ -644,7 +644,7 @@ def _numbers(layer) -> list[float]:
     return found
 
 
-@pytest.mark.parametrize("failing", ["_read_objects", "_pack", "_spans_and_lines"])
+@pytest.mark.parametrize("failing", ["_read_objects", "_pack", "_complete_packed"])
 def test_links_and_the_rest_survive_pages_whose_text_could_not_be_read(monkeypatch, failing):
     whole = _layer()
 
@@ -709,7 +709,7 @@ def test_pages_that_failed_after_their_size_still_show_a_paper_has_no_internal_l
     def broken(*_args, **_kwargs):
         raise RuntimeError("no text")
 
-    monkeypatch.setattr(harvest, "_spans_and_lines", broken)
+    monkeypatch.setattr(harvest, "_complete_packed", broken)
     layer = _layer(_pdfs.synthetic_paper(), range(7))
 
     assert any(page.error for page in layer.pages)

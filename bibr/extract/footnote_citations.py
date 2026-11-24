@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from itertools import islice
 
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
 from bibr.utils.text import collapse_ws
@@ -476,10 +477,53 @@ def _sentence_breaks(text: str) -> list[re.Match[str]]:
     ]
 
 
+def _first_sentence_break_pos(text: str) -> int | None:
+    """Start offset of the first sentence break in *text* outside quoted titles, or None.
+
+    Mirrors ``_sentence_breaks(text)[0].start()`` exactly while scanning only
+    up to the first unquoted break rather than the entire remaining note.
+    """
+    pos = 0
+    text_len = len(text)
+    scan_idx = 0
+    opened: int | None = None
+    spans: list[tuple[int, int]] = []
+    opening_quotes = _OPENING_QUOTES
+    closing_quotes = _CLOSING_QUOTES
+    max_quoted = _MAX_QUOTED
+
+    while (match := _SENTENCE_BREAK_RE.search(text, pos)) is not None:
+        mstart = match.start()
+        # Advance the quote-span state machine only as far as needed to know
+        # whether any quoted span covers mstart (a span cannot exceed max_quoted + 1).
+        target = min(text_len, mstart + max_quoted + 2)
+        while scan_idx < target:
+            char = text[scan_idx]
+            if opened is None:
+                if char in opening_quotes:
+                    opened = scan_idx
+            elif char in closing_quotes:
+                spans.append((opened, scan_idx))
+                opened = None
+            elif scan_idx - opened > max_quoted:
+                opened = None
+            scan_idx += 1
+
+        covering_close: int | None = None
+        for span_open, span_close in spans:
+            if span_open < mstart < span_close:
+                covering_close = span_close
+                break
+        if covering_close is None:
+            return mstart
+        pos = covering_close + 1
+    return None
+
+
 def _next_piece(text: str) -> str:
     """*text* up to its next sentence break: the right side of a candidate split."""
-    breaks = _sentence_breaks(text)
-    return text[: breaks[0].start()] if breaks else text
+    first = _first_sentence_break_pos(text)
+    return text[:first] if first is not None else text
 
 
 def _soft_split(clause: str) -> list[str]:
@@ -518,25 +562,47 @@ def _soft_split(clause: str) -> list[str]:
         left_kind = _citation_kind(left_clean)
         # A repeat ("ABRAMS, ref. 6.") closes a citation as a full one does.
         left_cites = left_kind is not None or is_repeat_citation(left_clean)
-        cleaned = _clean(right, verdicts)
-        # Commentary that hands over to a citation within its first sentence.
+        if not led and not left_cites:
+            continue
+
         stripped = _strip_lead_in(right)
-        cited_from = _citation_start(stripped, verdicts)
-        handed_over = 0 < cited_from <= len(_next_piece(stripped))
-        # After a sentence break the first sentence must read as a citation;
-        # "or SURNAME, Name" opens a work whose byline is a sentence of its own.
-        opened = right if not sentence else _next_piece(right)
-        if (
-            (led and _starts_work(stripped))
-            or (led and left_cites and looks_like_citation(cleaned))
-            or (left_cites and _starts_work(right) and _citation_kind(_clean(opened, verdicts)))
-            or (left_cites and handed_over and looks_like_citation(cleaned))
-        ):
+        if led and _starts_work(stripped):
             pieces.append(left)
             start = end
-        elif sentence and left_kind == "full" and not looks_like_citation(cleaned):
-            pieces.append(left)
-            return pieces
+            continue
+
+        cited_from = _citation_start(stripped, verdicts)
+        cleaned = stripped[cited_from:].strip().strip(" ,;:")
+        right_cites: bool | None = None
+
+        if led and left_cites:
+            right_cites = looks_like_citation(cleaned)
+            if right_cites:
+                pieces.append(left)
+                start = end
+                continue
+
+        if left_cites and _starts_work(right):
+            opened = right if not sentence else _next_piece(right)
+            if _citation_kind(_clean(opened, verdicts)):
+                pieces.append(left)
+                start = end
+                continue
+
+        if left_cites and cited_from > 0 and cited_from <= len(_next_piece(stripped)):
+            if right_cites is None:
+                right_cites = looks_like_citation(cleaned)
+            if right_cites:
+                pieces.append(left)
+                start = end
+                continue
+
+        if sentence and left_kind == "full":
+            if right_cites is None:
+                right_cites = looks_like_citation(cleaned)
+            if not right_cites:
+                pieces.append(left)
+                return pieces
     pieces.append(clause[start:])
     return pieces
 
@@ -727,6 +793,22 @@ def is_repeat_citation(clause: str) -> bool:
     return bool(_REPEAT_START_RE.match(clause) or _REPEAT_ANY_RE.search(clause))
 
 
+def _has_real_year(clause: str) -> bool:
+    """Whether *clause* contains a publication year outside lifespans and date stamps."""
+    for match in _YEAR_RE.finditer(clause):
+        lo = max(0, match.start() - 24)
+        hi = min(len(clause), match.end() + 24)
+        win = clause[lo:hi]
+        pos = match.start() - lo
+        end = match.end() - lo
+        if any(s.start() <= pos and end <= s.end() for s in _LIFESPAN_RE.finditer(win)):
+            continue
+        if any(s.start() <= pos and end <= s.end() for s in _DATE_STAMP_RE.finditer(win)):
+            continue
+        return True
+    return False
+
+
 def _citation_kind(clause: str) -> str | None:
     """ "full" for a dated citation, "short" for an undated one, None for commentary.
 
@@ -741,31 +823,43 @@ def _citation_kind(clause: str) -> str | None:
     or locator. A court decision ("Civ. 1re, 16 juill. 1998, D. 1999. 306")
     is a full citation.
     """
-    if len(_WORD_RE.findall(clause)) < 4 or _TABLE_NOTE_RE.match(clause):
+    if sum(1 for _ in islice(_WORD_RE.finditer(clause), 4)) < 4 or _TABLE_NOTE_RE.match(clause):
+        return None
+    if _has_real_year(clause):
+        if (
+            _STRICT_ONSET_RE.match(clause)
+            or _QUOTED_RE.search(clause)
+            or _PLACE_PUBLISHER_RE.search(clause)
+            or _CONTAINER_RE.search(clause)
+            or _VOLUME_PAGES_YEAR_RE.search(clause)
+        ):
+            return "full"
+        if legal_decision(clause) is not None:
+            return "full"
+        probe = _DATE_STAMP_RE.sub(" ", _LIFESPAN_RE.sub(" ", clause))
+        if _TRAILING_YEAR_RE.search(probe) and probe.count(",") >= 2:
+            return "full"
         return None
     if legal_decision(clause) is not None:
         return "full"
-    probe = _DATE_STAMP_RE.sub(" ", _LIFESPAN_RE.sub(" ", clause))
-    cues = sum(
-        bool(found)
-        for found in (
-            _STRICT_ONSET_RE.match(clause),
-            _QUOTED_RE.search(clause),
-            _PLACE_PUBLISHER_RE.search(clause),
-            _CONTAINER_RE.search(clause),
-            _VOLUME_PAGES_YEAR_RE.search(clause),
-        )
-    )
-    if _YEAR_RE.search(probe):
-        if cues or (_TRAILING_YEAR_RE.search(probe) and probe.count(",") >= 2):
-            return "full"
-        return None
+    cues = 0
+    if _STRICT_ONSET_RE.match(clause):
+        cues += 1
+    if _QUOTED_RE.search(clause):
+        cues += 1
+    if _PLACE_PUBLISHER_RE.search(clause):
+        cues += 1
+    has_container = bool(_CONTAINER_RE.search(clause))
+    if has_container:
+        cues += 1
+    if cues < 3 and _VOLUME_PAGES_YEAR_RE.search(clause):
+        cues += 1
     if cues >= 3 or _CLASSICAL_RE.match(clause):
         return "short"
     # "BLANCHARD, Rae. Richard Steele and the Status of Women. In Studies in
     # Philology, year 26, no. 3, p. 322–355.": an ISO 690 byline and a
     # container or locator.
-    if _ISO_BYLINE_RE.match(clause) and _CONTAINER_RE.search(clause):
+    if has_container and _ISO_BYLINE_RE.match(clause):
         return "short"
     return None
 
@@ -855,6 +949,19 @@ def _work_key(ref) -> _WorkKey:
     return _fold(ref.title), _surnames(ref.authors), ref.year
 
 
+def _work_bucket_key(title: str) -> tuple[str, str] | None:
+    """Exact partition key for :func:`_same_work`.
+
+    Two non-empty folded titles can satisfy ``_same_work`` only if both are
+    the same single word ``(w0, "")`` or both share the same first two words
+    ``(w0, w1)`` (since prefix matching requires at least two words).
+    """
+    if not title:
+        return None
+    parts = title.split(" ", 2)
+    return (parts[0], parts[1]) if len(parts) >= 2 else (parts[0], "")
+
+
 def collapse_repeats(refs: list, existing: list | None = None) -> list:
     """Keep one reference per cited work, in the order works are first cited.
 
@@ -867,7 +974,13 @@ def collapse_repeats(refs: list, existing: list | None = None) -> list:
     """
     kept: list = []
     keys: list[_WorkKey] = []
-    existing_keys = [_work_key(ref) for ref in existing or ()]
+    kept_buckets: dict[tuple[str, str], list[int]] = {}
+    existing_buckets: dict[tuple[str, str], list[_WorkKey]] = {}
+    for ref in existing or ():
+        ekey = _work_key(ref)
+        bkey = _work_bucket_key(ekey[0])
+        if bkey is not None:
+            existing_buckets.setdefault(bkey, []).append(ekey)
 
     def matches(key: _WorkKey, other: _WorkKey) -> bool:
         (title, names, year), (other_title, other_names, other_year) = key, other
@@ -879,18 +992,25 @@ def collapse_repeats(refs: list, existing: list | None = None) -> list:
 
     for ref in refs:
         key = _work_key(ref)
-        if any(matches(key, other) for other in existing_keys):
+        bkey = _work_bucket_key(key[0])
+        if bkey is not None and any(
+            matches(key, other) for other in existing_buckets.get(bkey, ())
+        ):
             continue
-        for index, other in enumerate(keys):
-            if matches(key, other):
+        bucket = kept_buckets.get(bkey, ()) if bkey is not None else ()
+        for index in bucket:
+            if matches(key, keys[index]):
                 if _filled(ref) > _filled(kept[index]):
                     ref.text_id = kept[index].text_id
                     kept[index] = ref
                     keys[index] = key
                 break
         else:
+            new_index = len(kept)
             kept.append(ref)
             keys.append(key)
+            if bkey is not None:
+                kept_buckets.setdefault(bkey, []).append(new_index)
     return kept
 
 

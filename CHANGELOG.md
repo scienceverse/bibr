@@ -45,6 +45,13 @@ call failed with a 400.
 
 ### Changed
 
+- When the reference tagger's split of a reference list is accepted, the
+  `line_stream` entry of `extraction.diagnostics.reference_yield.attempts`
+  has `tagger_final` as its only `reason_flags` entry and an empty `spans`.
+  It used to carry the stream's and the cascade's quality flags and the
+  stream's spans as well, for a split that could not replace the tagger's;
+  bibr no longer builds and scores it. The references are unchanged.
+
 - `bibr batch --llm local` on a vLLM server bibr starts now extracts 16 papers
   at once instead of 4. `PIPELINE_MAX_CONCURRENT_POST_PARSE` defaults to 4,
   which suits a cloud quota, but the vLLM server batches up to 64 requests and

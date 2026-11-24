@@ -110,6 +110,47 @@ class RedisResponseCache(ResponseCache):
     async def set(self, key: str, value: dict[str, Any], *, ttl_seconds: int | None = None) -> None:
         await self._set_raw(key, json.dumps(value), ttl_seconds=ttl_seconds)
 
+    async def get_many(self, keys: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch multiple JSON entries in a single Redis ``MGET`` round-trip."""
+        if not keys:
+            return {}
+        full_keys = [self._full_key(k) for k in keys]
+        try:
+            raws = await self._client().mget(full_keys)
+        except Exception as exc:  # noqa: BLE001 — best-effort shared cache
+            self._log_get_error(f"mget({len(keys)})", exc)
+            return {}
+        found: dict[str, dict[str, Any]] = {}
+        for key, raw in zip(keys, raws, strict=True):
+            if raw is None:
+                self.misses += 1
+                continue
+            try:
+                value = json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                logger.debug("Redis cache decode failed for %s: %s", key, exc)
+                self.misses += 1
+                continue
+            self.hits += 1
+            found[key] = value
+        return found
+
+    async def set_many(
+        self, items: dict[str, dict[str, Any]], *, ttl_seconds: int | None = None
+    ) -> None:
+        """Store multiple JSON entries in a single pipelined Redis round-trip."""
+        if not items:
+            return
+        ttl = self._ttl if ttl_seconds is None else ttl_seconds
+        ex = ttl if ttl > 0 else None
+        try:
+            pipe = self._client().pipeline(transaction=False)
+            for key, value in items.items():
+                pipe.set(self._full_key(key), json.dumps(value), ex=ex)
+            await pipe.execute()
+        except Exception as exc:  # noqa: BLE001 — best-effort shared cache
+            self._log_set_error(f"set_many({len(items)})", exc)
+
     async def close(self) -> None:
         if self.hits or self.misses:
             total = self.hits + self.misses

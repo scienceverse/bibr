@@ -26,8 +26,7 @@ def ocr_corruption_count(text: str) -> int:
     return len(OCR_CORRUPTION_CHAR_RE.findall(text))
 
 
-_SURROGATE_LO = 0xD800
-_SURROGATE_HI = 0xDFFF
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
 def strip_lone_surrogates(text: str) -> str:
@@ -38,11 +37,11 @@ def strip_lone_surrogates(text: str) -> str:
     containing one with ``TextEncodeInput``. Replacement preserves string
     length, so tokenizer offset mappings remain aligned.
     """
-    if not text:
+    if not text or text.isascii():
         return text
-    if not any(_SURROGATE_LO <= ord(ch) <= _SURROGATE_HI for ch in text):
+    if _SURROGATE_RE.search(text) is None:
         return text
-    return "".join("\ufffd" if _SURROGATE_LO <= ord(ch) <= _SURROGATE_HI else ch for ch in text)
+    return _SURROGATE_RE.sub("\ufffd", text)
 
 
 # Regex for detecting plain-text URLs (replaces spaCy's token.like_url).

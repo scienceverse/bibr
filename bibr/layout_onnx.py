@@ -41,6 +41,7 @@ and ``successor_order_logits``. Either way the result dicts feed
 from __future__ import annotations
 
 import concurrent.futures
+import functools
 import logging
 import threading
 from collections import defaultdict
@@ -72,6 +73,24 @@ _CUBIC_A = -0.75
 # so threaded output is bit-identical to the serial one.
 _RESIZE_THREADS = min(8, available_cpu_count())
 _RESIZE_ROWS_PER_THREAD = 256
+_RESIZE_POOL_LOCK = threading.Lock()
+_RESIZE_POOL: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_resize_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Process-wide worker pool shared across layout resize calls (avoids per-page pool churn)."""
+    global _RESIZE_POOL
+    pool = _RESIZE_POOL
+    if pool is None:
+        with _RESIZE_POOL_LOCK:
+            pool = _RESIZE_POOL
+            if pool is None:
+                pool = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max(8, available_cpu_count()),
+                    thread_name_prefix="bibr-resize",
+                )
+                _RESIZE_POOL = pool
+    return pool
 
 
 def _cubic_coefficients(t: np.ndarray) -> np.ndarray:
@@ -90,6 +109,7 @@ def _cubic_coefficients(t: np.ndarray) -> np.ndarray:
     return np.stack([conv2(t + 1.0), conv1(t), conv1(1.0 - t), conv2(2.0 - t)], axis=-1)
 
 
+@functools.lru_cache(maxsize=64)
 def _resize_plan(
     in_size: int, out_size: int, *, float_kernel: bool = False
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -130,7 +150,10 @@ def _resize_plan(
         weights = _cubic_coefficients(t)
     idx = base[:, None].astype(np.int64) + np.array([-1, 0, 1, 2], dtype=np.int64)[None, :]
     idx = np.clip(idx, 0, in_size - 1)
-    return idx, weights.astype(np.float32)
+    weights_f32 = weights.astype(np.float32)
+    idx.setflags(write=False)
+    weights_f32.setflags(write=False)
+    return idx, weights_f32
 
 
 def _cubic_near(x: np.ndarray, a: np.float32) -> np.ndarray:
@@ -188,10 +211,10 @@ def _x_pass(src: np.ndarray, out_w: int, ix: np.ndarray, wx: np.ndarray) -> np.n
     if workers == 1:
         block(0)
     else:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="bibr-resize"
-        ) as pool:
-            list(pool.map(block, range(workers)))
+        pool = _get_resize_pool()
+        futures = [pool.submit(block, b) for b in range(workers)]
+        for fut in futures:
+            fut.result()
     return tmp
 
 
@@ -292,6 +315,149 @@ def resize_bicubic_float(chw: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     return _bicubic_passes(src, out_h, out_w, round_between=False)
 
 
+def _resize_u8_hwc(
+    hwc: np.ndarray, out_h: int, out_w: int, *, parallel: bool = False
+) -> np.ndarray:
+    """Cache-blocked bicubic resize directly in ``(H, W, C)`` uint8 (bit-identical to planar V3)."""
+    in_h, in_w, c = hwc.shape
+    if (in_h, in_w) == (out_h, out_w):
+        return hwc.copy()
+    src = np.ascontiguousarray(hwc)
+    ix, wx = _resize_plan(in_w, out_w)
+    iy, wy = _resize_plan(in_h, out_h)
+
+    mid = np.empty((in_h, out_w, c), dtype=np.uint8)
+
+    def _x_range(row_lo: int, row_hi: int) -> None:
+        buf_h = min(_U8_RESIZE_BLOCK, row_hi - row_lo)
+        if buf_h <= 0:
+            return
+        acc_buf = np.empty((buf_h, out_w, c), dtype=np.float32)
+        term_buf = np.empty_like(acc_buf)
+        for lo in range(row_lo, row_hi, _U8_RESIZE_BLOCK):
+            hi = min(lo + _U8_RESIZE_BLOCK, row_hi)
+            bh = hi - lo
+            block = src[lo:hi]
+            acc = acc_buf[:bh]
+            term = term_buf[:bh]
+            for k in range(4):
+                taps = np.take(block, ix[:, k], axis=1)
+                weight = wx[:, k, None]
+                if k == 0:
+                    np.multiply(taps, weight, out=acc)
+                else:
+                    np.multiply(taps, weight, out=term)
+                    acc += term
+            np.rint(acc, out=acc)
+            np.clip(acc, 0, 255, out=acc)
+            mid[lo:hi] = acc
+
+    workers = min(_RESIZE_THREADS, max(1, in_h // _RESIZE_ROWS_PER_THREAD)) if parallel else 1
+    if workers == 1:
+        _x_range(0, in_h)
+    else:
+        bounds = [round(in_h * i / workers) for i in range(workers + 1)]
+        pool = _get_resize_pool()
+        futures = [pool.submit(_x_range, bounds[b], bounds[b + 1]) for b in range(workers)]
+        for fut in futures:
+            fut.result()
+
+    out = np.empty((out_h, out_w, c), dtype=np.uint8)
+    y_buf_h = min(_U8_RESIZE_BLOCK, out_h)
+    y_acc_buf = np.empty((y_buf_h, out_w, c), dtype=np.float32)
+    y_term_buf = np.empty_like(y_acc_buf)
+    for lo in range(0, out_h, _U8_RESIZE_BLOCK):
+        hi = min(lo + _U8_RESIZE_BLOCK, out_h)
+        bh = hi - lo
+        acc = y_acc_buf[:bh]
+        term = y_term_buf[:bh]
+        for k in range(4):
+            taps = np.take(mid, iy[lo:hi, k], axis=0)
+            weight = wy[lo:hi, k, None, None]
+            if k == 0:
+                np.multiply(taps, weight, out=acc)
+            else:
+                np.multiply(taps, weight, out=term)
+                acc += term
+        np.rint(acc, out=acc)
+        np.clip(acc, 0, 255, out=acc)
+        out[lo:hi] = acc
+    return out
+
+
+def _resize_float_from_u8_hwc(
+    hwc: np.ndarray,
+    out_h: int,
+    out_w: int,
+    factor: np.float32,
+    *,
+    parallel: bool = False,
+) -> np.ndarray:
+    """Cache-blocked V4 float bicubic directly from ``(H, W, C)`` uint8.
+
+    Rescales each 32-row block in L2 cache instead of materializing a 92 MB
+    full-page float32 array, executing the exact same float32 ops in the exact
+    same order as ``resize_bicubic_float(chw.astype(float32) * factor)``.
+    """
+    in_h, in_w, c = hwc.shape
+    src = np.ascontiguousarray(hwc)
+    if (in_h, in_w) == (out_h, out_w):
+        out = src.astype(np.float32)
+        out *= factor
+        return out
+    ix, wx = _resize_plan(in_w, out_w, float_kernel=True)
+    iy, wy = _resize_plan(in_h, out_h, float_kernel=True)
+
+    mid = np.empty((in_h, out_w, c), dtype=np.float32)
+
+    def _x_range(row_lo: int, row_hi: int) -> None:
+        buf_h = min(_U8_RESIZE_BLOCK, row_hi - row_lo)
+        if buf_h <= 0:
+            return
+        acc_buf = np.empty((buf_h, out_w, c), dtype=np.float32)
+        term_buf = np.empty_like(acc_buf)
+        for lo in range(row_lo, row_hi, _U8_RESIZE_BLOCK):
+            hi = min(lo + _U8_RESIZE_BLOCK, row_hi)
+            bh = hi - lo
+            src_block = src[lo:hi].astype(np.float32)
+            src_block *= factor
+            acc = acc_buf[:bh]
+            term = term_buf[:bh]
+            acc.fill(np.float32(0.0))
+            for k in range(4):
+                taps = np.take(src_block, ix[:, k], axis=1)
+                np.multiply(taps, wx[:, k, None], out=term)
+                acc += term
+            mid[lo:hi] = acc
+
+    workers = min(_RESIZE_THREADS, max(1, in_h // _RESIZE_ROWS_PER_THREAD)) if parallel else 1
+    if workers == 1:
+        _x_range(0, in_h)
+    else:
+        bounds = [round(in_h * i / workers) for i in range(workers + 1)]
+        pool = _get_resize_pool()
+        futures = [pool.submit(_x_range, bounds[b], bounds[b + 1]) for b in range(workers)]
+        for fut in futures:
+            fut.result()
+
+    out = np.empty((out_h, out_w, c), dtype=np.float32)
+    y_buf_h = min(_U8_RESIZE_BLOCK, out_h)
+    y_acc_buf = np.empty((y_buf_h, out_w, c), dtype=np.float32)
+    y_term_buf = np.empty_like(y_acc_buf)
+    for lo in range(0, out_h, _U8_RESIZE_BLOCK):
+        hi = min(lo + _U8_RESIZE_BLOCK, out_h)
+        bh = hi - lo
+        acc = y_acc_buf[:bh]
+        term = y_term_buf[:bh]
+        acc.fill(np.float32(0.0))
+        for k in range(4):
+            taps = np.take(mid, iy[lo:hi, k], axis=0)
+            np.multiply(taps, wy[lo:hi, k, None, None], out=term)
+            acc += term
+        out[lo:hi] = acc
+    return out
+
+
 def preprocess_images(
     images: list[Image.Image],
     *,
@@ -310,20 +476,44 @@ def preprocess_images(
     permute the predicted reading order.
     """
     out_h, out_w = size
-    batch = np.empty((len(images), 3, out_h, out_w), dtype=np.float32)
+    n = len(images)
+    batch = np.empty((n, 3, out_h, out_w), dtype=np.float32)
+    if n == 0:
+        return batch
     mean = np.asarray(image_mean, dtype=np.float32)[:, None, None]
     std = np.asarray(image_std, dtype=np.float32)[:, None, None]
     factor = np.float32(rescale_factor)
     upper = np.float32(255.0 * rescale_factor)
-    for i, image in enumerate(images):
-        rgb = image if image.mode == "RGB" else image.convert("RGB")
-        chw = np.asarray(rgb, dtype=np.uint8).transpose(2, 0, 1)
+    # Parallelize across pages for multi-page batches, or across row blocks for a single page.
+    batch_parallel = n > 1 and _RESIZE_THREADS > 1
+    inner_parallel = not batch_parallel and _RESIZE_THREADS > 1
+
+    # Ensure lazy PIL images are decoded before concurrent worker threads touch them.
+    rgb_images = [img if img.mode == "RGB" else img.convert("RGB") for img in images]
+    if batch_parallel:
+        for img in rgb_images:
+            img.load()
+
+    def _process_one(i: int) -> None:
+        hwc = np.asarray(rgb_images[i], dtype=np.uint8)
         if rescale_before_resize:
-            resized = resize_bicubic_float(chw.astype(np.float32) * factor, out_h, out_w)
-            batch[i] = (np.clip(resized, np.float32(0.0), upper) - mean) / std
+            resized = _resize_float_from_u8_hwc(hwc, out_h, out_w, factor, parallel=inner_parallel)
+            np.clip(resized, np.float32(0.0), upper, out=resized)
+            chw = resized.transpose(2, 0, 1)
+            batch[i] = (chw - mean) / std
         else:
-            resized = resize_bicubic_no_antialias(chw, out_h, out_w)
-            batch[i] = (resized.astype(np.float32) * factor - mean) / std
+            resized = _resize_u8_hwc(hwc, out_h, out_w, parallel=inner_parallel)
+            chw_f = resized.transpose(2, 0, 1).astype(np.float32)
+            batch[i] = (chw_f * factor - mean) / std
+
+    if batch_parallel:
+        pool = _get_resize_pool()
+        futures = [pool.submit(_process_one, i) for i in range(n)]
+        for fut in futures:
+            fut.result()
+    else:
+        for i in range(n):
+            _process_one(i)
     return batch
 
 

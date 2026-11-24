@@ -764,3 +764,34 @@ async def test_process_reads_the_input_file_once(tmp_path, monkeypatch):
     assert opens["n"] == 1
     assert outcome.sha256 == hashlib.sha256(item.path.read_bytes()).hexdigest()
     assert outcome.size == item.path.stat().st_size
+
+
+async def test_poll_errors_on_the_first_polls_span_the_poll_interval(tmp_path):
+    """The initial ramp ends on a failed poll: the error budget covers time, not six fast polls."""
+    serve = FakeServe()
+    clock = _Clock()
+    sleeper = _Sleeper(clock)
+    failed_at: list[float] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        polling = request.method == "GET" and request.url.path.startswith("/papers/jobs/")
+        if polling and len(failed_at) < 5:  # MAX_POLL_ERRORS, the most a poll rides out
+            failed_at.append(clock.now)
+            return httpx.Response(503, json={"detail": "job store unavailable"})
+        return serve.handler(request)
+
+    executor = RemoteExecutor(
+        RemoteOptions(serve_url="http://serve", token="t", poll_interval=4.0, retries=0),  # noqa: S106
+        transport=httpx.MockTransport(flaky),
+        sleep=sleeper,
+        clock=clock,
+        rng=_NoJitter(),
+    )
+    (item,) = _items(tmp_path, "good")
+
+    _, [(_, outcome)] = await _run(executor, [item])
+
+    assert outcome.ok
+    assert len(serve.submits) == 1  # the healthy job was not cancelled and re-submitted
+    assert len(failed_at) == 5
+    assert failed_at[-1] - failed_at[0] >= 4 * 4.0

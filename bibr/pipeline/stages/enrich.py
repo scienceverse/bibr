@@ -82,31 +82,34 @@ class EnrichmentStage:
             enrichment_warnings: dict[int, list[ProcessingWarning]] = {id(fs): [] for fs in papers}
             enrichment_details: dict[int, list[str]] = {id(fs): [] for fs in papers}
 
-            async def _timed(enricher, fs):
-                # Per-file wall clock, accumulated across enrichers, so batch
-                # exports can report each paper's own enrichment time.
+            async def _enrich_paper(fs):
+                # Run independent enrichers (e.g. Crossref + ROR) concurrently
+                # per paper so their separate network round-trips overlap; record
+                # true per-file enrichment wall time.
                 fs_t0 = time.monotonic()
                 try:
-                    return await enricher.enrich(fs)
+                    return await asyncio.gather(
+                        *[enricher.enrich(fs) for enricher in self._enrichers],
+                        return_exceptions=True,
+                    )
                 finally:
                     fs.stage_times[self.name] = fs.stage_times.get(self.name, 0.0) + (
                         time.monotonic() - fs_t0
                     )
 
-            for enricher in self._enrichers:
-                # return_exceptions: one file's enricher blowing up must not
-                # cancel its siblings or abort the chunk — enrichment is
-                # best-effort, so unexpected failures demote to warnings.
-                try:
-                    results = await asyncio.gather(
-                        *[_timed(enricher, fs) for fs in papers], return_exceptions=True
-                    )
-                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as exc:
-                    cancel_leftover_prefetches(papers)
-                    await self._record_cutoff(papers, type(exc).__name__)
-                    raise
+            try:
+                per_paper_results = await asyncio.gather(*[_enrich_paper(fs) for fs in papers])
+            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as exc:
+                cancel_leftover_prefetches(papers)
+                await self._record_cutoff(papers, type(exc).__name__)
+                raise
+
+            # Fold outcomes in deterministic (enricher, paper) order so warnings
+            # and failure records match sequential enricher order exactly.
+            for enricher_idx, enricher in enumerate(self._enrichers):
                 enricher_name = type(enricher).__name__
-                for fs, res in zip(papers, results, strict=True):
+                for fs, results_for_fs in zip(papers, per_paper_results, strict=True):
+                    res = results_for_fs[enricher_idx]
                     if isinstance(res, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                         cancel_leftover_prefetches(papers)
                         await self._record_cutoff(papers, type(res).__name__)

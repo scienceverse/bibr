@@ -168,7 +168,7 @@ def test_a_harvest_failure_stays_in_the_layer(monkeypatch):
     assert presence.has_mcids is None
 
 
-@pytest.mark.parametrize(("patched", "every_page"), [("_spans_and_lines", False), ("_pack", True)])
+@pytest.mark.parametrize(("patched", "every_page"), [("_union", False), ("_pack", True)])
 def test_a_page_that_fails_after_its_read_keeps_what_was_read(monkeypatch, patched, every_page):
     pdf_bytes = _pdfs.synthetic_paper()
     whole = _inspect(pdf_bytes, layer=True).document

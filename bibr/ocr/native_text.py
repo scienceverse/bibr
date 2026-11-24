@@ -393,6 +393,10 @@ def _link_kinds(
 
 
 def _printable_glyph(ch: str) -> bool:
+    if len(ch) == 1:
+        code = ord(ch)
+        if code < 128:
+            return 0x21 <= code <= 0x7E
     return ch != "\ufffd" and unicodedata.category(ch)[0] in "LNPS"
 
 
@@ -439,31 +443,82 @@ def _repair_word_boundaries(
     to *records* and is rebuilt in place with the same drops and inserts
     (``(-1, REC_SYNTH_SPACE)`` for an inserted space).
     """
+    n_glyphs = len(glyphs)
     pairs: list[tuple[str | None, float]] = []
     # Whether two glyphs belong to one link run (see _link_kinds).
     connected: list[bool] = []
-    for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
-        between = range(ra + 1, rb)
-        gap = _same_line_gap(la, lb) if _printable_glyph(ca) and _printable_glyph(cb) else None
-        after_accent = any(index in blank for index in between)
-        joined = all(
-            index in generated_breaks
-            or index in blank
-            or (after_accent and index in generated_spaces)
-            for index in between
-        )
-        connected.append(
-            all(
-                index in blank
-                or (gap is not None and index in generated_breaks)
-                or (index in generated_spaces and (ca in _LINK_JOINERS or cb in _LINK_JOINERS))
-                for index in between
-            )
-        )
-        kind = None
-        if gap is not None and joined:
-            kind = "adjacent" if all(index in blank for index in between) else "break"
-        pairs.append((kind, gap if gap is not None else 0.0))
+    if n_glyphs > 1:
+        printable = [_printable_glyph(c) for _, c, _ in glyphs]
+        same_line_tol = _SAME_LINE_TOLERANCE
+        gap_lo, gap_hi = _LINE_GAP_RANGE
+        link_joiners = _LINK_JOINERS
+        has_blank = bool(blank)
+        pairs_append = pairs.append
+        connected_append = connected.append
+
+        ra, ca, la = glyphs[0]
+        pa = printable[0]
+        for idx in range(1, n_glyphs):
+            rb, cb, lb = glyphs[idx]
+            pb = printable[idx]
+            gap: float | None = None
+            if pa and pb and la is not None and lb is not None:
+                ha = la[3] - la[1]
+                hb = lb[3] - lb[1]
+                height = ha if ha >= hb else hb
+                if height > 0.0:
+                    tol = same_line_tol * height
+                    if abs(la[1] - lb[1]) <= tol and abs(la[3] - lb[3]) <= tol:
+                        g = (lb[0] - la[2]) / height
+                        if gap_lo <= g <= gap_hi:
+                            gap = g
+
+            diff = rb - ra
+            if diff == 1:
+                # Common case: adjacent glyphs with no records in between.
+                connected_append(True)
+                pairs_append(("adjacent" if gap is not None else None, gap or 0.0))
+            elif diff == 2:
+                mid = ra + 1
+                in_blank = has_blank and mid in blank
+                in_gen_break = mid in generated_breaks
+                connected_append(
+                    in_blank
+                    or (gap is not None and in_gen_break)
+                    or (mid in generated_spaces and (ca in link_joiners or cb in link_joiners))
+                )
+                if gap is not None and (in_blank or in_gen_break):
+                    pairs_append(("adjacent" if in_blank else "break", gap))
+                else:
+                    pairs_append((None, gap or 0.0))
+            else:
+                between = range(ra + 1, rb)
+                after_accent = has_blank and any(index in blank for index in between)
+                joined = all(
+                    index in generated_breaks
+                    or (has_blank and index in blank)
+                    or (after_accent and index in generated_spaces)
+                    for index in between
+                )
+                is_link_joiner = ca in link_joiners or cb in link_joiners
+                connected_append(
+                    all(
+                        (has_blank and index in blank)
+                        or (gap is not None and index in generated_breaks)
+                        or (is_link_joiner and index in generated_spaces)
+                        for index in between
+                    )
+                )
+                kind = None
+                if gap is not None and joined:
+                    kind = (
+                        "adjacent"
+                        if (has_blank and all(index in blank for index in between))
+                        else "break"
+                    )
+                pairs_append((kind, gap or 0.0))
+
+            ra, ca, la, pa = rb, cb, lb, pb
     drop: set[int] = set()
     insert: dict[int, tuple[float, float]] = {}
     spaces: dict[int, int] = {}
@@ -666,8 +721,87 @@ def compose_spacing_accents(
     ]
 
 
+class _IndexedRecords(list):
+    """List of ``(char, center_x, center_y, is_newline)`` with a lazy line-run bbox index.
+
+    Transparently behaves as a plain ``list`` while allowing
+    :func:`_reconstruct_text_from_records` to skip disjoint lines in O(lines)
+    and append fully contained lines in one shot.
+    """
+
+    __slots__ = ("_line_runs",)
+
+    def __init__(self, iterable=()):
+        super().__init__(iterable)
+        self._line_runs: (
+            list[tuple[float, float, float, float, str, list[tuple[str, float, float]]]] | None
+        ) = None
+
+    def _get_line_runs(
+        self,
+    ) -> list[tuple[float, float, float, float, str, list[tuple[str, float, float]]]]:
+        runs = self._line_runs
+        if runs is not None:
+            return runs
+        runs = []
+        run_items: list[tuple[str, float, float]] = []
+        min_x = min_y = float("inf")
+        max_x = max_y = float("-inf")
+        for ch, cx, cy, is_newline in self:
+            if is_newline:
+                if run_items:
+                    runs.append(
+                        (
+                            min_x,
+                            max_x,
+                            min_y,
+                            max_y,
+                            "".join(c for c, _, _ in run_items),
+                            run_items,
+                        )
+                    )
+                    run_items = []
+                    min_x = min_y = float("inf")
+                    max_x = max_y = float("-inf")
+                continue
+            run_items.append((ch, cx, cy))
+            if cx < min_x:
+                min_x = cx
+            if cx > max_x:
+                max_x = cx
+            if cy < min_y:
+                min_y = cy
+            if cy > max_y:
+                max_y = cy
+        if run_items:
+            runs.append(
+                (min_x, max_x, min_y, max_y, "".join(c for c, _, _ in run_items), run_items)
+            )
+        self._line_runs = runs
+        return runs
+
+    def __setitem__(self, key, value):
+        self._line_runs = None
+        super().__setitem__(key, value)
+
+    def append(self, item):
+        self._line_runs = None
+        super().append(item)
+
+    def extend(self, iterable):
+        self._line_runs = None
+        super().extend(iterable)
+
+    def clear(self):
+        self._line_runs = None
+        super().clear()
+
+
 def _build_page_char_records(
-    textpage, trace: PageCharTrace | None = None
+    textpage,
+    trace: PageCharTrace | None = None,
+    *,
+    raw_out: dict[str, object] | None = None,
 ) -> list[tuple[str, float, float, bool]]:
     """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
@@ -710,15 +844,23 @@ def _build_page_char_records(
     *trace*, when given, receives every pdfium code and tight box the loop
     reads and, parallel to the returned records, where each record came from
     (see :class:`PageCharTrace`). The records are the same either way.
+    *raw_out*, when given, receives ``"codes"`` and ``"boxes"`` (parallel to
+    pdfium char indices) so callers can reuse them without re-walking pdfium.
     """
-    records, spaces_misplaced = _page_char_records(textpage, trace, spaces_at_glyph_end=False)
+    records, spaces_misplaced = _page_char_records(
+        textpage, trace, spaces_at_glyph_end=False, raw_out=raw_out
+    )
     if spaces_misplaced:
-        records, _ = _page_char_records(textpage, trace, spaces_at_glyph_end=True)
-    return records
+        records, _ = _page_char_records(textpage, trace, spaces_at_glyph_end=True, raw_out=raw_out)
+    return _IndexedRecords(records)
 
 
 def _page_char_records(
-    textpage, trace: PageCharTrace | None, *, spaces_at_glyph_end: bool
+    textpage,
+    trace: PageCharTrace | None,
+    *,
+    spaces_at_glyph_end: bool,
+    raw_out: dict[str, object] | None = None,
 ) -> tuple[list[tuple[str, float, float, bool]], bool]:
     """The page's char records and whether its generated spaces lie out of place.
 
@@ -728,23 +870,62 @@ def _page_char_records(
     """
     import pypdfium2 as pdfium
 
-    def _charbox(index: int) -> tuple[float, float, float, float] | None:
-        try:
-            return textpage.get_charbox(index)
-        except Exception:  # noqa: BLE001 - pdfium per-char failures are noisy and benign here
+    pdfium_c = pdfium.raw
+    raw_handle = textpage.raw
+    get_unicode = pdfium_c.FPDFText_GetUnicode
+    is_generated_fn = pdfium_c.FPDFText_IsGenerated
+
+    if isinstance(textpage, pdfium.PdfTextPage):
+        _c_l = ctypes.c_double()
+        _c_r = ctypes.c_double()
+        _c_b = ctypes.c_double()
+        _c_t = ctypes.c_double()
+        _b_l = ctypes.byref(_c_l)
+        _b_r = ctypes.byref(_c_r)
+        _b_b = ctypes.byref(_c_b)
+        _b_t = ctypes.byref(_c_t)
+        _get_box = pdfium_c.FPDFText_GetCharBox
+        _loose_rect = pdfium_c.FS_RECTF()
+        _b_loose = ctypes.byref(_loose_rect)
+        _get_loose_box = pdfium_c.FPDFText_GetLooseCharBox
+
+        def _charbox(index: int) -> tuple[float, float, float, float] | None:
+            if _get_box(raw_handle, index, _b_l, _b_r, _b_b, _b_t):
+                return (_c_l.value, _c_b.value, _c_r.value, _c_t.value)
             return None
+
+        def _loose(index: int) -> tuple[float, float, float, float] | None:
+            if _get_loose_box(raw_handle, index, _b_loose):
+                return (_loose_rect.left, _loose_rect.bottom, _loose_rect.right, _loose_rect.top)
+            return None
+    else:
+
+        def _charbox(index: int) -> tuple[float, float, float, float] | None:
+            try:
+                return textpage.get_charbox(index)
+            except Exception:  # noqa: BLE001 - pdfium per-char failures are noisy and benign here
+                return None
+
+        def _loose(index: int) -> tuple[float, float, float, float] | None:
+            return _loose_charbox(textpage, index)
 
     n_chars = textpage.count_chars()
     records: list[tuple[str, float, float, bool]] = []
     # (pdfium index, REC_* flags) of each record, parallel to *records*, when
     # tracing for the document layer.
     meta: list[tuple[int, int]] | None = None
-    codes: list[int] = []
-    char_boxes: list[tuple[float, float, float, float] | None] = []
+    record_raw = trace is not None or raw_out is not None
+    codes: list[int] = [0] * n_chars if record_raw else []
+    char_boxes: list[tuple[float, float, float, float] | None] = (
+        [None] * n_chars if record_raw else []
+    )
     if trace is not None:
         meta = []
-        codes = trace.codes = [0] * n_chars
-        char_boxes = trace.boxes = [None] * n_chars
+        trace.codes = codes
+        trace.boxes = char_boxes
+    if raw_out is not None:
+        raw_out["codes"] = codes
+        raw_out["boxes"] = char_boxes
     # Index, box and ligature flag of the last non-whitespace glyph on the line.
     line_glyph: tuple[int, tuple[float, float, float, float], bool] | None = None
     # Raised spaces waiting for the glyph after them: (record index, the
@@ -780,26 +961,27 @@ def _page_char_records(
 
     i = 0
     while i < n_chars:
-        code_unit = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
+        code_unit = get_unicode(raw_handle, i)
         consumed = 1
-        boxes = [_charbox(i)]
-        if meta is not None:
+        box0 = _charbox(i)
+        box1: tuple[float, float, float, float] | None = None
+        if record_raw:
             codes[i] = code_unit
-            char_boxes[i] = boxes[0]
+            char_boxes[i] = box0
 
         # PDFium exposes non-BMP text as UTF-16 code units. Joining each unit
         # independently creates lone-surrogate Python strings that cannot be
         # UTF-8 encoded and crash Hugging Face tokenizers downstream.
         if 0xD800 <= code_unit <= 0xDBFF and i + 1 < n_chars:
-            low = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i + 1)
+            low = get_unicode(raw_handle, i + 1)
             if 0xDC00 <= low <= 0xDFFF:
                 scalar = 0x10000 + ((code_unit - 0xD800) << 10) + (low - 0xDC00)
                 ch = chr(scalar)
                 consumed = 2
-                boxes.append(_charbox(i + 1))
-                if meta is not None:
+                box1 = _charbox(i + 1)
+                if record_raw:
                     codes[i + 1] = low
-                    char_boxes[i + 1] = boxes[1]
+                    char_boxes[i + 1] = box1
             else:
                 ch = "\ufffd"
         elif 0xD800 <= code_unit <= 0xDFFF or code_unit > 0x10FFFF:
@@ -808,43 +990,63 @@ def _page_char_records(
             ch = chr(code_unit)
 
         if ch in ("\n", "\r"):
-            _settle(None)
-            if pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
+            if raised:
+                _settle(None)
+            if is_generated_fn(raw_handle, i) == 1:
                 generated_breaks.add(len(records))
             records.append((ch, 0.0, 0.0, True))
             if meta is not None:
                 meta.append((i, 0))
             line_glyph = None
-            spaces_waiting.clear()
+            if spaces_waiting:
+                spaces_waiting.clear()
             i += consumed
             continue
 
-        valid_boxes = [box for box in boxes if box is not None]
-        if not valid_boxes:
-            i += consumed
+        if consumed == 1:
+            if box0 is None:
+                i += 1
+                continue
+            box = box0
+            cl, cb, cr, ct = box0
+        elif box0 is not None and box1 is not None:
+            cl = box0[0] if box0[0] <= box1[0] else box1[0]
+            cb = box0[1] if box0[1] <= box1[1] else box1[1]
+            cr = box0[2] if box0[2] >= box1[2] else box1[2]
+            ct = box0[3] if box0[3] >= box1[3] else box1[3]
+            box = (cl, cb, cr, ct)
+        elif box0 is not None:
+            box = box0
+            cl, cb, cr, ct = box0
+        elif box1 is not None:
+            box = box1
+            cl, cb, cr, ct = box1
+        else:
+            i += 2
             continue
-        cl = min(box[0] for box in valid_boxes)
-        cb = min(box[1] for box in valid_boxes)
-        cr = max(box[2] for box in valid_boxes)
-        ct = max(box[3] for box in valid_boxes)
-        box = (cl, cb, cr, ct)
-        generated_space = ch == " " and pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1
+
+        generated_space = ch == " " and is_generated_fn(raw_handle, i) == 1
         if generated_space and line_glyph is not None:
             spaces_waiting.append((box, line_glyph[1]))
             if spaces_at_glyph_end:
                 cl = cr = line_glyph[1][2]
                 box = (cl, cb, cr, ct)
         center_y = (cb + ct) / 2.0
-        if not ch.isspace():
-            for space_box, before_box in spaces_waiting:
-                stray = _generated_space_misplaced(space_box, before_box, box)
-                if stray is not None:
-                    spaces_misplaced += stray
-                    spaces_placed += not stray
-            spaces_waiting.clear()
-            _settle(box)
+        is_space = ch == " " or ch.isspace()
+        if not is_space:
+            if spaces_waiting:
+                for space_box, before_box in spaces_waiting:
+                    stray = _generated_space_misplaced(space_box, before_box, box)
+                    if stray is not None:
+                        spaces_misplaced += stray
+                        spaces_placed += not stray
+                spaces_waiting.clear()
+            if raised:
+                _settle(box)
             is_ligature = ch in _LIGATURE_CHARS or (line_glyph is not None and line_glyph[1] == box)
             line_glyph = (i, box, is_ligature)
+            glyphs.append((len(records), ch, _loose(i)))
+            glyph_boxes.append((ch, box))
         elif line_glyph is not None:
             glyph_index, glyph_box, glyph_is_ligature = line_glyph
             if glyph_is_ligature and _is_inner_whitespace(
@@ -859,16 +1061,14 @@ def _page_char_records(
                 and gb <= cb + _BASELINE_TOLERANCE_RATIO * (gt - gb)
             ):
                 raised.append((len(records), center_y, (gb + gt) / 2.0))
-        if not ch.isspace():
-            glyphs.append((len(records), ch, _loose_charbox(textpage, i)))
-            glyph_boxes.append((ch, box))
         if generated_space:
             generated_spaces.add(len(records))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
         if meta is not None:
             meta.append((i, REC_SURROGATE_PAIR if consumed == 2 else 0))
         i += consumed
-    _settle(None)
+    if raised:
+        _settle(None)
     misplaced = _generated_spaces_misplaced(spaces_misplaced, spaces_placed)
     accents = _spacing_accent_targets(glyph_boxes)
     if not accents:
@@ -927,7 +1127,26 @@ def _reconstruct_text_from_records(
     has already been emitted AND another in-region char follows it, joined as
     ``"\\r\\n"`` (matching ``get_text_bounded``'s line separator).
     """
-    parts: list[str] = []
+    if isinstance(records, _IndexedRecords):
+        parts: list[str] = []
+        for min_x, max_x, min_y, max_y, run_text, run_items in records._get_line_runs():
+            if max_x < left or min_x > right or max_y < bottom or min_y > top:
+                continue
+            if left <= min_x and max_x <= right and bottom <= min_y and max_y <= top:
+                if parts:
+                    parts.append("\r\n")
+                parts.append(run_text)
+                continue
+            matched = [
+                ch for ch, cx, cy in run_items if left <= cx <= right and bottom <= cy <= top
+            ]
+            if matched:
+                if parts:
+                    parts.append("\r\n")
+                parts.extend(matched)
+        return "".join(parts)
+
+    parts = []
     pending_break = False
     for ch, cx, cy, is_newline in records:
         if is_newline:
@@ -1502,6 +1721,7 @@ def _fill_page_regions_from_textpage(
     rotation: int = 0,
     records: list[tuple[str, float, float, bool]] | None = None,
     page=None,
+    page_cache: dict[str, object] | None = None,
 ) -> None:
     """Pre-fill eligible regions' ``content`` from an already-open textpage.
 
@@ -1523,10 +1743,16 @@ def _fill_page_regions_from_textpage(
         if _has_rtl(text):
             return True
         if "invisible" not in furniture_state:
-            try:
-                share = _invisible_text_share(textpage)
-            except Exception:  # noqa: BLE001 - without the rule the page reads as visible
-                share = None
+            if page_cache is not None and "invisible_share" in page_cache:
+                share = page_cache["invisible_share"]
+            else:
+                try:
+                    codes = page_cache.get("codes") if page_cache is not None else None
+                    share = _invisible_text_share(textpage, codes=codes)
+                    if page_cache is not None:
+                        page_cache["invisible_share"] = share
+                except Exception:  # noqa: BLE001 - without the rule the page reads as visible
+                    share = None
             furniture_state["invisible"] = share is not None and share >= (
                 _SCAN_PAGE_MIN_INVISIBLE_SHARE
             )
@@ -1535,10 +1761,15 @@ def _fill_page_regions_from_textpage(
         if page is None:
             return False
         if "scan_like" not in furniture_state:
-            try:
-                coverage = _page_image_coverage(page, crop_box)
-            except Exception:  # noqa: BLE001 - without the rule the page reads as born-digital
-                coverage = 0.0
+            if page_cache is not None and "image_coverage" in page_cache:
+                coverage = page_cache["image_coverage"]
+            else:
+                try:
+                    coverage = _page_image_coverage(page, crop_box)
+                    if page_cache is not None:
+                        page_cache["image_coverage"] = coverage
+                except Exception:  # noqa: BLE001 - without the rule the page reads as born-digital
+                    coverage = 0.0
             furniture_state["scan_like"] = _coverage_qualifies(coverage)
         if furniture_state["scan_like"]:
             return True
@@ -3630,7 +3861,10 @@ def _coverage_qualifies(coverage: float) -> bool:
     return coverage >= _SCAN_PAGE_MIN_IMAGE_COVERAGE
 
 
-def _invisible_text_share(textpage) -> float | None:
+_ASCII_WHITESPACE_CODES = frozenset((9, 10, 11, 12, 13, 28, 29, 30, 31, 32))
+
+
+def _invisible_text_share(textpage, *, codes: list[int] | None = None) -> float | None:
     """:func:`_invisible_share` of a text page, read through PDFium.
 
     Raises when this PDFium build cannot map a character to its text object,
@@ -3642,22 +3876,62 @@ def _invisible_text_share(textpage) -> float | None:
     if text_object_of is None:
         raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
     is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
+    get_render_mode = pdfium_c.FPDFTextObj_GetTextRenderMode
+    get_unicode = pdfium_c.FPDFText_GetUnicode
     handle = textpage.raw
+    n_chars = textpage.count_chars()
+    use_codes = codes is not None and len(codes) == n_chars
+    uncounted = _UNCOUNTED_CHAR_CODES
+    ascii_ws = _ASCII_WHITESPACE_CODES
+    invisible_modes = _INVISIBLE_TEXT_RENDER_MODES
 
-    def render_mode_of(index: int) -> int | None:
+    counted = invisible = 0
+    for index in range(n_chars):
+        code = codes[index] if use_codes else get_unicode(handle, index)
+        if code < 128:
+            if code in ascii_ws or code in uncounted:
+                continue
+        elif code in uncounted or (code <= 0x10FFFF and chr(code).isspace()):
+            continue
+        if is_generated is not None and is_generated(handle, index) == 1:
+            continue
         obj = text_object_of(handle, index)
-        return pdfium_c.FPDFTextObj_GetTextRenderMode(obj) if obj else None
+        if not obj:
+            continue
+        counted += 1
+        if get_render_mode(obj) in invisible_modes:
+            invisible += 1
+    return invisible / counted if counted else None
 
-    return _invisible_share(
-        textpage.count_chars(),
-        lambda index: pdfium_c.FPDFText_GetUnicode(handle, index),
-        lambda index: is_generated is not None and is_generated(handle, index) == 1,
-        render_mode_of,
-    )
+
+def _is_invisible_text_layer_page_cached(
+    page,
+    textpage,
+    crop_box: tuple[float, float, float, float],
+    page_cache: dict[str, object] | None,
+) -> bool:
+    if page_cache is not None and "image_coverage" in page_cache:
+        coverage = page_cache["image_coverage"]
+    else:
+        coverage = _page_image_coverage(page, crop_box)
+        if page_cache is not None:
+            page_cache["image_coverage"] = coverage
+    if not _coverage_qualifies(coverage):
+        return False
+    if page_cache is not None and "invisible_share" in page_cache:
+        share = page_cache["invisible_share"]
+    else:
+        codes = page_cache.get("codes") if page_cache is not None else None
+        share = _invisible_text_share(textpage, codes=codes)
+        if page_cache is not None:
+            page_cache["invisible_share"] = share
+    return _share_qualifies(share)
 
 
 def _is_invisible_text_layer_page(
-    page, textpage, crop_box: tuple[float, float, float, float]
+    page,
+    textpage,
+    crop_box: tuple[float, float, float, float],
 ) -> bool:
     """True when the page is a scan whose text layer is a hidden OCR layer.
 
@@ -3667,9 +3941,7 @@ def _is_invisible_text_layer_page(
     keeps its visible text, and a figure-sized image never qualifies. Operates
     on a caller-provided (lock-held) page and textpage.
     """
-    if not _coverage_qualifies(_page_image_coverage(page, crop_box)):
-        return False
-    return _share_qualifies(_invisible_text_share(textpage))
+    return _is_invisible_text_layer_page_cached(page, textpage, crop_box, None)
 
 
 def fill_regions_from_native_text(

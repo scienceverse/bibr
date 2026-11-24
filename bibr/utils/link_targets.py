@@ -95,17 +95,27 @@ class LinkTargets:
 
     def __init__(self, uris: Iterable[str]) -> None:
         forms: set[str] = set()
+        seen_uris: set[str] = set()
         for uri in uris:
-            if isinstance(uri, str):
+            if isinstance(uri, str) and uri not in seen_uris:
+                seen_uris.add(uri)
                 forms |= printed_forms(uri)
         self._forms = frozenset(forms)
+        self._index: dict[tuple[str, str], list[tuple[str, int]]] | None = None
+
+    def _get_index(self) -> dict[tuple[str, str], list[tuple[str, int]]]:
+        index = self._index
+        if index is not None:
+            return index
         # (up to _KEY_LEFT characters before a position, the character at it) ->
         # (form, position): the places a break can fall inside each form.
-        index: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+        built: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
         for form in self._forms:
             for p in range(1, len(form)):
-                index[(form[max(0, p - _KEY_LEFT) : p], form[p])].append((form, p))
-        self._index = dict(index)
+                built[(form[max(0, p - _KEY_LEFT) : p], form[p])].append((form, p))
+        index = dict(built)
+        self._index = index
+        return index
 
     @classmethod
     def from_uri_dicts(cls, links: Iterable[Mapping[str, Any]] | None) -> LinkTargets | None:
@@ -149,17 +159,32 @@ class LinkTargets:
         left = before.casefold()
         right = after.casefold()
         seam = len(left)
-        joined = left + right
+        right0 = right[0]
+        index = self._get_index()
+        joined: str | None = None
         # A key holds up to _KEY_LEFT characters before the break: fewer only where
-        # the form starts there, so each size finds the forms whose link starts
-        # that far back in *before*.
-        found = any(
-            _may_start_link(left, seam - p)
-            and left[seam - p :] == form[:p]
-            and _runs_on(joined, seam - p, form, seam, line_ends)
-            for size in range(min(_KEY_LEFT, seam), 0, -1)
-            for form, p in self._index.get((left[-size:], right[0]), ())
-        )
+        # the form starts there, so for size < _KEY_LEFT every entry has p == size
+        # and can only match when a link may start at seam - size. Guarding that
+        # avoids scanning high-collision short keys like ("h", "t") on "with\nthe".
+        found = False
+        for size in range(min(_KEY_LEFT, seam), 0, -1):
+            if size < _KEY_LEFT and not _may_start_link(left, seam - size):
+                continue
+            bucket = index.get((left[-size:], right0))
+            if not bucket:
+                continue
+            if joined is None:
+                joined = left + right
+            for form, p in bucket:
+                if (
+                    _may_start_link(left, seam - p)
+                    and left[seam - p :] == form[:p]
+                    and _runs_on(joined, seam - p, form, seam, line_ends)
+                ):
+                    found = True
+                    break
+            if found:
+                break
         # One target ending at the break while another runs on proves nothing.
         return found and not self._ends_at(left)
 

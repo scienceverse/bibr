@@ -34,7 +34,7 @@ from bibr.structure.float_labels import (
     caption_label,
     normalize_label,
 )
-from bibr.structure.floats_normalize import continuation_frame
+from bibr.structure.floats_normalize import _continuation_pieces
 from bibr.structure.html_table import html_table_frame
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
@@ -1729,6 +1729,7 @@ class MediaHandlersMixin:
         continuation_owners: dict[str, int] = {}
         grouped: list[PaperTable] = []
         group_last_source: dict[int, int] = {}
+        pending_frames: dict[int, list[pd.DataFrame]] = {}
         for table in self.tables:
             if not grouped:
                 grouped.append(table)
@@ -1813,26 +1814,35 @@ class MediaHandlersMixin:
                 continue
             previous.parts.extend(table.parts)
             previous.provenance.extend(table.provenance)
-            # A part that does not repeat the header had its first row read as
-            # column names; ``continuation_frame`` puts it back into the rows.
-            merged_frame = None if compatible_columns else continuation_frame(previous.df, table.df)
-            previous.df = (
-                merged_frame
-                if merged_frame is not None
-                else pd.concat([previous.df, table.df], ignore_index=True)
+            # Accumulate frames per survivor and concatenate once at the end of
+            # the loop instead of O(K^2) repeated pd.concat and HTML joins.
+            pid = id(previous)
+            frames = pending_frames.get(pid)
+            if frames is None:
+                frames = pending_frames[pid] = [previous.df]
+            pieces = (
+                None if compatible_columns else _continuation_pieces(previous.df.columns, table.df)
             )
-            # Keep each printed piece's source markup (rowspans, multi-level
-            # headers) rather than re-rendering the merged frame, which is lossy
-            # (see ``_handle_table``); the merged frame still feeds ``contents``.
-            previous.tbl_html = "\n".join(
-                part.tbl_html for part in previous.parts if part.tbl_html
-            ) or previous.df.to_html(index=False)
-            self._table_source_indices[id(previous)] = min(
-                self._table_source_indices[id(previous)], self._table_source_indices[id(table)]
+            if pieces is not None:
+                frames.extend(pieces)
+            else:
+                frames.append(table.df)
+            self._table_source_indices[pid] = min(
+                self._table_source_indices[pid], self._table_source_indices[id(table)]
             )
-            group_last_source[id(previous)] = current_source
+            group_last_source[pid] = current_source
             if current_candidate is not None and (explicit_continuation or same_explicit_label):
-                continuation_owners[current_candidate.caption_id] = id(previous)
+                continuation_owners[current_candidate.caption_id] = pid
+        for table in grouped:
+            frames = pending_frames.get(id(table))
+            if frames is not None:
+                table.df = pd.concat(frames, ignore_index=True)
+                # Keep each printed piece's source markup (rowspans, multi-level
+                # headers) rather than re-rendering the merged frame, which is lossy
+                # (see ``_handle_table``); the merged frame still feeds ``contents``.
+                table.tbl_html = "\n".join(
+                    part.tbl_html for part in table.parts if part.tbl_html
+                ) or table.df.to_html(index=False)
         self.tables = grouped
         fragment_owners = {
             self._table_caption_fragments[candidate.caption_id]: id(table)

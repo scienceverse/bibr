@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -226,6 +225,7 @@ class StatementTagger:
         threads: int | None = None,
         session_options: Any = None,
         batch_size: int = DEFAULT_BATCH,
+        probe: bool = True,
     ) -> None:
         self.directory = bundle_dir(path)
         manifest = read_manifest(self.directory)
@@ -279,8 +279,9 @@ class StatementTagger:
                 f"{model_path}: graph inputs {inputs} / outputs {outputs}; want inputs "
                 f"{list(INPUT_NAMES)} and output {OUTPUT_NAME!r}"
             )
-        self._lock = threading.Lock()
-        self._check_graph()
+        # CPU ORT InferenceSession.run and immutable Rust tokenizers are thread-safe.
+        if probe:
+            self._check_graph()
 
     def _check_graph(self) -> None:
         """Run the graph on blocks in the shapes :meth:`probabilities` sends.
@@ -312,10 +313,9 @@ class StatementTagger:
                 ids, mask = ids[:, :n], mask[:, :n]
             shape = f"a {ids.shape} batch of blocks"
             try:
-                with self._lock:
-                    probs = self._session.run(
-                        [OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask}
-                    )[0]
+                probs = self._session.run(
+                    [OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask}
+                )[0]
             except Exception as exc:
                 raise StatementTaggerError(
                     f"{self.directory}: the graph does not run on {shape} "
@@ -350,10 +350,7 @@ class StatementTagger:
             encoded = self._tokenizer.encode_batch([pairs[j] for j in idx])
             ids = np.asarray([e.ids for e in encoded], dtype=np.int64)
             mask = np.asarray([e.attention_mask for e in encoded], dtype=np.int64)
-            with self._lock:
-                probs = self._session.run(
-                    [OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask}
-                )[0]
+            probs = self._session.run([OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask})[0]
             out[idx] = np.asarray(probs, dtype=np.float32)
         return out
 
