@@ -45,6 +45,16 @@ def test_symbol_printed_after_the_cue_still_flags():
     assert [a.corresponding for a in got.byline.authors] == [False, True]
 
 
+def test_taylor_and_francis_contact_cue_flags_by_name_with_opaque_email():
+    got = _byline_page("CONTACT Rui Costa rc99@uni.edu Univ B")
+    assert [a.corresponding for a in got.byline.authors] == [False, True]
+
+
+def test_lowercase_contact_without_email_does_not_flag():
+    got = _byline_page("Please contact Rui Costa for survey instruments.")
+    assert [a.corresponding for a in got.byline.authors] == [False, False]
+
+
 def test_number_range_in_marks_is_not_expanded_past_a_key():
     # A year or a postcode read as a mark after a dash must not expand into
     # millions of keys (a ten-digit number would not finish).

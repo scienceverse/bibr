@@ -23,6 +23,7 @@ from bibr.paper_contents import (
     FRONT_MATTER_FURNITURE_LABELS,
     FRONT_MATTER_MASTHEAD_RE,
     CanonicalSection,
+    is_author_metadata_heading,
     is_exact_front_matter_furniture,
 )
 from bibr.structure.section_classifier import TRUSTED_TYPE_CONFIDENCE
@@ -459,6 +460,15 @@ def _section_reading(contents: PaperContents, first_page: int | None) -> _Sectio
     """
 
     numbered = body_numbered_section_ids(contents.sections)
+    first_page_sentence_sections = (
+        {
+            sentence.section_id
+            for sentence in contents.sentences
+            if first_page in _sentence_pages(sentence)
+        }
+        if first_page is not None
+        else set()
+    )
     body: set[int] = set()
     untyped: set[int] = set()
     opened = False
@@ -467,6 +477,27 @@ def _section_reading(contents: PaperContents, first_page: int | None) -> _Sectio
         if section.level <= 0:
             continue
         section_id = section.section_id
+        # Author-metadata headings on page 1 ("Corresponding authors:",
+        # "*CORRESPONDENCE", "CORRESPONDING AUTHOR: ...") are typed FOOTNOTE
+        # by exact_alias so they never count as body/acknowledgment text, yet
+        # their rows still belong to front matter for author/correspondence
+        # extraction (``_is_false_title_seed`` prevents them from seeding a
+        # second title record). Back-matter author-details/ORCID headings on
+        # later pages stay out of front matter.
+        on_front_page = (
+            _on_page(section, first_page)
+            or (not section.provenance and section_id in first_page_sentence_sections)
+            if first_page is not None
+            else not opened
+        )
+        if (
+            section.section_type == CanonicalSection.FOOTNOTE
+            and not section.header_is_synthetic
+            and on_front_page
+            and is_author_metadata_heading(section.header or "")
+        ):
+            untyped.add(section_id)
+            continue
         if not opened:
             if section.section_type in {CanonicalSection.ABSTRACT, CanonicalSection.KEYWORDS}:
                 front_closed = True
@@ -1575,7 +1606,9 @@ def _is_false_title_seed(draft: _CandidateDraft) -> bool:
     Article-type kickers, badges, and information-box headings can be misclassified as TITLE sections and split the real record. Use anchored full-string matching so substrings of genuine titles remain eligible.
     """
 
-    return is_exact_front_matter_furniture(draft.raw_text)
+    return is_exact_front_matter_furniture(draft.raw_text) or is_author_metadata_heading(
+        draft.raw_text
+    )
 
 
 def _candidate_roles(
