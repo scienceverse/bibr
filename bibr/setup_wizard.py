@@ -1265,6 +1265,47 @@ def _extras_spec(extras: set[str]) -> str:
     return ",".join(sorted(extras))
 
 
+def _is_uv_tool_env(prefix: Path | None = None) -> bool:
+    """Whether *prefix* (default ``sys.prefix``) is a ``uv tool`` environment."""
+    return ((prefix or Path(sys.prefix)) / "uv-receipt.toml").is_file()
+
+
+def _uv_tool_bibr_requirement(prefix: Path | None = None) -> tuple[set[str], str] | None:
+    """Return ``(existing_extras, version_specifier)`` for a PyPI ``uv tool`` bibr install.
+
+    Returns ``None`` when not running inside a ``uv tool`` environment, when
+    the receipt is unreadable, when ``--with`` added extra tool requirements,
+    or when bibr came from a local path/git/URL source (in which case
+    ``uv pip install --python sys.executable`` avoids clobbering the custom
+    tool install).
+    """
+    receipt_path = (prefix or Path(sys.prefix)) / "uv-receipt.toml"
+    if not receipt_path.is_file():
+        return None
+    try:
+        data = tomllib.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return None
+    requirements = tool.get("requirements")
+    if not isinstance(requirements, list) or len(requirements) != 1:
+        return None
+    entry = requirements[0]
+    if not isinstance(entry, dict) or entry.get("name") != "bibr":
+        return None
+    if any(key in entry for key in ("directory", "path", "git", "url", "editable")):
+        return None
+    raw_extras = entry.get("extras") or []
+    if not isinstance(raw_extras, list) or not all(isinstance(e, str) for e in raw_extras):
+        return None
+    raw_specifier = entry.get("specifier") or ""
+    if not isinstance(raw_specifier, str):
+        return None
+    return set(raw_extras), raw_specifier
+
+
 def _install_command_for_extras(
     extras: set[str],
     *,
@@ -1286,6 +1327,15 @@ def _install_command_for_extras(
         return (
             [uv_bin, "sync", "--inexact", *(f"--extra={extra}" for extra in sorted(extras))],
             "Installing extras for this bibr source checkout",
+        )
+
+    if uv_bin and (tool_req := _uv_tool_bibr_requirement()) is not None:
+        existing_extras, specifier = tool_req
+        merged_spec = f"bibr[{_extras_spec(existing_extras | extras)}]{specifier}"
+        py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        return (
+            [uv_bin, "tool", "install", "--python", py_ver, merged_spec],
+            "Updating bibr tool with extras",
         )
 
     if uv_bin and project_name and _runs_in_project_env(cwd):
@@ -1892,6 +1942,18 @@ class SetupWizard:
             command = self._install_command_text({"demo"})
             how = f" [cyan]{escape(command)}[/cyan]" if command else " the demo extra"
             lines.append(f"  [dim]bibr demo, the web demo, needs the demo extra:[/dim]{how}")
+        if shutil.which("bibr") is None:
+            if _is_uv_tool_env():
+                lines.append(
+                    "  [dim]bibr is not on PATH yet — run[/dim] [cyan]uv tool update-shell[/cyan]"
+                    " [dim]and open a new terminal.[/dim]"
+                )
+            elif shutil.which("uv") and _project_name(Path.cwd()) != "bibr":
+                lines.append(
+                    "  [dim]bibr is not on PATH here: prefix commands with[/dim]"
+                    " [cyan]uv run[/cyan][dim], or install globally with[/dim]"
+                    " [cyan]uv tool install --python 3.12 bibr[/cyan][dim].[/dim]"
+                )
         self.console.print("\n".join(lines))
 
     def _step_extras(self) -> None:

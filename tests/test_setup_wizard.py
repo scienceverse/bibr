@@ -818,6 +818,90 @@ def test_install_command_without_uv_uses_current_python_pip(tmp_path):
     assert "current Python" in label
 
 
+def test_install_command_uv_tool_merges_existing_extras(tmp_path, monkeypatch):
+    """Inside a PyPI `uv tool` install, setup updates the tool receipt and keeps prior extras."""
+    tool_prefix = tmp_path / "tool-env"
+    tool_prefix.mkdir()
+    (tool_prefix / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "bibr", extras = ["demo"], specifier = "==0.9.2" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "prefix", str(tool_prefix))
+
+    command, label = _install_command_for_extras_for_test(
+        {"anthropic"}, cwd=tmp_path, uv_bin="/bin/uv"
+    )
+
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert command == [
+        "/bin/uv",
+        "tool",
+        "install",
+        "--python",
+        py_ver,
+        "bibr[anthropic,demo]==0.9.2",
+    ]
+    assert "tool" in label
+
+
+def test_install_command_uv_tool_local_or_with_falls_back_to_uv_pip(tmp_path, monkeypatch):
+    """Local-path or `--with` uv tool receipts fall back to `uv pip install --python`."""
+    tool_prefix = tmp_path / "tool-env"
+    tool_prefix.mkdir()
+    monkeypatch.setattr(sys, "prefix", str(tool_prefix))
+
+    (tool_prefix / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "bibr", directory = "/src/bibr" }]\n',
+        encoding="utf-8",
+    )
+    cmd_local, _ = _install_command_for_extras_for_test({"demo"}, cwd=tmp_path, uv_bin="/bin/uv")
+    assert cmd_local[:4] == ["/bin/uv", "pip", "install", "--python"]
+
+    (tool_prefix / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "bibr" }, { name = "extra-pkg" }]\n',
+        encoding="utf-8",
+    )
+    cmd_with, _ = _install_command_for_extras_for_test({"demo"}, cwd=tmp_path, uv_bin="/bin/uv")
+    assert cmd_with[:4] == ["/bin/uv", "pip", "install", "--python"]
+
+
+def test_print_done_path_hint_when_bibr_not_on_path(tmp_path, monkeypatch):
+    """_print_done shows a concise PATH hint only when `bibr` is not on PATH."""
+    monkeypatch.setattr("bibr.setup_wizard.importlib.util.find_spec", lambda _name: None)
+    monkeypatch.chdir(tmp_path)
+
+    # Case 1: uv tool env without bibr on PATH -> suggest `uv tool update-shell`.
+    tool_prefix = tmp_path / "tool-env"
+    tool_prefix.mkdir()
+    (tool_prefix / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "bibr" }]\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(sys, "prefix", str(tool_prefix))
+    monkeypatch.setattr(
+        "bibr.setup_wizard.shutil.which",
+        lambda name: "/bin/uv" if name == "uv" else None,
+    )
+    tool_wiz = _recording_wizard()
+    tool_wiz._print_done()
+    tool_text = " ".join(tool_wiz.console.export_text().split())
+    assert "uv tool update-shell" in tool_text
+
+    # Case 2: project env without bibr on PATH -> suggest `uv run` or `uv tool install`.
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "proj-env"))
+    proj_wiz = _recording_wizard()
+    proj_wiz._print_done()
+    proj_text = " ".join(proj_wiz.console.export_text().split())
+    assert "uv tool install --python 3.12 bibr" in proj_text
+    assert "uv run" in proj_text
+
+    # Case 3: bibr already on PATH -> no PATH tip.
+    monkeypatch.setattr("bibr.setup_wizard.shutil.which", lambda name: f"/bin/{name}")
+    on_path_wiz = _recording_wizard()
+    on_path_wiz._print_done()
+    on_path_text = " ".join(on_path_wiz.console.export_text().split())
+    assert "not on PATH" not in on_path_text
+
+
 def test_step_llm_provider_fetches_models_after_credentials():
     """Step 2 should collect credentials first, then fetch and select model."""
     wizard = SetupWizard()

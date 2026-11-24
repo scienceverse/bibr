@@ -57,6 +57,28 @@ call failed with a 400.
   schemas, Redis `MGET`/pipelined Crossref prefetch, `bibr serve` job-store and
   upload speed-ups, and read-only HTML/JATS/DOCX native-input parsing.
 
+- Wave 4 runtime and parsing speed-ups:
+  - `LAYOUT_TEXT_LAYER_DPI` (default `100`, `null` disables) caps page
+    rasterization DPI in text-layer mode when figure image exports and
+    consensus OCR are disabled, and PDFium renders directly in RGB
+    (`rev_byteorder=True`) without BGR-to-RGB channel swapping.
+  - CPU ONNX sessions now enable the CPU memory arena with per-run shrinkage by
+    default (`ML_ONNX_CPU_ARENA=true`, `ML_ONNX_CPU_ARENA_SHRINK=true`), and
+    `StatementTagger` runs through `create_session()` with automatic CUDA EP,
+    `ML_STATEMENT_TAGGER_DEVICE`, GPU OOM batch splitting and CPU fallback.
+  - NuExtract `references_parse` tags its dynamic `start_index` trailer as
+    `nuextract_role="document"` so the instruction prefix stays byte-identical
+    across batches for prefix caching.
+  - Added opt-in `PIPELINE_HTML_PARSER=lxml` (default remains `"html5lib"`)
+    with a direct `lxml.html` table walker (`no_network=True`).
+
+- `bibr setup` now recognises `uv tool` installs (`uv-receipt.toml`), updating
+  the tool with `uv tool install --python <ver> 'bibr[...]'` while preserving
+  previously installed extras, and prints a concise `PATH` hint when `bibr` is
+  not yet on `PATH` (`uv tool update-shell`, or `uv run` / `uv tool install`
+  in a project install). The README, Quickstart and Installation docs now lead
+  with `uv tool install --python 3.12 bibr` for CLI use.
+
 - Refreshed `uv.lock` across 78 non-major packages to releases at least a week
   old (as of 2026-11-17): `onnxruntime` 1.32.0, `pandas` 3.1.1, `pyarrow`
   26.0.1, `pydantic` 2.14.3, `pydantic-settings` 2.16.3, `pypdfium2` 5.15.2,
