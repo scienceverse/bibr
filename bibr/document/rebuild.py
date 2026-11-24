@@ -27,12 +27,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def render_budget(settings: Any) -> RenderBudget:
+def render_budget(settings: Any, *, dpi: int | None = None) -> RenderBudget:
     """The layout stage's render settings."""
     from bibr.ocr.image_utils import MIN_REDUCED_RENDER_DPI
 
     return RenderBudget(
-        dpi=settings.layout.dpi,
+        dpi=settings.layout.dpi if dpi is None else dpi,
         max_pixels=settings.layout.max_render_pixels,
         max_dimension=settings.layout.max_render_dimension,
         min_dpi=MIN_REDUCED_RENDER_DPI,

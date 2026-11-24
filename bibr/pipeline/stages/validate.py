@@ -25,6 +25,11 @@ class ValidateStage:
         t0 = time.monotonic()
         from bibr.exceptions import InputValidationError
         from bibr.input.validate import validate_input_file
+        from bibr.structure.html_table import resolved_html_parser
+
+        html_parser = resolved_html_parser(ctx.settings)
+        # Forward the HTML parser only when non-default so default calls are unchanged.
+        parser_kwargs = {"html_parser": html_parser} if html_parser != "html5lib" else {}
 
         for fs in ctx.file_states:
             try:
@@ -46,7 +51,9 @@ class ValidateStage:
                         else hashlib.sha256(content).hexdigest()
                     )
                     file_hash = digest[:16]
-                    input_file = validate_input_file(path.name, content, file_hash=file_hash)
+                    input_file = validate_input_file(
+                        path.name, content, file_hash=file_hash, **parser_kwargs
+                    )
                     return content, digest, file_hash, input_file
 
                 content, content_sha256, file_hash, input_file = await asyncio.to_thread(_validate)

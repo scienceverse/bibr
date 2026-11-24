@@ -147,6 +147,16 @@ def _key(
 
     default_min_success_rate = OcrOptions.model_fields["min_success_rate"].default
 
+    include_figures = _include_figures(cfg, effective)
+    effective_dpi = layout.dpi
+    if (
+        identity.backend == TEXT_LAYER_BACKEND
+        and not include_figures
+        and layout.text_layer_dpi is not None
+        and not getattr(effective.ocr, "consensus_backend", None)
+    ):
+        effective_dpi = min(layout.dpi, layout.text_layer_dpi)
+
     parts = [
         str(_CACHE_FORMAT_VERSION),
         # A release can change how the cached artifacts are produced without
@@ -171,8 +181,8 @@ def _key(
         # for the same reason: it decides which pixels reach the model, so a
         # change to it invalidates every cached OCR result.
         f"image_geometry={profile.image.cache_fingerprint()}",
-        "figures=1" if _include_figures(cfg, effective) else "figures=0",
-        f"dpi={layout.dpi}",
+        "figures=1" if include_figures else "figures=0",
+        f"dpi={effective_dpi}",
         f"max_render_pixels={layout.max_render_pixels}",
         f"max_render_dimension={layout.max_render_dimension}",
         f"detection_threshold={layout.detection_threshold}",
