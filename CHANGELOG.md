@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.2] - 2026-11-20
+## [0.9.2] - 2026-11-24
 
 A speed and links release. On a CUDA machine the default local plan gets
 faster in three ways: on a card of 32 to 64 GB the vLLM LLM server and the
@@ -14,7 +14,9 @@ bibr prepares the next file while PaddleOCR-VL reads the current one, and
 RTX 5090 with 120 born-digital papers in chunks of 8, 0.9.1 ran 267 papers an
 hour, keeping both servers up gave 606 and the lookahead 715. As one chunk of
 120, the three together ran 907 papers an hour. Those runs measured speed, not
-accuracy. See Changed.
+accuracy. Output-preserving speed-ups also land across CPU ONNX/GBM inference,
+stage overlap, layout resizing, CRF/PDFium/text-layer parsing, native HTML/JATS/DOCX
+parsing, Crossref prefetch and `bibr serve`. See Changed.
 
 A PDF's `url` list now finds links it used to miss (addresses printed without a
 scheme, DOIs printed without doi.org, and links in captions and footnotes),
@@ -44,6 +46,29 @@ call failed with a 400.
   strict schema needs the 12.5 schema.
 
 ### Changed
+
+- Output-preserving speed-ups across the pipeline, inference, PDF/native-input
+  parsing, enrichment and `bibr serve`: concurrent CPU ONNX/GBM inference with
+  batched and length-sorted ONNX classifiers, an O(N log N) OCR repeat
+  check, copy-on-write export sanitising, overlapped parse/post-parse/enrichment
+  stages, cached layout resize plans with page-level parallelism, fast CRF
+  Viterbi and marginals paths, bulk PDFium text reads with less time under
+  `pdfium_lock`, front-page DOI evidence reused from `inspect_pdf`, cached LLM
+  schemas, Redis `MGET`/pipelined Crossref prefetch, `bibr serve` job-store and
+  upload speed-ups, and read-only HTML/JATS/DOCX native-input parsing.
+
+- Refreshed `uv.lock` across 78 non-major packages to releases at least a week
+  old (as of 2026-11-17): `onnxruntime` 1.32.0, `pandas` 3.1.1, `pyarrow`
+  26.0.1, `pydantic` 2.14.3, `pydantic-settings` 2.16.3, `pypdfium2` 5.15.2,
+  `fastapi` 0.163.1, `starlette` 1.10.0, `mkdocs-material` 9.8.1, `pytest`
+  9.2.0, `mypy` 2.4.1 and the rest of the non-major lock. Held back where
+  something pins or isolates them: `torch` 2.13.0, `torchvision` 0.28.0,
+  `triton` 3.7.1 and `transformers` 5.17.0 (`vllm` 0.32.0 compatibility),
+  `onnxruntime-gpu` 1.26.0 (CUDA 12 build), `ruff` 0.15.22, `mlx-audio` /
+  `mlx-vlm` 0.x bumps, and major upgrades (`huggingface-hub` 2.x, `google-genai`
+  3.x, `openai` 3.x, `python-dateutil` 4.x, `cachetools` 8.x, `multidict` 7.x,
+  `pymdown-extensions` 13.x, `watchdog` 7.x, `websockets` 17.x). Updated
+  `Dockerfile.serve` to `nvidia/cuda:13.5.0-runtime-ubuntu22.04`.
 
 - When the reference tagger's split of a reference list is accepted, the
   `line_stream` entry of `extraction.diagnostics.reference_yield.attempts`
@@ -144,6 +169,16 @@ call failed with a 400.
   Sonnet 5.5 ran 390 papers with this change and no failed call. Sonnet 5 has
   not been run on papers since, and the other models were added from
   Anthropic's documentation without a run.
+
+### Security
+
+- Added transitive floors in `pyproject.toml` and refreshed `uv.lock` for
+  `dnspython>=2.9.2` (`CVE-2026-128089` / `GHSA-vvf4-9x63-8xvv`, excessive
+  memory and CPU use) and `virtualenv>=21.14.13` (`CVE-2026-115586` /
+  `GHSA-cx6f-vjhg-g3cc`, unescaped `--prompt` in the Bash activator).
+- Renewed the Linux `setuptools` audit exceptions (`PYSEC-2026-3447`,
+  `GHSA-xmj3-9gf7-h52w`) in `ci/vulnerability-exceptions.toml` through
+  2026-12-08 after confirming `vllm 0.34.0` still pins `setuptools<81.0.0`.
 
 ## [0.9.1] - 2026-11-17
 
