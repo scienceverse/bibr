@@ -70,6 +70,7 @@ nav:
       - What leaves your machine: guides/privacy.md
       - Production deployment: guides/deployment.md
   - Accuracy:
+      - Benchmark results: results.md
       - Known limitations: limitations.md
       - Evaluating extraction quality: contributing/evaluation.md
       - LLM use: llm-use.md
