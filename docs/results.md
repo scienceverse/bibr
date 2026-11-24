@@ -122,16 +122,18 @@ values, which 0.9.1 matched to within ±0.002. The
 | How it runs | Papers per hour |
 | --- | --- |
 | bibr, one workstation GPU (RTX 5090), `--fast` | **1,565** |
-| bibr, one workstation GPU, default local models | **1,005** |
+| bibr, one workstation GPU, default local models | **1,038** |
 | bibr, CPU only, no GPU (`--fast`, born-digital only) | 407 |
 | GROBID 0.9.1, CPU, 6 workers | 4,650 |
 
 All on the same 120 born-digital psychology PDFs (1,890 pages), from a cold
-start, on one workstation. GROBID is 3 to 4.6 times faster than bibr's GPU
+start, on one workstation. GROBID is 3 to 4.5 times faster than bibr's GPU
 routes: that is the price of the accuracy gap. GROBID ran while the bibr GPU
-run was also using the machine, so its figure is slightly low. The bibr figures
-come from earlier timed runs of the same code (the CPU figure from 20 November
-2026); a repeat timing of the 0.9.2 build is in progress.
+run was also using the machine, so its figure is slightly low. The default GPU figure is
+from a clean, cold timed run of the 0.9.2 build (commit `f18a242`) on 24
+November 2026, in line with the earlier run of the same code (1,021 papers an
+hour). The `--fast` figures come from earlier timed runs of the same code (the
+CPU figure from 20 November 2026).
 
 ## Tested on
 
@@ -177,7 +179,7 @@ from this list. Full list with DOIs:
 
 ## Known limits
 
-- **GROBID is faster:** about 4,650 papers an hour, 3 to 4.6 times bibr's GPU
+- **GROBID is faster:** about 4,650 papers an hour, 3 to 4.5 times bibr's GPU
   speed (see [Speed](#speed)).
 - **One journal drives part of the gap:** GROBID fails every Frontiers in
   Psychology paper (34 of the 200 behavioural-science papers), because it reads
