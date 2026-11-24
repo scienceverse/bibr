@@ -379,3 +379,64 @@ def test_presets_with_none_saved_say_how_to_save_one(monkeypatch, _demo_env):
     texts = [b.value or "" for b in demo.blocks.values() if isinstance(b, gr.Markdown)]
     assert any("bibr preset save NAME" in t for t in texts)
     assert not any(isinstance(b, gr.Dropdown) for b in demo.blocks.values())
+
+
+def test_first_run_notice_mentions_downloads_when_models_are_uncached(monkeypatch):
+    monkeypatch.setattr("bibr.utils.hf_cache.hub_offline", lambda: False)
+    pending = [
+        ("layout", "scienceverse/bibr-layout-onnx", "will download (~0.13 GB)"),
+        ("sentence", "segment-any-text/sat-6l-sm", "will download (~0.45 GB)"),
+    ]
+    cold = local_app._build_first_run_notice(pending, warm=False)
+    assert "First paper takes longer" in cold
+    assert "2 models" in cold
+    assert "580 MB" in cold
+
+    cached = local_app._build_first_run_notice([], warm=False)
+    assert "First paper takes longer" in cached
+    assert "models load into memory" in cached
+
+    assert local_app._build_first_run_notice(pending, warm=True) == ""
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hub_offline", lambda: True)
+    offline = local_app._build_first_run_notice(pending, warm=False)
+    assert "HF_HUB_OFFLINE" in offline
+
+
+def test_progress_says_downloading_and_loading_on_cold_first_run():
+    seen = []
+
+    def progress(_frac, desc=""):
+        seen.append(desc)
+
+    cold = local_app._GradioProgress(
+        progress, text_layer_only=True, first_run=True, downloading=True
+    )
+    cold.stage_start("ocr")
+    assert "downloading and loading models" in seen[0]
+
+
+async def test_first_run_notice_hides_after_first_successful_paper(
+    monkeypatch, tmp_path, _demo_env, export
+):
+    monkeypatch.setattr(
+        local_app,
+        "_pending_demo_downloads",
+        lambda *_a, **_k: [("layout", "scienceverse/bibr-layout-onnx", "will download (~0.13 GB)")],
+    )
+
+    async def done(_path, _progress):
+        return export
+
+    demo, handler = _demo_with(monkeypatch, done)
+    notice = next(
+        b
+        for b in demo.blocks.values()
+        if isinstance(b, gr.Markdown) and "bibr-notice" in (b.elem_classes or [])
+    )
+    assert notice.visible is True
+    assert "downloads 1 model" in (notice.value or "")
+
+    updates = await _run(handler, _paper(tmp_path))
+    assert updates[notice].visible is False
+    assert updates[notice].value == ""

@@ -79,6 +79,12 @@ call failed with a 400.
   in a project install). The README, Quickstart and Installation docs now lead
   with `uv tool install --python 3.12 bibr` for CLI use.
 
+- `bibr demo` adds an in-page **Extraction mode** toggle (**Fast** vs. **Full**)
+  when an LLM is configured (unless started with `--fast`), switching modes
+  atomically without restarting the demo, and shows an upfront first-paper
+  notice (and progress-bar note / startup banner line when models are uncached)
+  warning that the first paper takes longer due to model downloads and loading.
+
 - Refreshed `uv.lock` across 78 non-major packages to releases at least a week
   old (as of 2026-11-17): `onnxruntime` 1.32.0, `pandas` 3.1.1, `pyarrow`
   26.0.1, `pydantic` 2.14.3, `pydantic-settings` 2.16.3, `pypdfium2` 5.15.2,
