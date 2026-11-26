@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from urllib.parse import unquote
+
 import pandas as pd
+import pytest
 
 from bibr.paper_contents import (
     PaperContents,
@@ -212,6 +215,87 @@ def test_link_that_matches_a_target_is_left_alone():
         "https://github.com/org/repo",
         None,
     )
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://doi.org/10.5555/1f35%E2%80%90rn20",  # U+2010, as the PDF writer encoded it
+        "https://doi.org/10.5555/1f35%e2%80%90rn20",
+        "https://doi.org/10.5555/1f35\u2010rn20",
+        "https://doi.org/10.5555/1f35%E2%80%91rn20",  # U+2011, non-breaking
+        "https://doi.org/10.5555/1f35\u2011rn20",
+        "https://doi.org/10.5555/1f35&#x2010;rn20",
+        "https://doi.org/10.5555/1f%C2%AD35-rn\u00ad20",  # soft hyphens
+    ],
+)
+def test_typeset_hyphen_in_a_target_does_not_replace_the_printed_hyphen(uri):
+    printed = "https://doi.org/10.5555/1f35-rn20"
+    contents = _contents(
+        sentences=[_sentence(1, f"Data are at {printed}.")],
+        links=[_link(printed)],
+        uri_links=_uris(uri),
+    )
+
+    repair_links_from_targets(contents)
+
+    (link,) = contents.links
+    assert (link.url, link.link_text) == (printed, None)
+
+
+def test_repaired_link_takes_the_target_with_its_typeset_hyphens_as_ascii():
+    # The line break added the hyphen in "long-itudinal"; the target's own two
+    # hyphens are U+2010 and U+2011, percent-encoded.
+    printed = "https://example.org/long-itudinal-study/wave-2"
+    contents = _contents(
+        sentences=[_sentence(1, f"See {printed} for the data.")],
+        links=[_link(printed)],
+        uri_links=_uris("https://example.org/longitudinal%E2%80%90study/wave%e2%80%912"),
+    )
+
+    repair_links_from_targets(contents)
+
+    (link,) = contents.links
+    assert link.url == "https://example.org/longitudinal-study/wave-2"
+    assert link.link_text == printed
+
+
+def test_typeset_hyphen_in_a_target_on_a_table_is_ascii_in_the_link():
+    table = _table(
+        1, [["Source"], ["Archive of the survey"]], page=2, bbox=(0.0, 0.0, 500.0, 500.0)
+    )
+    uri_links = [
+        {
+            "page": 2,
+            "bbox": [10, 10, 90, 20],
+            "uri": "https://example.org/data%E2%80%90set\u2011one",
+        }
+    ]
+    contents = _contents(tables=[table], uri_links=uri_links)
+
+    add_table_links(contents)
+
+    assert _table_links(contents) == [(1, "https://example.org/data-set-one")]
+
+
+@pytest.mark.parametrize(
+    "dash",
+    ["%E2%80%92", "%E2%80%93", "\u2013", "%E2%80%94", "\u2014", "%E2%80%95", "%E2%88%92", "\u2212"],
+)
+def test_dash_in_a_target_is_kept(dash):
+    # An address can mean an en dash (a wiki page title); only hyphens are read as "-".
+    target = f"https://example.org/wiki/Alpha{dash}Beta_experiment/results"
+    printed = f"https://example.org/wiki/Alpha{unquote(dash)}Beta_experi-ment/results"
+    contents = _contents(
+        sentences=[_sentence(1, f"See {printed} for an account.")],
+        links=[_link(printed)],
+        uri_links=_uris(target),
+    )
+
+    repair_links_from_targets(contents)
+
+    (link,) = contents.links
+    assert (link.url, link.link_text) == (target, printed)
 
 
 def test_shorter_link_is_not_completed_unless_the_sentence_prints_the_rest():

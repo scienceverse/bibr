@@ -106,6 +106,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `href` is then the annotation's target and `link_text` the printed form. It
   happens only when exactly one of the PDF's link targets matches, and for a
   cut address only when the sentence goes on to print the rest.
+- A typographic hyphen in a PDF's link target no longer ends up in `href`. Some
+  publishers write the target with the hyphen U+2010 where the address has
+  "-", so the DOI printed as "10.13020/1f35-rn20" came out as
+  "https://doi.org/10.13020/1f35%E2%80%90rn20", which does not resolve, with
+  the printed address as `link_text`. A hyphen (U+2010) or non-breaking hyphen
+  (U+2011) in a link target, as the character or percent-encoded, is now read
+  as "-", and a soft hyphen is dropped. `href` is then the address as printed
+  and `link_text` is null, as for any link whose target is what the page
+  prints. A dash in a target is kept: an address can mean one.
 - Two URLs printed with no space between them
   ("…/repo):https://doi.org/10.5281/…") are two `url` entries, in PDF, HTML,
   DOCX and JATS input. They were one entry with both addresses in its `href`.

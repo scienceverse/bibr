@@ -48,16 +48,29 @@ _SPACED_DOI_PREFIX_RE = re.compile(r"(?<![\w.])10 \. (?=\d{4,9}/)")
 _BREAK_CHARS_RE = re.compile(r"[\s\-_­‐‑]+")
 # A link shorter than this, squeezed, is too short to be told apart by spelling.
 _MIN_SQUEEZED = 12
+# Hyphens a typesetter sets and no web address holds, as the character or
+# percent-encoded: the hyphen U+2010 and the non-breaking hyphen U+2011, which
+# stand for "-", and the soft hyphen U+00AD, which stands for nothing. A PDF
+# writer that builds the target from the printed link copies them
+# ("doi.org/10.13020/1f35%E2%80%90rn20"), and that target resolves nowhere. A
+# dash (U+2012 to U+2015) or minus sign is left as it is: an address can mean
+# one ("/wiki/Michelson%E2%80%93Morley_experiment").
+_TYPESET_HYPHEN_RE = re.compile(r"[\u2010\u2011]|%E2%80%9[01]", re.IGNORECASE)
+_SOFT_HYPHEN_RE = re.compile(r"\u00ad|%C2%AD", re.IGNORECASE)
 
 
 def _target(uri: object) -> str | None:
-    """An http(s) link annotation's target, or None for any other annotation."""
+    """An http(s) link annotation's target, or None for any other annotation.
+
+    A typeset hyphen in it is read as "-" and a soft hyphen dropped (see
+    ``_TYPESET_HYPHEN_RE``), so the target is the address the link means.
+    """
     if not isinstance(uri, str):
         return None
     text = html.unescape(uri.strip())
     if not _HTTP_RE.match(text) or any(ch.isspace() for ch in text):
         return None
-    return text
+    return _TYPESET_HYPHEN_RE.sub("-", _SOFT_HYPHEN_RE.sub("", text))
 
 
 def _key(url: str) -> str:
