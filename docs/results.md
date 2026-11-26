@@ -91,8 +91,8 @@ mean the gap is statistically significant.
 | Abstract (ROUGE-L F1) | **0.970** | 0.951 | 0.859 |
 | Affiliations (token-set similarity) | 0.926 | **0.932** | 0.860 |
 | Keywords (F1; 216 papers) | 0.941 | **0.958** | 0.922 |
-| Corresponding author (exact-match accuracy; 289 papers) | 0.581 | **0.758** | 0.616 |
-| ORCID iDs (F1; 36 papers) | 0.028 | not reported | **0.408** |
+| Corresponding author (exact-match accuracy; 289 papers) | 0.581 † | **0.889** | 0.616 |
+| ORCID iDs (F1; 36 papers) | 0.028 † | **0.987** | 0.408 |
 | Reference list found (reference-matching F1) | 0.964 | **0.965** | 0.946 |
 | Reference titles (accuracy, fuzzy match ≥ 85) | **0.986** | **0.986** | **0.986** |
 | Reference authors (accuracy, every surname found) | **0.994** | **0.994** | 0.978 |
@@ -105,6 +105,13 @@ mean the gap is statistically significant.
 | Links to data and code (F1; 378) | 0.930 | **0.934** | 0.908 |
 | Repository links: OSF, GitHub, Zenodo (recall; 199) | **0.975** | **0.975** | 0.945 |
 
+† Measured on 24 November, before the fix to ORCID iDs and the corresponding
+author that 0.9.2 ships with. The `--fast` column has the fix (run of 26
+November); every other `--fast` score is the same with and without it. The
+answer key keeps an ORCID iD only when the PDF prints it as text. Counting an
+iD the PDF carries behind its ORCID icon as well (204 papers), `--fast` scores
+0.99 and GROBID 0.69.
+
 **How to read the metrics.** F1 balances what a tool missed against what it
 added wrongly; 1.0 means nothing missed and nothing extra. ROUGE-L F1 compares
 the abstract word by word with the printed one, in order; 1.0 means word for
@@ -112,8 +119,8 @@ word. Token-set similarity compares the words of each author's affiliation,
 ignoring their order. Accuracy is the share of matched references where that
 detail is right; recall is the share of the answer key's items that the tool
 found (for reference DOIs, out of every reference with a DOI). `--fast` scores
-come from a 20 November CPU run of the same code (corresponding author from 24
-November). For reference volumes, authors and DOIs, GROBID's row uses its 0.9.0
+come from a 20 November CPU run of the same code (corresponding author and
+ORCID iDs from 26 November). For reference volumes, authors and DOIs, GROBID's row uses its 0.9.0
 values, which 0.9.1 matched to within ±0.002. The
 [evaluation guide](contributing/evaluation.md) defines every metric.
 
@@ -189,8 +196,10 @@ from this list. Full list with DOIs:
 - **Not yet validated:** section structure, and data-availability, funding and
   conflict-of-interest statements. bibr extracts them, but they are not scored
   yet.
-- **Weaker fields:** the corresponding author (0.58 by default vs GROBID's
-  0.62, though `--fast` gets 0.76) and ORCID iDs (0.03 vs 0.41).
+- **Two fields were fixed after the first 0.9.2 run:** ORCID iDs and the
+  corresponding author. With `--fast` they now score 0.99 and 0.89 (GROBID:
+  0.41 and 0.62). The fix was written from failures on these papers, so these
+  two figures in particular need the held-out run to confirm them.
 - **Sample:** recent English open-access papers, not a random sample of the
   literature. Real scans of old print are harder than simulated ones.
 
