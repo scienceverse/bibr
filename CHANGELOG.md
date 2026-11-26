@@ -84,6 +84,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- An author's ORCID iD is found in most papers that carry one. bibr read it
+  only when the model copied it from the front page, and on the public
+  benchmark's 36 papers that print ORCID iDs it got almost none (F1 0.03).
+  It is now read:
+  - from wherever the paper prints it outside the reference list: beside the
+    byline, in an author note or footnote, or in an "ORCID" or "Author ORCIDs"
+    section at the end, also when the iD is broken over two lines;
+  - in a born-digital PDF, from the link behind the ORCID icon next to a
+    name. Most publishers print only that icon, so the iD is nowhere in the
+    text.
+
+  An iD is taken only when its check digit is right, so a grant or table
+  number of the same shape is not one. It goes to the author named beside
+  it, by full name, by given name when two authors share a family name, or
+  by initials. An iD beside an editor's or a reviewer's name ("Edited by",
+  "Reviewed by") is given to no author, no iD is given to two authors, and
+  an iD the author already has is kept. This holds for the default route and
+  for `--fast`.
+- The corresponding author is flagged in more papers, and their e-mail
+  address is whole more often. The flag and the address are now also read
+  from a correspondence block printed above the title, in a sidebar or after
+  the abstract, from a first-page footnote, from a "CONTACT name address"
+  line, and from a correspondence statement at the end of the paper. An
+  address the line break split ("name@uni.edu." and "mo" on the next line,
+  or a soft hyphen inside the host) is joined, and an address that had been
+  read cut short is replaced by the whole one. When two authors share a
+  family name, the given name decides whose address it is. When the
+  address does not resemble any name, the author the byline marks with the
+  correspondence star gets it, unless the paper says the star means equal
+  contribution.
 - A PDF's `url` list now holds links it used to miss:
   - a URL printed without a scheme ("osf.io/s6bjp", "github.com/org/repo").
     It is read as a link on a host papers print that way (DOI and short-link

@@ -278,7 +278,7 @@ _STAR_CORRESPONDENCE_CUE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 # Parenthetical author initials directly after an email, as PLOS and eLife print:
-# "jorgendm@ujaen.es (JND)" or "daiqi@zstu.edu.cn (QD)".
+# "jndoe@uni.es (JND)" or "qdu@uni.edu.cn (QD)".
 _INITIALS_AFTER_EMAIL_RE = re.compile(r"^\s*\(\s*([A-Z](?:\.?[\s\-]?[A-Z]){1,4}\.?)\s*\)")
 # Back-matter correspondence statement (Nature Communications & similar):
 # "Correspondence and requests for materials should be addressed to Anne C. Ferguson-Smith."
@@ -475,7 +475,7 @@ def _starred_byline_authors(sentences: list, index: dict[str, list]) -> list[Pap
 
     Unlike :func:`_byline_stars` (used as a negative guard in ``_flag_from_marker_glyphs``),
     this positively identifies starred authors, disambiguating shared surnames (e.g.
-    ``Xinyu Li1, ..., Yunfei Li6*``) from the given name immediately preceding the surname,
+    ``Xinyi Li1, ..., Yifan Li6*``) from the given name immediately preceding the surname,
     and ignores a ``*`` that opens a following ``*Correspondence:`` footnote.
     """
     chosen: list[PaperAuthor] = []
@@ -835,7 +835,7 @@ class AuthorEmailHarvester:
                     continue
 
                 # If an already-filled author holds a truncated TLD prefix of
-                # *email* (e.g. "ytxiang@um.edu" vs repaired "ytxiang@um.edu.mo"),
+                # *email* (e.g. "yltang@uni.edu" vs repaired "yltang@uni.edu.mo"),
                 # upgrade their address instead of handing it to a neighbor.
                 upgraded_existing = False
                 for existing_author in authors:
@@ -949,7 +949,7 @@ class AuthorEmailHarvester:
                 else:
                     # Surname wasn't within the 3-sentence same-section window.
                     # On explicit correspondence/contact or bare-star email lines
-                    # ("* vralph@uwaterloo.ca", "*For correspondence: x@y (JND)"),
+                    # ("* rvale@uni.ca", "*For correspondence: x@y (JND)"),
                     # match uniquely by trailing parenthetical initials or email
                     # local-part affinity before falling back to single-corresponding
                     # elimination. Only promote ``corresponding`` when an explicit
@@ -1145,7 +1145,7 @@ class AuthorEmailHarvester:
         Fires after :meth:`_flag_from_marker_glyphs` and :meth:`_flag_from_correspondence_blocks`
         so it never contradicts an already-resolved email/name match, while rescuing
         papers whose correspondence footnote has an opaque email (e.g. PLOS
-        ``* forevershc@163.com`` + ``Haicheng Shen*``) or BMC/eLife/Frontiers
+        ``* evergreen88@example.com`` + ``Liwei Sun*``) or BMC/eLife/Frontiers
         co-corresponding stars.
         """
         if not authors or not sentences:
@@ -1173,7 +1173,7 @@ class AuthorEmailHarvester:
         if not has_star_word_cue and bare_star_sents:
             # For bare "* email" lines without an explicit "*Correspondence" word,
             # only fall back to byline stars when an email on the "*" line is
-            # unattached (opaque, e.g. "* forevershc@163.com") AND no email on the
+            # unattached (opaque, e.g. "* evergreen88@example.com") AND no email on the
             # "*" line already belongs to a non-starred author.
             by_email = {a.email.lower(): a for a in authors if a.email}
             starred_ids = {id(a) for a in starred}
@@ -1193,7 +1193,7 @@ class AuthorEmailHarvester:
                 self._attach_email(starred[0], opaque_emails[0], set(by_email))
         elif not has_star_word_cue and standalone_email_sents:
             # PLOS layout where OCR clipped the tiny leading "*" off the
-            # standalone email line ("Hao.Lu@advocatehealth.org"): only fire
+            # standalone email line ("Han.Liu@examplehealth.org"): only fire
             # when the starred byline author(s) are the exact owners of all
             # harvested emails and at least one of those emails sits on a
             # standalone line.

@@ -6,7 +6,7 @@ default LLM route and ``--fast``):
 1. **Printed-text pass (all non-reference pages, including scans):** scans
    every non-reference section for printed ORCID URLs and bare 16-digit IDs,
    rejoining IDs wrapped across a line break (e.g. Taylor & Francis back-matter
-   ``http://orcid.org/0000-0003-\\n3786-872X``), validating every candidate with
+   ``http://orcid.org/0000-0000-\\n1234-002X``), validating every candidate with
    the ISO 7064 (MOD 11-2) check digit, and attributing each ID to the author
    named beside it (full name, surname with given-name disambiguation, or
    unique initials prefix like Royal Society Open Science ``MKS, 0000-...``).
@@ -59,7 +59,7 @@ _ORCID_ANY_RE = re.compile(
 )
 
 # Rejoin an ORCID split across a line wrap right after a hyphen or slash:
-# "http://orcid.org/0000-0003-\n3786-872X" or "http://orcid.org/\n0000-0003-..."
+# "http://orcid.org/0000-0000-\n1234-002X" or "http://orcid.org/\n0000-0003-..."
 _WRAPPED_ORCID_HYPHEN_RE = re.compile(
     r"(orcid\.org/[0-9-]*-|[0-9]{4}(?:-[0-9]{4}){0,2}-)[ \t\r]*\n[ \t]*([0-9]{3,4}[0-9Xx]?)",
     re.IGNORECASE,

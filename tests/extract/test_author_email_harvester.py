@@ -1519,17 +1519,17 @@ def test_repairs_soft_hyphen_and_newline_wrapped_emails():
     contents = _make_contents_with_text(
         [
             "Veterinary Behavior Study",
-            "Anna Weber and Yu-Tao Xiang",
-            "*Correspondence: anna.weber@tiho\ufffehannover.de; ytxiang@um.edu.\nmo",
+            "Anna Keller and Yu-Lan Tang",
+            "*Correspondence: anna.keller@vet\ufffeexample.de; yltang@uni.edu.\nmo",
         ]
     )
     authors = [
-        PaperAuthor(author_id=1, given="Anna", family="Weber", affiliation=""),
-        PaperAuthor(author_id=2, given="Yu-Tao", family="Xiang", affiliation=""),
+        PaperAuthor(author_id=1, given="Anna", family="Keller", affiliation=""),
+        PaperAuthor(author_id=2, given="Yu-Lan", family="Tang", affiliation=""),
     ]
     AuthorEmailHarvester(contents).harvest(authors)
 
-    assert [a.email for a in authors] == ["anna.weber@tiho-hannover.de", "ytxiang@um.edu.mo"]
+    assert [a.email for a in authors] == ["anna.keller@vet-example.de", "yltang@uni.edu.mo"]
     assert [a.corresponding for a in authors] == [True, True]
 
 
@@ -1540,7 +1540,7 @@ def test_long_distance_correspondence_matches_trailing_initials_and_opaque_plos_
     contents = _make_contents_with_text(
         [
             "Long Affiliation List Study",
-            "Quentin Dupont, Jane N. Doe*, Haicheng Shen",
+            "Quentin Dupont, Jane N. Doe*, Liwei Sun",
             "1 Dept A, City A",
             "2 Dept B, City B",
             "3 Dept C, City C",
@@ -1552,7 +1552,7 @@ def test_long_distance_correspondence_matches_trailing_initials_and_opaque_plos_
     authors = [
         PaperAuthor(author_id=1, given="Quentin", family="Dupont", affiliation=""),
         PaperAuthor(author_id=2, given="Jane N.", family="Doe", affiliation=""),
-        PaperAuthor(author_id=3, given="Haicheng", family="Shen", affiliation=""),
+        PaperAuthor(author_id=3, given="Liwei", family="Sun", affiliation=""),
     ]
     AuthorEmailHarvester(contents).harvest(authors)
 
@@ -1563,26 +1563,26 @@ def test_long_distance_correspondence_matches_trailing_initials_and_opaque_plos_
 def test_byline_star_rescues_bmc_shared_surname_and_ignores_footnote_star_trap():
     from bibr.extract.author_email_harvester import AuthorEmailHarvester
 
-    # Two authors share surname "Li"; only Yunfei Li6* and Fan Jiang1,7* are starred.
+    # Two authors share surname "Li"; only Yifan Li6* and Fang Jiang1,7* are starred.
     # Also test that a footnote line "*Correspondence:" immediately after
-    # "Kringos5,6\n" never treats Kringos as starred, nor flags byline authors
+    # "Kramer5,6\n" never treats Kramer as starred, nor flags byline authors
     # appearing before "*Correspondence:" in the same sentence.
     contents = _make_contents_with_text(
         [
             "Population Study",
-            "Xinyu Li1, Yunfei Li6*, Fan Jiang1,7*, Dionne S. Kringos5,6\n*Correspondence:",
+            "Xinyi Li1, Yifan Li6*, Fang Jiang1,7*, Dana S. Kramer5,6\n*Correspondence:",
             "1 Dept A",
             "2 Dept B",
             "3 Dept C",
             "4 Dept D",
-            "*Correspondence: opaque1@shsmu.edu.cn; opaque2@shsmu.edu.cn",
+            "*Correspondence: opaque1@med-uni.edu.cn; opaque2@med-uni.edu.cn",
         ]
     )
     authors = [
-        PaperAuthor(author_id=1, given="Xinyu", family="Li", affiliation=""),
-        PaperAuthor(author_id=2, given="Yunfei", family="Li", affiliation=""),
-        PaperAuthor(author_id=3, given="Fan", family="Jiang", affiliation=""),
-        PaperAuthor(author_id=4, given="Dionne S.", family="Kringos", affiliation=""),
+        PaperAuthor(author_id=1, given="Xinyi", family="Li", affiliation=""),
+        PaperAuthor(author_id=2, given="Yifan", family="Li", affiliation=""),
+        PaperAuthor(author_id=3, given="Fang", family="Jiang", affiliation=""),
+        PaperAuthor(author_id=4, given="Dana S.", family="Kramer", affiliation=""),
     ]
     AuthorEmailHarvester(contents).harvest(authors)
 
@@ -1595,23 +1595,23 @@ def test_plos_opaque_bare_star_email_rescued_via_byline_star():
     contents = _make_contents_with_text(
         [
             "PLOS Study",
-            "Alice Lee, Haicheng Shen*, Omar Reyes",
+            "Alice Lee, Liwei Sun*, Omar Reyes",
             "1 Affiliation A",
             "2 Affiliation B",
             "3 Affiliation C",
             "4 Affiliation D",
-            "* forevershc@163.com",
+            "* evergreen88@example.com",
         ]
     )
     authors = [
         PaperAuthor(author_id=1, given="Alice", family="Lee", affiliation=""),
-        PaperAuthor(author_id=2, given="Haicheng", family="Shen", affiliation=""),
+        PaperAuthor(author_id=2, given="Liwei", family="Sun", affiliation=""),
         PaperAuthor(author_id=3, given="Omar", family="Reyes", affiliation=""),
     ]
     AuthorEmailHarvester(contents).harvest(authors)
 
     assert [a.corresponding for a in authors] == [False, True, False]
-    assert authors[1].email == "forevershc@163.com"
+    assert authors[1].email == "evergreen88@example.com"
 
 
 def test_space_wrapped_tld_upgrades_truncated_email_without_assigning_to_neighbor():
@@ -1620,27 +1620,27 @@ def test_space_wrapped_tld_upgrades_truncated_email_without_assigning_to_neighbo
     contents = _make_contents_with_text(
         [
             "Psychiatric Study",
-            "Xia Li, Yu-Tao Xiang, Feng Sha",
-            "Corresponding authors: Feng Sha and Yu-Tao Xiang; Emails: feng.sha@siat.ac.cn; ytxiang@um.edu. mo",
+            "Xia Li, Yu-Lan Tang, Ming Zhao",
+            "Corresponding authors: Ming Zhao and Yu-Lan Tang; Emails: ming.zhao@inst.ac.cn; yltang@uni.edu. mo",
         ]
     )
-    # Simulate front_tagger already populating truncated "ytxiang@um.edu".
+    # Simulate front_tagger already populating truncated "yltang@uni.edu".
     authors = [
         PaperAuthor(author_id=1, given="Xia", family="Li", affiliation=""),
         PaperAuthor(
             author_id=2,
-            given="Yu-Tao",
-            family="Xiang",
+            given="Yu-Lan",
+            family="Tang",
             affiliation="",
-            email="ytxiang@um.edu",
+            email="yltang@uni.edu",
             corresponding=True,
         ),
         PaperAuthor(
             author_id=3,
-            given="Feng",
-            family="Sha",
+            given="Ming",
+            family="Zhao",
             affiliation="",
-            email="feng.sha@siat.ac.cn",
+            email="ming.zhao@inst.ac.cn",
             corresponding=True,
         ),
     ]
@@ -1648,7 +1648,7 @@ def test_space_wrapped_tld_upgrades_truncated_email_without_assigning_to_neighbo
 
     assert [a.corresponding for a in authors] == [False, True, True]
     assert authors[0].email is None
-    assert authors[1].email == "ytxiang@um.edu.mo"
+    assert authors[1].email == "yltang@uni.edu.mo"
 
 
 def test_shared_surname_in_correspondence_sentence_does_not_steal_coauthor_opaque_email():
@@ -1657,21 +1657,21 @@ def test_shared_surname_in_correspondence_sentence_does_not_steal_coauthor_opaqu
     contents = _make_contents_with_text(
         [
             "Clinical Study",
-            "Zhiting Chen, Jintao Chen, Wenhuo Chen, Tingyu Yi",
-            "Corresponding authors: Wenhuo Chen; Tingyu Yi; Emails: doctorwwenhuo@126.com; siyuyufen@163.com",
+            "Zhilan Chen, Junhao Chen, Wenbo Chen, Tianyu Yi",
+            "Corresponding authors: Wenbo Chen; Tianyu Yi; Emails: doctorwwenbo@example.com; sunnyriver@example.net",
         ]
     )
     authors = [
-        PaperAuthor(author_id=1, given="Zhiting", family="Chen", affiliation=""),
-        PaperAuthor(author_id=2, given="Jintao", family="Chen", affiliation=""),
-        PaperAuthor(author_id=3, given="Wenhuo", family="Chen", affiliation=""),
-        PaperAuthor(author_id=4, given="Tingyu", family="Yi", affiliation=""),
+        PaperAuthor(author_id=1, given="Zhilan", family="Chen", affiliation=""),
+        PaperAuthor(author_id=2, given="Junhao", family="Chen", affiliation=""),
+        PaperAuthor(author_id=3, given="Wenbo", family="Chen", affiliation=""),
+        PaperAuthor(author_id=4, given="Tianyu", family="Yi", affiliation=""),
     ]
     AuthorEmailHarvester(contents).harvest(authors)
 
     assert [a.corresponding for a in authors] == [False, False, True, True]
-    assert authors[2].email == "doctorwwenhuo@126.com"
-    assert authors[3].email == "siyuyufen@163.com"
+    assert authors[2].email == "doctorwwenbo@example.com"
+    assert authors[3].email == "sunnyriver@example.net"
 
 
 def test_plos_dropped_star_standalone_email_flags_starred_author_unless_equal_contrib():
@@ -1680,21 +1680,21 @@ def test_plos_dropped_star_standalone_email_flags_starred_author_unless_equal_co
     contents = _make_contents_with_text(
         [
             "Clinical Otoscopy Study",
-            "Hao Lu 1 *, Carl D. Langefeld1,2, Amy Zinnia2",
+            "Han Liu 1 *, Carl D. Lindqvist1,2, Amy Zamora2",
             "1 Dept A",
             "2 Dept B",
             "3 Dept C",
             "4 Dept D",
-            "Hao.Lu@advocatehealth.org",
+            "Han.Liu@examplehealth.org",
         ]
     )
     authors = [
-        PaperAuthor(author_id=1, given="Hao", family="Lu", affiliation=""),
-        PaperAuthor(author_id=2, given="Carl D.", family="Langefeld", affiliation=""),
-        PaperAuthor(author_id=3, given="Amy", family="Zinnia", affiliation=""),
+        PaperAuthor(author_id=1, given="Han", family="Liu", affiliation=""),
+        PaperAuthor(author_id=2, given="Carl D.", family="Lindqvist", affiliation=""),
+        PaperAuthor(author_id=3, given="Amy", family="Zamora", affiliation=""),
     ]
-    # Email is matched upstream or by the harvester; the byline star + standalone line flags Hao Lu.
-    authors[0].email = "Hao.Lu@advocatehealth.org"
+    # Email is matched upstream or by the harvester; the byline star + standalone line flags Han Liu.
+    authors[0].email = "Han.Liu@examplehealth.org"
     AuthorEmailHarvester(contents).harvest(authors)
     assert [a.corresponding for a in authors] == [True, False, False]
 
@@ -1702,21 +1702,21 @@ def test_plos_dropped_star_standalone_email_flags_starred_author_unless_equal_co
     contents_eq = _make_contents_with_text(
         [
             "Clinical Otoscopy Study",
-            "Hao Lu 1 *, Carl D. Langefeld1,2, Amy Zinnia2",
+            "Han Liu 1 *, Carl D. Lindqvist1,2, Amy Zamora2",
             "* Equal contribution.",
-            "Hao.Lu@advocatehealth.org",
+            "Han.Liu@examplehealth.org",
         ]
     )
     authors_eq = [
         PaperAuthor(
             author_id=1,
-            given="Hao",
-            family="Lu",
+            given="Han",
+            family="Liu",
             affiliation="",
-            email="Hao.Lu@advocatehealth.org",
+            email="Han.Liu@examplehealth.org",
         ),
-        PaperAuthor(author_id=2, given="Carl D.", family="Langefeld", affiliation=""),
-        PaperAuthor(author_id=3, given="Amy", family="Zinnia", affiliation=""),
+        PaperAuthor(author_id=2, given="Carl D.", family="Lindqvist", affiliation=""),
+        PaperAuthor(author_id=3, given="Amy", family="Zamora", affiliation=""),
     ]
     AuthorEmailHarvester(contents_eq).harvest(authors_eq)
     assert [a.corresponding for a in authors_eq] == [False, False, False]

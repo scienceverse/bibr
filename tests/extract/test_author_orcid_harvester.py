@@ -66,9 +66,9 @@ def _author(aid: int, given: str, family: str, *, orcid: str | None = None) -> P
     ("orcid", "expected"),
     [
         ("0000-0002-1825-0097", True),  # canonical ORCID example
-        ("0000-0001-5109-3700", True),
-        ("0000-0003-3786-872X", True),  # valid X check digit
-        ("https://orcid.org/0000-0003-3786-872x", True),  # lowercase x normalized
+        ("0000-0000-1234-5058", True),
+        ("0000-0000-1234-002X", True),  # valid X check digit
+        ("https://orcid.org/0000-0000-1234-002x", True),  # lowercase x normalized
         ("0000-0001-2345-6780", False),  # invalid check digit
         ("0000-0002-1825-0098", False),  # wrong final digit
         ("not-an-orcid", False),
@@ -101,26 +101,26 @@ def test_harvests_wrapped_back_matter_orcids_and_disambiguates_shared_surnames()
                 CanonicalSection.FOOTNOTE,
                 "ORCID",
                 [
-                    "Omid Dadras http://orcid.org/0000-0001-\n9385-2170",
-                    "Fateme Dadras http://orcid.org/0000-0003-\n3786-872X",
-                    "Takeo Nakayama https://orcid.org/0000-0002-7918-6252",
+                    "Omar Darvish http://orcid.org/0000-0000-\n1234-1014",
+                    "Farah Darvish http://orcid.org/0000-0000-\n1234-002X",
+                    "Takeshi Nakamura https://orcid.org/0000-0000-1234-2025",
                 ],
             ),
         ]
     )
     authors = [
-        _author(1, "Omid", "Dadras"),
-        _author(2, "Fateme", "Dadras"),
-        _author(3, "Takeo", "Nakayama"),
+        _author(1, "Omar", "Darvish"),
+        _author(2, "Farah", "Darvish"),
+        _author(3, "Takeshi", "Nakamura"),
     ]
 
     attached = AuthorOrcidHarvester(contents).harvest(authors)
 
     assert attached == 3
     assert [a.orcid for a in authors] == [
-        "https://orcid.org/0000-0001-9385-2170",
-        "https://orcid.org/0000-0003-3786-872X",
-        "https://orcid.org/0000-0002-7918-6252",
+        "https://orcid.org/0000-0000-1234-1014",
+        "https://orcid.org/0000-0000-1234-002X",
+        "https://orcid.org/0000-0000-1234-2025",
     ]
 
 
@@ -132,7 +132,7 @@ def test_harvests_initials_prefixed_orcids_royal_society_layout():
                 "Title",
                 [
                     "Alisa Viitanen, Aada Ståhl, Milla K. Salonen, Océane Liehrmann",
-                    "ORCID: MKS, 0000-0002-1825-0097; OL, 0000-0001-5109-3700",
+                    "ORCID: MKS, 0000-0002-1825-0097; OL, 0000-0000-1234-5058",
                 ],
             ),
         ]
@@ -151,7 +151,7 @@ def test_harvests_initials_prefixed_orcids_royal_society_layout():
         None,
         None,
         "https://orcid.org/0000-0002-1825-0097",
-        "https://orcid.org/0000-0001-5109-3700",
+        "https://orcid.org/0000-0000-1234-5058",
     ]
 
 
@@ -165,7 +165,7 @@ def test_harvests_orcid_when_author_name_is_on_preceding_line():
                     "Jane Doe",
                     "https://orcid.org/0000-0002-1825-0097",
                     "John Smith",
-                    "https://orcid.org/0000-0001-5109-3700",
+                    "https://orcid.org/0000-0000-1234-5058",
                 ],
             )
         ]
@@ -175,7 +175,7 @@ def test_harvests_orcid_when_author_name_is_on_preceding_line():
     assert AuthorOrcidHarvester(contents).harvest(authors) == 2
     assert [a.orcid for a in authors] == [
         "https://orcid.org/0000-0002-1825-0097",
-        "https://orcid.org/0000-0001-5109-3700",
+        "https://orcid.org/0000-0000-1234-5058",
     ]
 
 
@@ -187,14 +187,14 @@ def test_skips_reference_sections_editorial_lines_and_invalid_checksums():
                 "Front",
                 [
                     "Edited by: Jane Doe, https://orcid.org/0000-0002-1825-0097",
-                    "Reviewed by: John Smith, https://orcid.org/0000-0001-5109-3700",
+                    "Reviewed by: John Smith, https://orcid.org/0000-0000-1234-5058",
                     "Jane Doe https://orcid.org/0000-0001-2345-6780",  # invalid checksum
                 ],
             ),
             (
                 CanonicalSection.REFERENCES,
                 "References",
-                ["Jane Doe (2025). Dataset. https://orcid.org/0000-0003-3786-872X"],
+                ["Jane Doe (2025). Dataset. https://orcid.org/0000-0000-1234-002X"],
             ),
         ]
     )
@@ -218,13 +218,13 @@ def test_never_overwrites_existing_orcid_or_duplicates_id():
         ]
     )
     authors = [
-        _author(1, "Jane", "Doe", orcid="https://orcid.org/0000-0003-3786-872X"),
+        _author(1, "Jane", "Doe", orcid="https://orcid.org/0000-0000-1234-002X"),
         _author(2, "John", "Smith"),
     ]
 
     # Jane keeps her existing ORCID; John can receive the unclaimed printed ORCID.
     assert AuthorOrcidHarvester(contents).harvest(authors) == 1
-    assert authors[0].orcid == "https://orcid.org/0000-0003-3786-872X"
+    assert authors[0].orcid == "https://orcid.org/0000-0000-1234-002X"
     assert authors[1].orcid == "https://orcid.org/0000-0002-1825-0097"
 
 
@@ -260,7 +260,7 @@ def test_harvests_from_pdf_uri_links_across_multi_author_line_and_merges_split_r
         {
             "page": 1,
             "bbox": [690.0, 200.0, 705.0, 218.0],
-            "uri": "http://orcid.org/0000-0001-5109-3700",
+            "uri": "http://orcid.org/0000-0000-1234-5058",
         },
     ]
     contents = _make_contents([], pdf_uri_links=uri_links, ref_page_lines=page_lines)
@@ -269,7 +269,7 @@ def test_harvests_from_pdf_uri_links_across_multi_author_line_and_merges_split_r
     assert AuthorOrcidHarvester(contents).harvest(authors) == 2
     assert [a.orcid for a in authors] == [
         "https://orcid.org/0000-0002-1825-0097",
-        "https://orcid.org/0000-0001-5109-3700",
+        "https://orcid.org/0000-0000-1234-5058",
     ]
 
 
@@ -306,45 +306,45 @@ def test_collect_printed_orcid_lines_excludes_references_and_already_seen():
                 [
                     "Jane Doe",
                     "https://orcid.org/0000-0002-1825-0097",
-                    "John Smith https://orcid.org/0000-0001-5109-3700",
+                    "John Smith https://orcid.org/0000-0000-1234-5058",
                 ],
             ),
             (
                 CanonicalSection.REFERENCES,
                 "References",
-                ["Cited Author https://orcid.org/0000-0003-3786-872X"],
+                ["Cited Author https://orcid.org/0000-0000-1234-002X"],
             ),
         ]
     )
     lines = collect_printed_orcid_lines(
         contents,
-        already="John Smith 0000-0001-5109-3700",
+        already="John Smith 0000-0000-1234-5058",
     )
 
     assert lines == ["Jane Doe https://orcid.org/0000-0002-1825-0097"]
 
 
 def test_unmatched_named_orcid_line_does_not_steal_previous_author():
-    # If an author (Andrea M. Philipp) was omitted from the extracted author list,
-    # her printed ORCID line must NOT walk up two lines and attach to Wolfgang Scharke.
+    # If an author (Andrea M. Petersen) was omitted from the extracted author list,
+    # her printed ORCID line must NOT walk up two lines and attach to Walter Schenk.
     contents = _make_contents(
         [
             (
                 CanonicalSection.UNKNOWN,
                 "Author Affiliations",
                 [
-                    "Wolfgang Scharke Institute of Psychology",
-                    "Iring Koch orcid.org/0000-0001-9664-8220 Institute of Psychology",
-                    "Andrea M. Philipp orcid.org/0000-0003-1290-451X Institute of Psychology",
+                    "Walter Schenk Institute of Psychology",
+                    "Ingo Kraus orcid.org/0000-0000-1234-3036 Institute of Psychology",
+                    "Andrea M. Petersen orcid.org/0000-0000-1234-4047 Institute of Psychology",
                 ],
             )
         ]
     )
     authors = [
-        _author(1, "Wolfgang", "Scharke"),
-        _author(2, "Iring", "Koch"),
+        _author(1, "Walter", "Schenk"),
+        _author(2, "Ingo", "Kraus"),
     ]
 
     assert AuthorOrcidHarvester(contents).harvest(authors) == 1
     assert authors[0].orcid is None
-    assert authors[1].orcid == "https://orcid.org/0000-0001-9664-8220"
+    assert authors[1].orcid == "https://orcid.org/0000-0000-1234-3036"
