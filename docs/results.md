@@ -23,7 +23,7 @@ about 6.
 | Papers | bibr default | bibr `--fast` (CPU, 200 DPI) | GROBID 0.9.1 |
 | --- | --- | --- | --- |
 | Behavioural science, 200 born-digital PDFs | **94.0%** | 90.5% | 61.5% |
-| Other fields, 100 born-digital PDFs | 89.0% | **91.0%** | 62.0% |
+| Other fields, 100 born-digital PDFs | 88.0% | **91.0%** | 62.0% |
 | Simulated scans, 90 PDFs | **92.2%** | not supported | 0% (no OCR) |
 
 **What "fully right" means.** For each paper we check four things against the
@@ -43,7 +43,7 @@ tool returns nothing for also counts as wrong. So this is a strict,
 all-or-nothing score.
 
 On born-digital PDFs, bibr's lead is +32.5 points in behavioural science
-(paired 95% CI +25.5 to +39.5) and +27.0 in other fields (+17.0 to +37.0).
+(paired 95% CI +25.5 to +39.5) and +26.0 in other fields (+16.0 to +36.0).
 GROBID cannot read image-only scans at all, because it has no text recognition
 (OCR). `--fast` also needs the PDF's text layer, so it does not read scans
 either.
@@ -66,7 +66,7 @@ DOI right on all 300 papers, where GROBID missed it on 5.
 
 | Field (metric) | bibr default | bibr `--fast` | GROBID 0.9.1 |
 | --- | --- | --- | --- |
-| Affiliations (token-set similarity) | 0.932 | 0.932 | 0.859 |
+| Affiliations (token-set similarity) | 0.926 | 0.932 | 0.860 |
 | Abstract (ROUGE-L F1) | 0.970 | 0.951 | 0.859 |
 | Title (soft match) | 0.997 | 0.993 | 0.910 |
 | Author names (full-name F1) | 0.988 | 0.990 | 0.906 |
@@ -89,18 +89,18 @@ mean the gap is statistically significant.
 | DOI (exact match) | **1.000** | **1.000** | 0.983 |
 | Author names (full-name F1) | 0.988 | **0.990** | 0.906 |
 | Abstract (ROUGE-L F1) | **0.970** | 0.951 | 0.859 |
-| Affiliations (token-set similarity) | **0.932** | **0.932** | 0.859 |
+| Affiliations (token-set similarity) | 0.926 | **0.932** | 0.860 |
 | Keywords (F1; 216 papers) | 0.941 | **0.958** | 0.922 |
-| Corresponding author (exact-match accuracy; 289 papers) | 0.578 | **0.758** | 0.616 |
+| Corresponding author (exact-match accuracy; 289 papers) | 0.581 | **0.758** | 0.616 |
 | ORCID iDs (F1; 36 papers) | 0.028 | not reported | **0.408** |
 | Reference list found (reference-matching F1) | 0.964 | **0.965** | 0.946 |
 | Reference titles (accuracy, fuzzy match ≥ 85) | **0.986** | **0.986** | **0.986** |
-| Reference authors (accuracy, every surname found) | **0.994** | 0.993 | 0.978 |
+| Reference authors (accuracy, every surname found) | **0.994** | **0.994** | 0.978 |
 | Reference years (accuracy) | **0.999** | **0.999** | 0.984 |
 | Reference journals (accuracy, fuzzy match ≥ 85) | **0.986** | **0.986** | 0.962 |
 | Reference volumes (accuracy, exact) | **0.994** | **0.994** | 0.979 |
 | Reference pages (accuracy, exact pages) | **0.993** | **0.993** | 0.918 |
-| Reference DOIs found (recall; 275 papers) | 0.986 | **0.987** | 0.983 |
+| Reference DOIs found (recall; 275 papers) | **0.986** | **0.986** | 0.983 |
 | In-text citations tied to the right reference (F1; 28,090) | 0.952 | **0.954** | 0.913 |
 | Links to data and code (F1; 378) | 0.930 | **0.934** | 0.908 |
 | Repository links: OSF, GitHub, Zenodo (recall; 199) | **0.975** | **0.975** | 0.945 |
