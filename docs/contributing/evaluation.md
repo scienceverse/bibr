@@ -86,13 +86,15 @@ records (`outcomes.jsonl`, `runs.jsonl`, `tables/`) are not `*.json` files.
 
 Metric scores are in [0, 1], with higher being better. A metric can be `null`
 when gold provides nothing to score; those entries are excluded from its mean.
-The current definitions are **`metrics_version: 5`**, recorded in every saved
+The current definitions are **`metrics_version: 7`**, recorded in every saved
 evaluation, including section-text results. Re-score predictions when
 definitions change rather than comparing means from different versions:
-scores with `metrics_version` 4 and 5 do not compare. Version 5 skips a batch's
-`run_info.json`, counts the gold references of a paper with no matched pair
-carrying a field as misses in the micro-averaged reference scores, and
-tokenizes section text in every script (see below).
+scores with `metrics_version` 4, 5 and 7 do not compare. Version 5 skips a
+batch's `run_info.json`, counts the gold references of a paper with no matched
+pair carrying a field as misses in the micro-averaged reference scores, and
+tokenizes section text in every script (see below). Version 7 matches reference
+lists printed without titles and sets aside gold references that carry nothing
+to match on: see `ref_matching_f1` below. There is no version 6.
 
 ### Title
 
@@ -133,7 +135,7 @@ Per-author front-matter fields (`affiliation_sim`, `email_f1`, `orcid_f1`, `corr
 
 | Metric | Tier | Description |
 |---|---|---|
-| `ref_matching_f1` | primary | F1 for individual reference matching using a four-level cascade: DOI match (1.0) > fuzzy title match (0.9) > first-author + year (0.7) > unstructured citation string (0.6). Uses globally-greedy bipartite matching |
+| `ref_matching_f1` | primary | F1 for individual reference matching using a five-level cascade: DOI match (1.0) > fuzzy title match (0.9) > same year, volume and first page (0.8) > first author + year (0.7) > unstructured citation string (0.6). Uses globally-greedy bipartite matching. The first author is compared by name words, so "J. M. Smith", "Smith, J. M." and "John Smith" all match the family name Smith; the levels below the title are what match a reference list printed without titles, as many chemistry and physics journals do. A gold reference with nothing to match on (no DOI, no title, no year with a first author or with volume and first page, no citation string) is set aside: it leaves the recall denominator, and one unmatched extracted reference per such gold reference leaves the precision denominator. Publisher XML gives some references as plain text, and a gold record made from it holds an empty entry for each; counted as misses, they capped a perfect extraction below 1.0. `null` when every gold reference is of that kind. The per-paper count is `ref_field_counts.gold_refs_unmatchable` |
 | `ref_title_acc` | primary | Among matched GT references that have titles, fraction with a correct title (fuzzy token_sort_ratio >= 85) |
 | `ref_year_acc` | primary | Among matched GT references that have years, fraction with a correct year |
 | `ref_doi_recall` | primary | Among **all** gold references with DOIs, fraction recovered with the correct DOI. Unmatched gold references with DOIs count as misses. |

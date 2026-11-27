@@ -61,10 +61,13 @@ logger = logging.getLogger(__name__)
 #     counts a paper with no matched pair carrying the field as misses; section
 #     tokens keep letters in every script, one per character for Han, kana and
 #     Thai.
-# Reading schema 11 and 12 exports changed no definition. The 0.5.0 changelog's
-# metrics_version=6 was a counter shared with scorers that are not in this
-# repository; it does not apply to this evaluator.
-METRICS_VERSION = 5
+# v7: reference matching reads the first author's name words instead of the first
+#     word of the printed author string, and matches on year, volume and first
+#     page, so a reference list printed without titles is matched.
+# Reading schema 11 and 12 exports changed no definition. There is no v6 here:
+# the 0.5.0 changelog's metrics_version=6 was a counter shared with scorers that
+# are not in this repository, and the number is skipped to keep the two apart.
+METRICS_VERSION = 7
 
 # Suffix for the shadow columns holding a metric's value *before* an abstention
 # suppressed it (see _apply_abstentions). Never emitted in ``per_paper`` — they
@@ -577,6 +580,10 @@ def extract_comparable_from_json(data: dict, *, is_gold: bool = False) -> dict:
             ref_dict["first_page"] = str(bib["first_page"])
         if bib.get("last_page"):
             ref_dict["last_page"] = str(bib["last_page"])
+        if is_gold and bib.get("unstructured"):
+            # A gold reference may carry the printed citation string for a
+            # reference its source does not break into fields.
+            ref_dict["unstructured"] = str(bib["unstructured"])
         refs.append(ref_dict)
 
         # Enriched variant: same dict, but fill in DOI from bib_match if missing
@@ -1010,7 +1017,11 @@ def ref_field_counts(
     """
     if match is None:
         match = match_references(extracted_refs, ground_truth_refs)
-    counts: dict[str, int] = {"gold_refs": match.n_gold}
+    counts: dict[str, int] = {
+        "gold_refs": match.n_gold,
+        # Gold references with nothing to match on, set aside by ref_matching_f1.
+        "gold_refs_unmatchable": match.n_gold_unmatchable,
+    }
     for field, presence in match.gold_has_field.items():
         counts[f"{field}_gold"] = sum(presence)
         counts[f"{field}_matched"] = 0

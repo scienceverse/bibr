@@ -1485,12 +1485,15 @@ class TestArtifactProvenance:
         PREDICTION's abstract from section text. v5 stopped scoring bibr batch's
         run_info.json, counted papers with no matched pair carrying a field in
         the micro reference accuracies, and made section tokens Unicode-aware.
+        v7 matched references printed without titles (first-author name words;
+        year, volume and first page); 6 is skipped, the 0.5.0 changelog used it
+        for another counter.
         Each changes published numbers, so the constant — and the changelog
         beside it — must move with them.
         """
         from evaluation.evaluate import METRICS_VERSION
 
-        assert METRICS_VERSION == 5
+        assert METRICS_VERSION == 7
 
     def test_section_artifact_records_the_metrics_version(self, tmp_path):
         import json as _json

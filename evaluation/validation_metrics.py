@@ -543,11 +543,16 @@ def _get_ref_title(ref: dict) -> str:
 
 
 def _get_ref_author(ref: dict) -> str:
-    """Extract first-author surname from a reference dict."""
+    """First word of a reference's author string, read as the first author's family name.
+
+    Empty when that word is only initials ("J." of "J. M. Smith"): two
+    references do not share a first author because both names start with J.
+    """
     author = (ref.get("author") or "").strip().lower()
     if not author:
         return ""
-    return re.split(r"[,\s]", author)[0]
+    first = re.split(r"[,\s]", author)[0]
+    return first if any(len(part) > 1 for part in _strip_punctuation(first).split()) else ""
 
 
 def _get_ref_year(ref: dict) -> str:
@@ -556,6 +561,59 @@ def _get_ref_year(ref: dict) -> str:
 
 
 _AUTHOR_STOPWORDS = {"and", "et", "al", "jr", "sr", "ed", "eds"}
+# What ends the first author in a printed author string.
+_AUTHOR_SEPARATOR_RE = re.compile(r"[,;&]|\band\b|\bet\b", re.IGNORECASE)
+
+
+def _author_name_words(text: str) -> list[str]:
+    """Name words of an author string: no diacritics, punctuation, initials or connectors."""
+    cleaned = _strip_punctuation(_normalize_unicode(text.lower()))
+    return [t for t in cleaned.split() if len(t) > 1 and t not in _AUTHOR_STOPWORDS]
+
+
+def _first_author_tokens(ref: dict) -> tuple[list[str], bool]:
+    """Name words of a reference's first author, and whether they are the family name alone.
+
+    A structured author list (``authors_list``, family names) states the family
+    name. A printed author string does not: its first author is the text before
+    the first separator, which may hold the family name alone ("Smith, J."),
+    initials first ("J. M. Smith", which leaves "smith") or a spelled-out given
+    name ("John Smith").
+    """
+    names = ref.get("authors_list")
+    if isinstance(names, list) and names and str(names[0] or "").strip():
+        return _author_name_words(str(names[0])), True
+    raw = ref.get("authors") if isinstance(ref.get("authors"), str) else ref.get("author")
+    if not isinstance(raw, str) or not raw.strip():
+        return [], False
+    head = _AUTHOR_SEPARATOR_RE.split(raw.strip(), maxsplit=1)[0]
+    return _author_name_words(head), False
+
+
+def _same_name_word(a: str, b: str) -> bool:
+    return token_sort_ratio(a, b) >= 85.0
+
+
+def _first_author_agrees(ext_ref: dict, gt_ref: dict) -> bool:
+    """True when both references name the same first author, in whatever order the name is printed.
+
+    A known family name must appear among the other side's first-author words
+    (its longest word, so "van der Berg" is found as "Berg"). Two printed
+    strings agree when every name word of the shorter is found in the longer:
+    "J. Smith" and "Smith, John" agree, "John Smith" and "John Adams" do not.
+    """
+    ext, ext_is_family = _first_author_tokens(ext_ref)
+    gt, gt_is_family = _first_author_tokens(gt_ref)
+    if not ext or not gt:
+        return False
+    if ext_is_family and gt_is_family:
+        return _same_name_word(" ".join(ext), " ".join(gt))
+    if ext_is_family != gt_is_family:
+        family, printed = (gt, ext) if gt_is_family else (ext, gt)
+        longest = max(len(t) for t in family)
+        return all(any(_same_name_word(t, p) for p in printed) for t in family if len(t) == longest)
+    short, long_ = sorted((ext, gt), key=len)
+    return all(any(_same_name_word(t, p) for p in long_) for t in short)
 
 
 def _ref_surname_tokens(ref: dict) -> list[str]:
@@ -633,15 +691,28 @@ def _pages_correct(ext_ref: dict, gt_ref: dict) -> bool:
     return not (gt_last and ext_last != gt_last)
 
 
+def _coordinates_agree(ext_ref: dict, gt_ref: dict) -> bool:
+    """Same year, volume and first page: a journal reference identified without its title."""
+    gt = (_get_ref_year(gt_ref), _get_ref_volume(gt_ref), _get_ref_pages(gt_ref)[0])
+    ext = (_get_ref_year(ext_ref), _get_ref_volume(ext_ref), _get_ref_pages(ext_ref)[0])
+    return all(gt) and tuple(v.lower() for v in gt) == tuple(v.lower() for v in ext)
+
+
 def _ref_similarity(ext_ref: dict, gt_ref: dict) -> float:
     """Compute similarity between two reference dicts using a cascade.
 
     Returns a score in [0, 1] following GROBID's citation signature approach:
       - 1.0 for DOI match
       - 0.9 for title match (fuzzy token_sort_ratio >= 85)
-      - 0.7 for first-author surname + year match
+      - 0.8 for the same year, volume and first page
+      - 0.7 for first author + year match
       - 0.6 for match against unstructured citation string
       - 0.0 for no match
+
+    The two levels below the title are what match a reference list printed
+    without titles (common in chemistry and physics). The first author is
+    compared by name words, not by the first word of the string, so a list
+    printed initials first ("J. M. Smith") matches a gold family name.
     """
     # Level 1: DOI match
     ext_doi = normalize_doi(ext_ref.get("doi") or ext_ref.get("DOI") or "")
@@ -655,30 +726,40 @@ def _ref_similarity(ext_ref: dict, gt_ref: dict) -> float:
     if ext_title and gt_title and token_sort_ratio(ext_title.lower(), gt_title.lower()) >= 85.0:
         return 0.9
 
-    # Level 3: First-author surname + year match
+    # Level 3: year, volume and first page agree
+    if _coordinates_agree(ext_ref, gt_ref):
+        return 0.8
+
+    # Level 4: first author + year match
     ext_surname = _get_ref_author(ext_ref)
     gt_surname = _get_ref_author(gt_ref)
     ext_year = _get_ref_year(ext_ref)
     gt_year = _get_ref_year(gt_ref)
 
     if (
-        ext_surname
-        and gt_surname
-        and ext_year
+        ext_year
         and gt_year
         and ext_year == gt_year
-        and token_sort_ratio(ext_surname, gt_surname) >= 85.0
+        and (
+            (ext_surname and gt_surname and token_sort_ratio(ext_surname, gt_surname) >= 85.0)
+            or _first_author_agrees(ext_ref, gt_ref)
+        )
     ):
         return 0.7
 
-    # Level 4: Match against unstructured citation string (common in Crossref)
+    # Level 5: Match against unstructured citation string (common in Crossref)
     gt_unstructured = (gt_ref.get("unstructured") or "").lower()
     if gt_unstructured and len(gt_unstructured) > 20:
         matches = 0
         checks = 0
-        if ext_surname:
+        # The first author's name must stand in the string as a whole word.
+        # A substring test finds an initials block ("em") in almost any text.
+        name_words = _first_author_tokens(ext_ref)[0]
+        name_words = [w for w in name_words if len(w) >= 3] or name_words
+        if name_words:
             checks += 1
-            if ext_surname in gt_unstructured:
+            string_words = set(_author_name_words(gt_unstructured))
+            if any(word in string_words for word in name_words):
                 matches += 1
         if ext_year:
             checks += 1
@@ -694,6 +775,25 @@ def _ref_similarity(ext_ref: dict, gt_ref: dict) -> float:
             return 0.6
 
     return 0.0
+
+
+def _gold_ref_matchable(gt_ref: dict) -> bool:
+    """False when no level of ``_ref_similarity`` can fire for this gold reference.
+
+    A gold record made from publisher XML holds an empty reference where the
+    XML gives a citation as plain text, or where none of its tagged values is
+    printed in the PDF. No extraction can match it. The conditions below are
+    the gold-side preconditions of the cascade, level by level: change them
+    together.
+    """
+    if normalize_doi(gt_ref.get("doi") or gt_ref.get("DOI") or "") or _get_ref_title(gt_ref):
+        return True
+    year = _get_ref_year(gt_ref)
+    if year and _get_ref_volume(gt_ref) and _get_ref_pages(gt_ref)[0]:
+        return True
+    if year and (_get_ref_author(gt_ref) or _first_author_tokens(gt_ref)[0]):
+        return True
+    return len(gt_ref.get("unstructured") or "") > 20
 
 
 # Gold-side "does this reference carry the field?" getters, one per
@@ -720,12 +820,20 @@ class ReferenceMatchResult:
     reference metric derives from this instead of re-matching. ``pairs`` holds
     (gold_idx, ext_idx) in greedy-match order. ``gold_has_field`` maps each
     field to per-gold-reference presence, computed once from the getters above.
+    ``gold_matchable`` is False for a gold reference that carries nothing any
+    extraction could match (see ``_gold_ref_matchable``); such a reference is
+    set aside: it is in ``n_gold`` but in no pair and in no field's presence.
     """
 
     pairs: tuple[tuple[int, int], ...]
     n_extracted: int
     n_gold: int
     gold_has_field: dict[str, tuple[bool, ...]]
+    gold_matchable: tuple[bool, ...] = ()
+
+    @property
+    def n_gold_unmatchable(self) -> int:
+        return sum(1 for ok in self.gold_matchable if not ok)
 
 
 def match_references(
@@ -741,14 +849,18 @@ def match_references(
                 if sim > 0:
                     scored.append((sim, gi, ei))
         pairs = _greedy_match_pairs(scored)
+    matchable = tuple(_gold_ref_matchable(ref) for ref in ground_truth_refs)
     return ReferenceMatchResult(
         pairs=tuple(pairs),
         n_extracted=len(extracted_refs),
         n_gold=len(ground_truth_refs),
         gold_has_field={
-            field: tuple(bool(get(ref)) for ref in ground_truth_refs)
+            field: tuple(
+                ok and bool(get(ref)) for ok, ref in zip(matchable, ground_truth_refs, strict=True)
+            )
             for field, get in _REF_GOLD_FIELD_GETTERS.items()
         },
+        gold_matchable=matchable,
     )
 
 
@@ -756,30 +868,39 @@ def ref_matching_f1(
     extracted_refs: list[dict],
     ground_truth_refs: list[dict],
     match: ReferenceMatchResult | None = None,
-) -> float:
+) -> float | None:
     """F1 for individual reference matching using globally-greedy bipartite matching.
 
-    Computes pairwise similarity using DOI > title > author+year > unstructured
-    cascade, then matches using globally-greedy algorithm (picks highest-scoring
-    pair first). This avoids the order-dependent artifacts of sequential greedy
-    matching.
+    Computes pairwise similarity using the cascade of ``_ref_similarity``, then
+    matches using globally-greedy algorithm (picks highest-scoring pair first).
+    This avoids the order-dependent artifacts of sequential greedy matching.
+
+    A gold reference that carries nothing to match on is set aside: it is not
+    in the recall denominator, and one unmatched extracted reference per such
+    gold reference is left out of the precision denominator, because the
+    extraction of that very reference cannot be told from a spurious one.
+    None when every gold reference is of that kind: there is nothing to score.
 
     Pass a ``match_references()`` result to reuse a shared matching pass.
     """
     if not extracted_refs and not ground_truth_refs:
         return 1.0
-    if not extracted_refs or not ground_truth_refs:
+    if not ground_truth_refs:
         return 0.0
 
     if match is None:
         match = match_references(extracted_refs, ground_truth_refs)
+    set_aside = match.n_gold_unmatchable
+    scorable = match.n_gold - set_aside
+    if scorable == 0:
+        return None
     tp = len(match.pairs)
-
-    precision = tp / len(extracted_refs)
-    recall = tp / len(ground_truth_refs)
-
-    if precision + recall == 0:
+    counted = match.n_extracted - min(set_aside, match.n_extracted - tp)
+    if tp == 0 or counted == 0:
         return 0.0
+
+    precision = tp / counted
+    recall = tp / scorable
     return 2 * (precision * recall) / (precision + recall)
 
 
