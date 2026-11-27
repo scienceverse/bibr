@@ -899,6 +899,66 @@ def _promote_self_citation(
     return promoted
 
 
+# The DOI label alone, as the text before a DOI that opens its sentence ("doi:", "DOI: https://doi.org/").
+_DOI_LABEL_OPENING_RE = re.compile(rf"\W*doi\s*[:.]?\s*(?:{_DOI_HOST})?\s*", re.IGNORECASE)
+
+
+def _promote_before_citation_cue(
+    text: str, found: list[DoiCandidate], following: list[str]
+) -> list[DoiCandidate]:
+    """Make a labelled DOI that the article's citation cue follows a self-identification.
+
+    Some journals print the article's DOI once, after the reference list and
+    directly above the citation block:
+
+        doi:10.1234/2222-3333-7-15
+        Cite this article as: Doe et al.: A study. Journal 2012 7:15.
+
+    The parse leaves that line in the reference list's section, where a DOI is
+    a cited work's, and the block prints no DOI after its cue for
+    ``_promote_self_citation`` to take. The DOI of *text* is promoted to tier
+    3 when its label opens the sentence (a DOI that closes a reference entry,
+    "… 2019;12:34-9. doi:…", follows the entry instead), the strong cue
+    (``_citation_cue``) is the next thing printed, in the same sentence or
+    opening the next one (*following* holds the texts of the sentences after
+    this one), and the block prints no DOI of its own within its reach: one
+    that does names the article with that DOI.
+    """
+
+    if not found:
+        return found
+    last = found[-1]
+    if (
+        last.marker_kind != "explicit_doi"
+        or last.rejection_reason not in (None, "reference_candidate")
+        or last.selection_tier >= EXPLICIT_SELF_ID
+    ):
+        return found
+    at = text.rfind(last.raw)
+    if at < 0 or not _DOI_LABEL_OPENING_RE.fullmatch(text[:at]):
+        return found
+    rest = text[at + len(last.raw) :].lstrip(" \t\r\n.;,")
+    block = list(following[: _CITATION_BLOCK_SENTENCES + 1])
+    if not rest:
+        if not block:
+            return found
+        rest = block.pop(0).lstrip()
+    else:
+        block = block[:_CITATION_BLOCK_SENTENCES]
+    cue = _STRONG_CITATION_CUE_RE.match(rest)
+    if cue is None or _DOI_RE.search(" ".join([rest[cue.end() :], *block])):
+        return found
+    promoted = list(found)
+    promoted[-1] = replace(
+        last,
+        marker_kind="self_citation",
+        semantic_context="article_self",
+        selection_tier=EXPLICIT_SELF_ID,
+        rejection_reason=None,
+    )
+    return promoted
+
+
 def collect_doi_candidates(
     contents, pdf_evidence: PdfDoiEvidence | None = None
 ) -> tuple[DoiCandidate, ...]:
@@ -913,7 +973,8 @@ def collect_doi_candidates(
     front_block_end = _pageless_front_block_end(contents, section_map)
     candidates: list[DoiCandidate] = []
     open_cues: dict[tuple[int | None, int | None], tuple[bool, int]] = {}
-    for sentence in contents.sentences:
+    sentences = contents.sentences
+    for position, sentence in enumerate(sentences):
         section = section_map.get(sentence.section_id)
         region_meta = sentence.region_meta or {}
         section_type = _section_type(section, sentence.page_number)
@@ -929,6 +990,11 @@ def collect_doi_candidates(
             text_id=sentence.text_id,
             front_block=front_block,
         )
+        if found:
+            following = sentences[position + 1 : position + 2 + _CITATION_BLOCK_SENTENCES]
+            found = _promote_before_citation_cue(
+                sentence.text or "", found, [s.text or "" for s in following]
+            )
         in_front = _in_front_matter(
             source_kind="sentence",
             section_type=section_type,
@@ -988,6 +1054,7 @@ def collect_doi_candidates(
     candidates.extend(_publication_table_doi_candidates(contents))
     if pdf_evidence is not None:
         candidates = _with_pdf_evidence(contents, candidates, pdf_evidence, section_map)
+    candidates = _reject_page_number_overruns(candidates)
     if cut:
         candidates = _reject_edge_cuts(candidates, cut)
     return tuple(candidates)
@@ -1013,6 +1080,54 @@ def _edge_cut_sources(contents) -> tuple[set[str], set[tuple[int, int]]]:
             regions.add((region.page, region.index))
     texts.discard("")
     return texts, regions
+
+
+# The page number a running header or footer prints after the DOI.
+_GLUED_PAGE_NUMBER_RE = re.compile(r"\d{1,4}")
+
+
+def _reject_page_number_overruns(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
+    """Reject header and footer DOIs that are another DOI with the page number glued on.
+
+    A running footer prints the DOI and then the page number ("Volume 3 Issue 2
+    10.1234/journal.00777-21 12"). Where the text layer leaves no gap the two
+    read as one DOI, a different one on each page ("…00777-2112",
+    "…00777-2113"), beside the DOI itself from the pages that kept the gap.
+    Two or more header or footer DOIs that extend one printed DOI by digits
+    alone, with ends as close together as page numbers are, are that DOI and
+    its page numbers: an article has one DOI. A single longer DOI is left
+    alone (it may be the full DOI and the shorter one cut, see
+    ``_reject_edge_cuts``), and so are ends far apart (two misreadings of
+    one DOI's last digits).
+    """
+
+    live = [c for c in candidates if c.rejection_reason is None and c.source_kind != HIDDEN_TEXT]
+    furniture = _distinct_dois([c for c in live if c.source_kind in _FURNITURE_SOURCES])
+    overruns: set[str] = set()
+    for stem in _distinct_dois(live):
+        longer = {
+            value
+            for value in furniture
+            if value != stem
+            and value.startswith(stem)
+            and _GLUED_PAGE_NUMBER_RE.fullmatch(value[len(stem) :])
+        }
+        ends = sorted(int(value[len(stem) :]) for value in longer)
+        if len(ends) >= 2 and ends[-1] - ends[0] <= 4 * len(ends):
+            overruns |= longer
+    if not overruns:
+        return candidates
+    return [
+        replace(
+            candidate,
+            semantic_context="line_join_overrun",
+            selection_tier=0,
+            rejection_reason=LINE_JOIN_OVERRUN,
+        )
+        if candidate.rejection_reason is None and candidate.normalized.casefold() in overruns
+        else candidate
+        for candidate in candidates
+    ]
 
 
 def _reject_edge_cuts(candidates: list[DoiCandidate], cut: set[int]) -> list[DoiCandidate]:

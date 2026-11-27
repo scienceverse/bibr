@@ -1905,3 +1905,161 @@ def test_a_tie_both_dois_of_which_are_corroborated_still_abstains():
 
     assert selection.selected is None
     assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+
+
+# --- the DOI printed directly above the citation block ----------------------
+#
+# Some journals print the article's DOI once: after the reference list, on a
+# line of its own above "Cite this article as: ...". The block prints no DOI
+# after its cue, and the line sits in the reference list's section.
+
+_LAST_REFERENCE = "17. Doe J, Roe R: A trial of things. J Example Stud 2011, 4:88."
+_OWN_CITATION = "Doe et al.: A study of things. Journal of Examples 2012 7:15."
+
+
+def _after_the_list(*rows: tuple[int, str]) -> PaperContents:
+    """A reference on page 6, then rows of (paragraph_id, text), all in the list's section."""
+    return _paragraph_contents(
+        [
+            (9, CanonicalSection.REFERENCES, 30, _LAST_REFERENCE, 6),
+            *((9, CanonicalSection.REFERENCES, paragraph, text, 6) for paragraph, text in rows),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(
+            [
+                (31, "doi:10.1234/2222-3333-7-15"),
+                (32, "Cite this article as:"),
+                (32, _OWN_CITATION),
+            ],
+            id="doi-line-then-cue-line",
+        ),
+        pytest.param(
+            [(31, "doi:10.1234/2222-3333-7-15 Cite this article as: " + _OWN_CITATION)],
+            id="one-sentence",
+        ),
+        pytest.param(
+            [
+                (31, "DOI: 10.1234/2222-3333-7-15."),
+                (31, "How to cite this article: " + _OWN_CITATION),
+            ],
+            id="how-to-cite",
+        ),
+    ],
+)
+def test_a_labelled_doi_directly_above_the_citation_block_names_the_paper(rows):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    selection = select_doi_candidates(collect_doi_candidates(_after_the_list(*rows)))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/2222-3333-7-15"
+    assert selection.selected.marker_kind == "self_citation"
+    assert selection.selected.selection_tier == 3
+    assert selection.issues == ()
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(
+            [
+                (31, "doi:10.9999/cited.1"),
+                (32, "Cite this article as: Doe et al.: A study. Journal of Examples 2010."),
+                (32, "doi:10.1234/own.5"),
+            ],
+            id="the-block-prints-its-own-doi",
+        ),
+        pytest.param(
+            [
+                (31, "https://doi.org/10.9999/cited.1"),
+                (32, "Cite this article as:"),
+                (32, _OWN_CITATION),
+            ],
+            id="no-doi-label",
+        ),
+        pytest.param(
+            [
+                (31, "18. Roe R. A cited study. J Example Stud 2019;12:34-9. doi:10.9999/cited.1"),
+                (32, "How to cite this article: " + _OWN_CITATION),
+            ],
+            id="the-doi-ends-a-reference-entry",
+        ),
+        pytest.param(
+            [
+                (31, "doi:10.9999/cited.1"),
+                (32, "Publisher's note: the journal stays neutral."),
+                (33, "Cite this article as: " + _OWN_CITATION),
+            ],
+            id="another-sentence-between",
+        ),
+        pytest.param(
+            [(31, "doi:10.9999/cited.1"), (32, "Citation: " + _OWN_CITATION)],
+            id="weak-cue",
+        ),
+        pytest.param(
+            [(31, "doi:10.9999/cited.1"), (32, "How to cite this report: " + _OWN_CITATION)],
+            id="a-referee-report",
+        ),
+        pytest.param(
+            [(31, "Figure DOI: 10.9999/cited.1"), (32, "Cite this article as: " + _OWN_CITATION)],
+            id="a-component-label",
+        ),
+    ],
+)
+def test_a_reference_doi_above_a_citation_block_stays_a_reference(rows):
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    candidates = collect_doi_candidates(_after_the_list(*rows))
+
+    cited = next(c for c in candidates if c.normalized == "10.9999/cited.1")
+    assert cited.rejection_reason is not None
+    assert cited.selection_tier == 0
+
+
+def test_the_doi_of_the_block_wins_over_the_one_above_its_cue():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (9, CanonicalSection.REFERENCES, 30, _LAST_REFERENCE, 6),
+            (9, CanonicalSection.REFERENCES, 30, "doi:10.9999/cited.1", 6),
+            (
+                10,
+                CanonicalSection.UNKNOWN,
+                31,
+                "How to cite this article: Doe et al. A study. Journal of Examples 2010. "
+                "https://doi.org/10.1234/own.5",
+                6,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.5"
+
+
+def test_a_front_page_doi_outranks_one_above_a_last_page_citation_block():
+    """If the rule is ever wrong, the DOI the first page labels still names the paper."""
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.TITLE, 1, "DOI: 10.1234/own.1", 1),
+            (9, CanonicalSection.REFERENCES, 30, _LAST_REFERENCE, 6),
+            (9, CanonicalSection.REFERENCES, 31, "doi:10.9999/cited.1", 6),
+            (9, CanonicalSection.REFERENCES, 32, "Cite this article as: " + _OWN_CITATION, 6),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.1"
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]

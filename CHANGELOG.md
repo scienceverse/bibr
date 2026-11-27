@@ -59,6 +59,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the reference floor and the second 1. Benchmark scores published before
   this change were made with version 5.
 
+### Fixed
+
+- The paper's DOI is found when it is printed only above the citation block
+  that follows the reference list. Older BioMed Central articles print
+  "doi:10.1186/…" on a line of its own after the last reference, directly
+  above "Cite this article as: …", and nowhere else. bibr read that line as
+  the last reference's DOI: the paper had no DOI and its last reference
+  carried the paper's. A labelled DOI that the article's citation cue ("Cite
+  this article as", "How to cite this article") follows directly, in the same
+  sentence or opening the next one, is now the paper's own when its label
+  opens the sentence (a DOI that ends a reference entry does not qualify) and
+  the citation block prints no DOI itself (that one names the paper, as
+  before).
+  A DOI the first page labels still outranks it. The step that takes the
+  paper's own DOI off its reference entries then clears the last reference.
+- A running footer that prints the DOI and then the page number no longer
+  costs the paper its DOI. Where the text layer leaves no gap between the two
+  ("…00777-2112" on page 12), every such page gave a DOI of its own, and the
+  real DOI from the pages that kept the gap was rejected as cut short, so the
+  selection abstained (`VAL_DOI_AMBIGUOUS`). Two or more header or footer DOIs
+  that extend one printed DOI by digits alone, with ends as close together as
+  page numbers, are now rejected as `line_join_overrun`. A single longer DOI
+  is left to the cut rule as before.
+
+  Both were found in a uniform sample of PubMed Central papers, where 7 of 163
+  papers with a DOI had none extracted. Applied to the stored DOI candidates
+  of that run, the two rules give 4 of the 7 their DOI (3 and 1) and change no
+  other paper; on the 300 papers of the public JATS benchmark neither rule
+  applies, and the DOI stays right in all 300 on both paths.
+
 ## [0.9.2] - 2026-11-24
 
 A speed and links release. On a CUDA machine the default local plan gets
