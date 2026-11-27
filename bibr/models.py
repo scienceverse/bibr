@@ -188,6 +188,27 @@ def canonicalize_orcid(orcid: str | None) -> str | None:
     return None
 
 
+def is_valid_orcid_checksum(orcid: str | None) -> bool:
+    """Return True iff *orcid* is a canonicalizable ORCID passing ISO 7064 (MOD 11-2).
+
+    Used when harvesting ORCIDs from free document text or link annotations so
+    arbitrary 16-digit table/grant numbers are never misclassified as ORCID iDs.
+    ``canonicalize_orcid`` itself remains format-only so existing structured
+    records and fixtures are preserved unchanged.
+    """
+    canonical = canonicalize_orcid(orcid)
+    if canonical is None:
+        return False
+    digits = canonical.rsplit("/", 1)[-1].replace("-", "")
+    total = 0
+    for ch in digits[:15]:
+        total = (total + int(ch)) * 2
+    remainder = total % 11
+    expected_num = (12 - remainder) % 11
+    expected = "X" if expected_num == 10 else str(expected_num)
+    return digits[15] == expected
+
+
 class MatchSource(StrEnum):
     """Supported external match services."""
 

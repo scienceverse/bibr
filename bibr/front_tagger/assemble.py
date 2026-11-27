@@ -45,6 +45,8 @@ _CORRESPONDING_RE = re.compile(
     r"autor(?:a)? (?:de )?correspond|auteur correspondant|korrespondenz|通讯作者|責任著者",
     re.IGNORECASE,
 )
+# Case-sensitive Taylor & Francis correspondence-block cue ("CONTACT Name email").
+_CONTACT_CUE_RE = re.compile(r"(?:^|\b)CONTACT\b")
 _ABSTRACT_WORDS = (
     r"abstract|summary|resumen|resumo|r[ée]sum[ée]|zusammenfassung|riassunto|sommario|"
     r"аннотация|анотація|резюме|abstrakt|abstrak|samenvatting|streszczenie|özet|"
@@ -3004,25 +3006,51 @@ def _assign_loose_emails(authors: list[_Author], spans: list[Span], *, rules: bo
 
 
 def _flag_corresponding(authors: list[_Author], inp: TaggerInput, tags) -> None:
-    """Mark the author a "Corresponding author" note points at, by symbol or email."""
+    """Mark the author a "Corresponding author" note points at, by symbol, email or name."""
     region_words: dict[int, list[int]] = {}
     for i, word in enumerate(inp.words):
         region_words.setdefault(word.region, []).append(i)
-    cue_regions: list[list[int]] = []
+    cue_regions: list[tuple[list[int], int]] = []
     symbols: set[str] = set()
     for indices in region_words.values():
         cues = _cue_positions(inp, indices)
         if cues:
-            cue_regions.append(indices)
+            cue_regions.append((indices, cues[0]))
             symbols.update(_cue_symbol(inp, tags, indices, pos) for pos in cues)
     if not cue_regions:
         return
     symbols.discard("")
-    cue_text = _fold("".join(inp.words[i].text for indices in cue_regions for i in indices))
+    cue_text = _fold("".join(inp.words[i].text for indices, _ in cue_regions for i in indices))
     for author in authors:
         by_symbol = bool(symbols.intersection(author.marks))
         by_email = bool(author.email) and _fold(author.email or "") in cue_text
         author.corresponding = by_symbol or by_email
+    if not any(author.corresponding for author in authors):
+        # Name fallback for correspondence blocks where the email is opaque or
+        # the cue carries no marker symbol (e.g. Taylor & Francis "CONTACT Name email").
+        # Restrict to text starting at the cue word so a byline sharing the region
+        # cannot match every author.
+        post_cue_text = _fold(
+            "".join(
+                inp.words[i].text for indices, first_cue in cue_regions for i in indices[first_cue:]
+            )
+        )
+        named: list[_Author] = []
+        for author in authors:
+            family = _fold(" ".join(s.text for s in author.family))
+            given_full = _fold(" ".join(s.text for s in author.given))
+            given_first = _fold((author.given[0].text.split() or [""])[0]) if author.given else ""
+            if not family or len(family) < 3 or not given_full:
+                continue
+            if (
+                f"{given_full}{family}" in post_cue_text
+                or f"{family}{given_full}" in post_cue_text
+                or (len(given_first) >= 2 and f"{given_first}{family}" in post_cue_text)
+            ):
+                named.append(author)
+        if named and (len(authors) < 3 or len(named) < len(authors)):
+            for author in named:
+                author.corresponding = True
 
 
 # How far from a correspondence cue its note's symbol may stand, in words:
@@ -3039,11 +3067,11 @@ def _cue_positions(inp: TaggerInput, indices: list[int]) -> list[int]:
         starts.append(offset)
         offset += len(inp.words[i].text) + 1
     text = " ".join(inp.words[i].text for i in indices)
+    matches = list(_CORRESPONDING_RE.finditer(text))
+    if "@" in text:
+        matches.extend(_CONTACT_CUE_RE.finditer(text))
     return sorted(
-        {
-            max(pos for pos, start in enumerate(starts) if start <= m.start())
-            for m in _CORRESPONDING_RE.finditer(text)
-        }
+        {max(pos for pos, start in enumerate(starts) if start <= m.start()) for m in matches}
     )
 
 

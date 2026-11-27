@@ -33,8 +33,107 @@ _BRACED_EMAILS_RE = re.compile(
 )
 
 
+_KNOWN_WRAPPED_TLDS = frozenset(
+    {
+        "ac",
+        "at",
+        "au",
+        "be",
+        "br",
+        "ca",
+        "ch",
+        "cn",
+        "co",
+        "com",
+        "cz",
+        "de",
+        "dk",
+        "edu",
+        "es",
+        "eu",
+        "fi",
+        "fr",
+        "gov",
+        "gr",
+        "hk",
+        "ie",
+        "il",
+        "in",
+        "int",
+        "ir",
+        "it",
+        "jp",
+        "kr",
+        "mil",
+        "mo",
+        "mx",
+        "my",
+        "net",
+        "nl",
+        "no",
+        "nz",
+        "org",
+        "pl",
+        "pt",
+        "ro",
+        "ru",
+        "se",
+        "sg",
+        "th",
+        "tr",
+        "tw",
+        "uk",
+        "us",
+        "vn",
+        "za",
+    }
+)
+_PROSE_AMBIGUOUS_TLDS = frozenset({"at", "be", "in", "it", "my", "no", "us"})
+_SPACE_WRAPPED_TLD_RE = re.compile(r"([\w.+-]+@[\w.-]+\.)[ \t]+([a-z]{2,3})(?=$|[\s,;)\]}])")
+_STANDALONE_EMAIL_LINE_RE = re.compile(r"^\s*[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\s*$")
+_NON_CORR_STAR_NOTE_RE = re.compile(
+    r"[*\u2217\u204e]\s*(?:these authors|equal(?:ly)?\s+contribut|co-?first|"
+    r"deceased|present address|current address)",
+    re.IGNORECASE,
+)
+
+
+def _repair_wrapped_emails(text: str) -> str:
+    """Rejoin emails split across a line wrap, space-after-dot TLD wrap, or soft-hyphen."""
+    if "@" not in text:
+        return text
+    if "\ufffe" in text:
+        text = re.sub(r"([\w.+-]+@[\w.-]*)\ufffe([\w.-]+)", r"\1-\2", text)
+    if "\n" in text or "\r" in text:
+        text = re.sub(
+            r"([\w.+-]+@)[ \t]*\r?\n[ \t]*([\w.-]+\.[A-Za-z]{2,})\b",
+            r"\1\2",
+            text,
+        )
+        text = re.sub(
+            r"([\w.+-]+@[\w.-]*[.-])[ \t]*\r?\n[ \t]*([A-Za-z0-9.-]+\.[A-Za-z]{2,}|[A-Za-z]{2,})\b",
+            r"\1\2",
+            text,
+        )
+
+    def _join_tld(m: re.Match[str]) -> str:
+        tld = m.group(2)
+        if tld not in _KNOWN_WRAPPED_TLDS:
+            return m.group(0)
+        if tld in _PROSE_AMBIGUOUS_TLDS:
+            after = text[m.end() :]
+            # Do not join an English word like ". in our study" unless terminated by punctuation/end.
+            if re.match(r"^[ \t]+[a-z]", after):
+                return m.group(0)
+        return f"{m.group(1)}{tld}"
+
+    if ". " in text or ".\t" in text:
+        text = _SPACE_WRAPPED_TLD_RE.sub(_join_tld, text)
+    return text
+
+
 def _expand_braced_emails(sentences: list) -> list:
-    """*sentences*, with each braced address list written out as one address per local part."""
+    """*sentences*, with wrapped emails rejoined and braced address lists expanded."""
 
     def expand(m: re.Match) -> str:
         return ", ".join(f"{local}@{m.group(2)}" for local in re.split(r"\s*[,;|]\s*", m.group(1)))
@@ -42,10 +141,15 @@ def _expand_braced_emails(sentences: list) -> list:
     out = []
     for sent in sentences:
         text = sent.text or ""
-        if "}" in text and "@" in text:
-            expanded = _BRACED_EMAILS_RE.sub(expand, text)
-            if expanded != text:
-                sent = SimpleNamespace(text=expanded, section_id=sent.section_id)
+        repaired = _repair_wrapped_emails(text)
+        if "}" in repaired and "@" in repaired:
+            repaired = _BRACED_EMAILS_RE.sub(expand, repaired)
+        if repaired != text:
+            sent = SimpleNamespace(
+                text=repaired,
+                section_id=sent.section_id,
+                page_number=getattr(sent, "page_number", None),
+            )
         out.append(sent)
     return out
 
@@ -58,11 +162,20 @@ def _expand_braced_emails(sentences: list) -> list:
 _CORRESPONDING_MARKER_RE = re.compile(
     r"\bcorrespond"  # corresponding, correspondence
     r"|✉"  # envelope glyph
+    # Taylor & Francis page-1 correspondence footer: "CONTACT Jane Doe jane@uni.edu ..."
+    # Kept strictly uppercase and line-anchored so prose ("contact us") never fires.
+    r"|(?:^|[\r\n])\s*[\W\d_]*(?-i:CONTACT)\b"
     # GLM-OCR misread of envelope at line start; the capital stays case-sensitive so
     # a unit ("10 pg ml-1") is not read as a marker.
     r"|\b(?i:pg)\s+(?-i:(?=[A-Z]))",
     re.IGNORECASE,
 )
+
+
+def has_correspondence_cue(text: str | None) -> bool:
+    """Whether *text* carries an explicit correspondence or ``CONTACT`` anchor."""
+    return bool(text and _CORRESPONDING_MARKER_RE.search(text))
+
 
 # Window of adjacent sentences to consider when matching an email to an
 # author name — the "Corresponding Author: <Name> ... E-mail: <addr>" line
@@ -151,9 +264,33 @@ _NAMED_EMAIL_RE = re.compile(_EMAIL_RE.pattern + r"\s*\(\s*([^()@;:]{3,70}?)\s*\
 # "Correspondence" counts only as a label: followed by ":" or "*", or by "to", "concerning"
 # or "should" ("Correspondence between the two raters was high" is prose).
 _CORRESPONDENCE_PHRASE_RE = re.compile(
-    r"^[\W\d_]*(?:(?:co-?)?corresponding\s+authors?\b|correspondence(?=\s*[:*]|\s+(?:to|concerning|should)\b)|✉)",
+    r"^[\W\d_]*(?:(?:co-?)?corresponding\s+authors?\b"
+    r"|(?-i:CONTACT)\b"
+    r"|(?:author\s+for\s+|for\s+|address\s+)?correspondence(?=\s*[:*]|\s+(?:to|concerning|should)\b)|✉)",
     re.IGNORECASE | re.MULTILINE,
 )
+# Explicit correspondence cue prefixed with a star ("*Correspondence:",
+# "*CORRESPONDENCE", "*For correspondence:") — ties byline stars to
+# corresponding authors even when the footnote email has no surname match.
+_STAR_CORRESPONDENCE_CUE_RE = re.compile(
+    r"^[\s]*(?:\\\(\s*\^\s*\{\s*\*\s*\}\s*\\\)|[*∗⁎])\s*"
+    r"(?:(?:co-?)?corresponding\s+authors?\b|(?:for\s+)?correspondence\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Parenthetical author initials directly after an email, as PLOS and eLife print:
+# "jndoe@uni.es (JND)" or "qdu@uni.edu.cn (QD)".
+_INITIALS_AFTER_EMAIL_RE = re.compile(r"^\s*\(\s*([A-Z](?:\.?[\s\-]?[A-Z]){1,4}\.?)\s*\)")
+# Back-matter correspondence statement (Nature Communications & similar):
+# "Correspondence and requests for materials should be addressed to Anne C. Ferguson-Smith."
+_BACK_MATTER_ADDRESSED_RE = re.compile(
+    r"\b(?:correspondence(?:\s+and\s+requests\s+for\s+materials?)?\s+(?:should|may)\s+be\s+addressed\s+to"
+    r"|address\s+correspondence\s+to)\s+(.+)",
+    re.IGNORECASE,
+)
+_RECIPIENT_SPLIT_RE = re.compile(
+    r"\s*(?:,\s*(?:and|&)\s*|\s+(?:and|&)\s*|,\s*|;\s*|\|\s*)", re.IGNORECASE
+)
+_CORRESPONDENCE_WORD_FOLLOW_RE = re.compile(r"correspond", re.IGNORECASE)
 _PLURAL_CORRESPONDENCE_RE = re.compile(
     r"^[\W\d_]*(?:co-?)?corresponding\s+authors\b", re.IGNORECASE | re.MULTILINE
 )
@@ -304,6 +441,152 @@ def _names_another_author(owner: PaperAuthor, email: str, authors: list[PaperAut
     return any(
         a is not owner and _email_name_affinity(a.given, a.family, local_compact) for a in authors
     )
+
+
+def _author_initial_codes(author: PaperAuthor) -> set[str]:
+    """Plausible uppercase initialisms for *author* (e.g. Jorge N Domínguez -> JND, JD)."""
+    given_inits = _initials(_given_tokens(author.given))
+    fam_tokens = [t for t in re.split(r"[\s.\-\u2010-\u2015]+", author.family or "") if _fold(t)]
+    if not given_inits or not fam_tokens:
+        return set()
+    fam_inits = [_fold(t)[0] for t in fam_tokens if _fold(t)]
+    if not fam_inits:
+        return set()
+    codes = {
+        "".join(given_inits + fam_inits),
+        given_inits[0] + "".join(fam_inits),
+        "".join(given_inits) + fam_inits[-1],
+        given_inits[0] + fam_inits[-1],
+    }
+    return {c.upper() for c in codes if len(c) >= 2}
+
+
+def _match_unique_by_initials(code_raw: str, authors: list[PaperAuthor]) -> PaperAuthor | None:
+    """Return the unique author whose initialisms contain *code_raw*, else None."""
+    code = re.sub(r"[^A-Z]", "", code_raw.upper())
+    if len(code) < 2:
+        return None
+    matches = [a for a in authors if code in _author_initial_codes(a)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _starred_byline_authors(sentences: list, index: dict[str, list]) -> list[PaperAuthor]:
+    """Authors marked with a ``*`` after their surname in address-free byline sentences.
+
+    Unlike :func:`_byline_stars` (used as a negative guard in ``_flag_from_marker_glyphs``),
+    this positively identifies starred authors, disambiguating shared surnames (e.g.
+    ``Xinyi Li1, ..., Yifan Li6*``) from the given name immediately preceding the surname,
+    and ignores a ``*`` that opens a following ``*Correspondence:`` footnote.
+    """
+    chosen: list[PaperAuthor] = []
+    seen_ids: set[int] = set()
+    for sent in sentences:
+        text = sent.text or ""
+        if "@" in text or not _STAR_RE.search(text):
+            continue
+        cleaned = _ORCID_BADGE_RE.sub("", text)
+        cue_m = _CORRESPONDENCE_PHRASE_RE.search(cleaned)
+        scan_limit = cue_m.start() if cue_m is not None else len(cleaned)
+        if scan_limit == 0:
+            continue
+        for word in _WORD_RE.finditer(cleaned):
+            if word.start() >= scan_limit:
+                break
+            entries = index.get(_fold(word.group()), [])
+            if not entries:
+                continue
+            after_match = _NON_LETTERS_RE.match(cleaned, word.end())
+            after = after_match.group() if after_match else ""
+            if not _STAR_RE.search(after):
+                continue
+            # Do not mistake a following "*Correspondence:" footnote glued after
+            # the last author's affiliation digits for a star on that author.
+            tail = cleaned[after_match.end() :] if after_match else ""
+            if _CORRESPONDENCE_WORD_FOLLOW_RE.match(tail):
+                # Only counts if the star is glued before whitespace/newline, not right before "Correspondence".
+                star_idx = _STAR_RE.search(after).start()  # type: ignore[union-attr]
+                if not after[star_idx + 1 :].strip() and any(
+                    ch in after[:star_idx] for ch in ("\n", "\r", " ")
+                ):
+                    continue
+            if len(entries) == 1:
+                author = entries[0][0]
+            else:
+                # Disambiguate shared surnames by the given-name segment
+                # immediately preceding this surname (do not cross comma/digit
+                # boundaries into an earlier author's name).
+                segment = re.split(
+                    r"[,;\n\r\d]+|\band\b|&",
+                    cleaned[: word.start()],
+                    flags=re.IGNORECASE,
+                )[-1]
+                before_words = _WORD_RE.findall(segment)[-3:]
+                if not before_words:
+                    continue
+                before_folds = {_fold(w) for w in before_words if _fold(w)}
+                before_inits = _initials(before_words)
+                fits: list[PaperAuthor] = []
+                for cand, cand_inits in entries:
+                    g_folds = {_fold(t) for t in _given_tokens(cand.given) if len(_fold(t)) >= 2}
+                    if g_folds & before_folds or (
+                        before_inits
+                        and cand_inits
+                        and _initials_compatible(before_inits[-len(cand_inits) :], cand_inits)
+                    ):
+                        fits.append(cand)
+                if len(fits) != 1:
+                    continue
+                author = fits[0]
+            if id(author) not in seen_ids:
+                seen_ids.add(id(author))
+                chosen.append(author)
+    return chosen
+
+
+def _authors_named_in_text(text: str, index: dict[str, list]) -> list[PaperAuthor]:
+    """Find every author explicitly named (given/initials + surname) inside *text*."""
+    cleaned = _EMAIL_RE.sub(" ", text or "")
+    cleaned = _ORCID_BADGE_RE.sub("", cleaned)
+    word_matches = list(_WORD_RE.finditer(cleaned))
+    if not word_matches:
+        return []
+    found: list[PaperAuthor] = []
+    seen_ids: set[int] = set()
+    n = len(word_matches)
+    for i in range(n):
+        # Try 1..3-word surnames (covers "Ferguson-Smith", "van der Berg").
+        for span_len in (3, 2, 1):
+            if i + span_len > n:
+                continue
+            fam_key = _fold("".join(word_matches[i + k].group() for k in range(span_len)))
+            entries = index.get(fam_key)
+            if not entries:
+                continue
+            # Require at least one preceding given-name/initial token matching the author.
+            prev_words = _strip_titles([word_matches[j].group() for j in range(max(0, i - 4), i)])
+            if not prev_words:
+                continue
+            prev_folds = {_fold(w) for w in prev_words if len(_fold(w)) >= 2}
+            prev_inits = _initials(prev_words)
+            fits: list[PaperAuthor] = []
+            for cand, cand_inits in entries:
+                g_tokens = [_fold(t) for t in _given_tokens(cand.given) if _fold(t)]
+                full_match = any(len(gt) >= 2 and gt in prev_folds for gt in g_tokens)
+                init_match = bool(
+                    prev_inits
+                    and cand_inits
+                    and (
+                        _initials_compatible(prev_inits[-len(cand_inits) :], cand_inits)
+                        or _initials_compatible(prev_inits[-1:], cand_inits)
+                    )
+                )
+                if full_match or (init_match and len(entries) == 1):
+                    fits.append(cand)
+            if len(fits) == 1 and id(fits[0]) not in seen_ids:
+                seen_ids.add(id(fits[0]))
+                found.append(fits[0])
+                break
+    return found
 
 
 def _byline_stars(sentences: list, index: dict[str, list]) -> tuple[set[int], set[int]]:
@@ -469,6 +752,11 @@ class AuthorEmailHarvester:
         strict_emails = self._marker_sentence_emails(sentences)
 
         claimed_emails: set[str] = {a.email.lower() for a in authors if a.email}
+        all_authors_by_family: dict[str, list[PaperAuthor]] = {}
+        for author in authors:
+            if author.family:
+                all_authors_by_family.setdefault(author.family.lower().strip(), []).append(author)
+        shared_families = {fam for fam, group in all_authors_by_family.items() if len(group) > 1}
         family_pats: dict[str, re.Pattern[str]] = {
             family: re.compile(r"\b" + re.escape(family) + r"\b", re.IGNORECASE)
             for family in authors_by_family
@@ -477,6 +765,53 @@ class AuthorEmailHarvester:
         family_folds: dict[str, tuple[str, ...]] = {
             family: _folds(family) for family in authors_by_family if family
         }
+
+        def _sentence_mentions_shared_author(
+            text: str, family: str, family_pat: re.Pattern[str], author: PaperAuthor
+        ) -> bool:
+            """For a shared surname, avoid matching co-author A when *text* only names co-author B."""
+            matches = list(family_pat.finditer(text))
+            if not matches:
+                return False
+            peers = all_authors_by_family.get(family, ())
+            author_given_folds = {
+                _fold(tok) for tok in _given_tokens(author.given) if len(_fold(tok)) >= 2
+            }
+            author_inits = _initials(_given_tokens(author.given))
+            any_unqualified = False
+            for m in matches:
+                seg = re.split(
+                    r"[,;\n\r\d:]+|\band\b|&",
+                    text[: m.start()],
+                    flags=re.IGNORECASE,
+                )[-1]
+                before_words = _WORD_RE.findall(seg)[-3:]
+                before_folds = {_fold(w) for w in before_words if _fold(w)}
+                before_inits = _initials(before_words)
+                if author_given_folds & before_folds or (
+                    author_inits
+                    and before_inits
+                    and _initials_compatible(before_inits[-len(author_inits) :], author_inits)
+                ):
+                    return True
+                other_named = any(
+                    peer is not author
+                    and (
+                        (
+                            {_fold(t) for t in _given_tokens(peer.given) if len(_fold(t)) >= 2}
+                            & before_folds
+                        )
+                        or (
+                            (p_inits := _initials(_given_tokens(peer.given)))
+                            and before_inits
+                            and _initials_compatible(before_inits[-len(p_inits) :], p_inits)
+                        )
+                    )
+                    for peer in peers
+                )
+                if not other_named:
+                    any_unqualified = True
+            return any_unqualified
 
         harvested = 0
         for i, sent in enumerate(sentences):
@@ -495,7 +830,30 @@ class AuthorEmailHarvester:
 
             for email_match in _EMAIL_RE.finditer(sent.text):
                 email = email_match.group(1)
-                if email.lower() in claimed_emails:
+                email_low = email.lower()
+                if email_low in claimed_emails:
+                    continue
+
+                # If an already-filled author holds a truncated TLD prefix of
+                # *email* (e.g. "yltang@uni.edu" vs repaired "yltang@uni.edu.mo"),
+                # upgrade their address instead of handing it to a neighbor.
+                upgraded_existing = False
+                for existing_author in authors:
+                    if not existing_author.email:
+                        continue
+                    ex_low = existing_author.email.lower()
+                    if email_low.startswith(ex_low + "."):
+                        existing_author.email = email
+                        claimed_emails.add(email_low)
+                        if email_low in strict_emails:
+                            existing_author.corresponding = True
+                        upgraded_existing = True
+                        break
+                    if ex_low.startswith(email_low + "."):
+                        claimed_emails.add(email_low)
+                        upgraded_existing = True
+                        break
+                if upgraded_existing:
                     continue
 
                 local = email.split("@", 1)[0].lower()
@@ -508,29 +866,49 @@ class AuthorEmailHarvester:
                         order_idx += len(family_authors)
                         continue
                     family_pat = family_pats[family]
-                    best_dist: int | None = None
-                    for j in window_indices:
-                        if family_pat.search(sentences[j].text):
-                            dist = abs(j - i)
-                            if best_dist is None or dist < best_dist:
-                                best_dist = dist
-                    if best_dist is None:
-                        order_idx += len(family_authors)
-                        continue
                     affinity = int(any(f and f in local_compact for f in family_folds[family]))
-                    for author in family_authors:
-                        # Only disambiguate on the given name when the surname
-                        # is genuinely shared, so ranking between distinct
-                        # surnames stays exactly as before.
-                        given_bonus = (
-                            _given_name_affinity(author.given, local_compact)
-                            if len(family_authors) > 1
-                            else 0
-                        )
-                        candidates.append(
-                            (best_dist, -(affinity + given_bonus), order_idx, family, author)
-                        )
-                        order_idx += 1
+                    if family in shared_families:
+                        for author in family_authors:
+                            best_dist: int | None = None
+                            for j in window_indices:
+                                if _sentence_mentions_shared_author(
+                                    sentences[j].text, family, family_pat, author
+                                ):
+                                    dist = abs(j - i)
+                                    if best_dist is None or dist < best_dist:
+                                        best_dist = dist
+                            if best_dist is not None:
+                                given_bonus = _given_name_affinity(author.given, local_compact)
+                                candidates.append(
+                                    (
+                                        best_dist,
+                                        -(affinity + given_bonus),
+                                        order_idx,
+                                        family,
+                                        author,
+                                    )
+                                )
+                            order_idx += 1
+                    else:
+                        best_dist = None
+                        for j in window_indices:
+                            if family_pat.search(sentences[j].text):
+                                dist = abs(j - i)
+                                if best_dist is None or dist < best_dist:
+                                    best_dist = dist
+                        if best_dist is None:
+                            order_idx += len(family_authors)
+                            continue
+                        for author in family_authors:
+                            given_bonus = (
+                                _given_name_affinity(author.given, local_compact)
+                                if len(family_authors) > 1
+                                else 0
+                            )
+                            candidates.append(
+                                (best_dist, -(affinity + given_bonus), order_idx, family, author)
+                            )
+                            order_idx += 1
 
                 if candidates:
                     candidates.sort(key=lambda c: (c[0], c[1], c[2]))
@@ -569,6 +947,46 @@ class AuthorEmailHarvester:
                         _drop_filled_author(authors_by_family, family, author)
                         harvested += 1
                 else:
+                    # Surname wasn't within the 3-sentence same-section window.
+                    # On explicit correspondence/contact or bare-star email lines
+                    # ("* rvale@uni.ca", "*For correspondence: x@y (JND)"),
+                    # match uniquely by trailing parenthetical initials or email
+                    # local-part affinity before falling back to single-corresponding
+                    # elimination. Only promote ``corresponding`` when an explicit
+                    # marker (not a bare star alone) authorizes it.
+                    sent_has_marker = bool(_CORRESPONDING_MARKER_RE.search(sent.text))
+                    is_bare_star_line = bool(_BARE_LIST_RE.search(sent.text))
+                    if email.lower() in strict_emails or sent_has_marker or is_bare_star_line:
+                        remaining_authors = [
+                            a for group in authors_by_family.values() for a in group
+                        ]
+                        matched_author: PaperAuthor | None = None
+                        init_m = _INITIALS_AFTER_EMAIL_RE.match(sent.text[email_match.end() :])
+                        if init_m:
+                            matched_author = _match_unique_by_initials(
+                                init_m.group(1), remaining_authors
+                            )
+                        if matched_author is None:
+                            aff_hits = [
+                                a
+                                for a in remaining_authors
+                                if _email_name_affinity(a.given, a.family, local_compact)
+                            ]
+                            if len(aff_hits) == 1:
+                                matched_author = aff_hits[0]
+                        if matched_author is not None:
+                            matched_author.email = email
+                            claimed_emails.add(email.lower())
+                            if email.lower() in strict_emails if strict_emails else sent_has_marker:
+                                matched_author.corresponding = True
+                            _drop_filled_author(
+                                authors_by_family,
+                                matched_author.family.lower().strip(),
+                                matched_author,
+                            )
+                            harvested += 1
+                            continue
+
                     fallback = [
                         a for group in authors_by_family.values() for a in group if a.corresponding
                     ]
@@ -628,7 +1046,226 @@ class AuthorEmailHarvester:
         self._promote_corresponding_from_anchors(authors, sentences)
         self._flag_named_footnote_authors(authors, footnote_groups)
         self._flag_from_marker_glyphs(authors, sentences)
+        self._flag_from_correspondence_blocks(authors, sentences)
+        self._flag_from_byline_stars(authors, sentences)
+        self._flag_from_back_matter_correspondence(authors)
         self._promote_sole_author(authors)
+
+    def _apply_corresponding_group(
+        self,
+        authors: list[PaperAuthor],
+        chosen: list[PaperAuthor],
+        reason: str,
+    ) -> None:
+        """Mark *chosen* as corresponding if compatible with existing flags and cardinality."""
+        if not chosen:
+            return
+        if len(authors) >= 3 and len({id(a) for a in chosen}) == len(authors):
+            return
+        flagged = {id(a) for a in authors if a.corresponding}
+        chosen_ids = {id(a) for a in chosen}
+        if flagged - chosen_ids:
+            return
+        added = [a for a in chosen if not a.corresponding]
+        for author in added:
+            author.corresponding = True
+        if len(authors) >= 3 and all(a.corresponding for a in authors):
+            for author in added:
+                author.corresponding = False
+            return
+        if added:
+            logger.info("Marked %d author(s) corresponding from %s", len(added), reason)
+
+    def _flag_from_correspondence_blocks(self, authors: list[PaperAuthor], sentences: list) -> None:
+        """Flag authors explicitly named in a page-1 correspondence/CONTACT block.
+
+        Covers layouts whose correspondence block prints the author's full name
+        next to an opaque or separate-line email (BMC ``*Correspondence:``,
+        Taylor & Francis ``CONTACT <Name> <email>``, Psychological Medicine
+        ``Corresponding authors: <Name>``, Frontiers ``*CORRESPONDENCE``,
+        PeerJ ``Corresponding author``).
+        """
+        if not authors or not sentences:
+            return
+        index = _index_authors_by_family(authors)
+        claimed = {a.email.lower() for a in authors if a.email}
+        chosen: list[PaperAuthor] = []
+        chosen_ids: set[int] = set()
+
+        for i, sent in enumerate(sentences):
+            text = sent.text or ""
+            cue_m = _CORRESPONDENCE_PHRASE_RE.search(text)
+            if not cue_m:
+                continue
+            # Collect from the correspondence cue onward. Only absorb immediate
+            # continuation sentences when the cue sentence itself is a bare
+            # heading without an author name or email ("*Correspondence:",
+            # "Corresponding authors:"), so a self-contained line like
+            # "✉ Jane Doe, jane@uni.edu" never pulls in the next author's line.
+            head_text = text[cue_m.start() :]
+            block_parts = [head_text]
+            if "@" not in head_text and not _authors_named_in_text(head_text, index):
+                for j in range(i + 1, min(len(sentences), i + 4)):
+                    nxt = sentences[j]
+                    if nxt.section_id != sent.section_id:
+                        break
+                    nxt_text = (nxt.text or "").strip()
+                    if not nxt_text or len(nxt_text) > 260:
+                        break
+                    if _CORRESPONDENCE_PHRASE_RE.search(nxt_text):
+                        break
+                    block_parts.append(nxt_text)
+                    if "@" in nxt_text and _authors_named_in_text("\n".join(block_parts), index):
+                        break
+            block_text = "\n".join(block_parts)
+            # Guard against a merged paragraph containing the entire byline.
+            named = _authors_named_in_text(block_text, index)
+            if not named:
+                continue
+            if len(authors) >= 3 and len(named) == len(authors):
+                continue
+            # If the block pairs one named author with one unclaimed email (or
+            # equal counts of named authors and emails in order), backfill missing emails.
+            block_emails = [m.group(1) for m in _EMAIL_RE.finditer(block_text)]
+            if len(named) == 1 and len(block_emails) == 1:
+                self._attach_email(named[0], block_emails[0], claimed)
+            elif len(named) == len(block_emails) and len(named) > 1:
+                for auth, addr in zip(named, block_emails, strict=True):
+                    self._attach_email(auth, addr, claimed)
+            for auth in named:
+                if id(auth) not in chosen_ids:
+                    chosen_ids.add(id(auth))
+                    chosen.append(auth)
+
+        self._apply_corresponding_group(authors, chosen, "correspondence blocks")
+
+    def _flag_from_byline_stars(self, authors: list[PaperAuthor], sentences: list) -> None:
+        """Flag authors marked with ``*`` in the byline when a ``*`` correspondence cue exists.
+
+        Fires after :meth:`_flag_from_marker_glyphs` and :meth:`_flag_from_correspondence_blocks`
+        so it never contradicts an already-resolved email/name match, while rescuing
+        papers whose correspondence footnote has an opaque email (e.g. PLOS
+        ``* evergreen88@example.com`` + ``Liwei Sun*``) or BMC/eLife/Frontiers
+        co-corresponding stars.
+        """
+        if not authors or not sentences:
+            return
+        has_star_word_cue = any(_STAR_CORRESPONDENCE_CUE_RE.search(s.text or "") for s in sentences)
+        bare_star_sents = []
+        standalone_email_sents = []
+        if not has_star_word_cue:
+            printing = [s for s in sentences if "@" in (s.text or "")]
+            in_series = any(_SERIES_ADDRESS_RE.search(s.text) for s in printing)
+            if not in_series:
+                bare_star_sents = [s for s in printing if _BARE_LIST_RE.search(s.text)]
+                if not bare_star_sents and not any(
+                    _NON_CORR_STAR_NOTE_RE.search(s.text or "") for s in sentences
+                ):
+                    standalone_email_sents = [
+                        s for s in printing if _STANDALONE_EMAIL_LINE_RE.match(s.text or "")
+                    ]
+        if not (has_star_word_cue or bare_star_sents or standalone_email_sents):
+            return
+        index = _index_authors_by_family(authors)
+        starred = _starred_byline_authors(sentences, index)
+        if not starred:
+            return
+        if not has_star_word_cue and bare_star_sents:
+            # For bare "* email" lines without an explicit "*Correspondence" word,
+            # only fall back to byline stars when an email on the "*" line is
+            # unattached (opaque, e.g. "* evergreen88@example.com") AND no email on the
+            # "*" line already belongs to a non-starred author.
+            by_email = {a.email.lower(): a for a in authors if a.email}
+            starred_ids = {id(a) for a in starred}
+            opaque_emails: list[str] = []
+            for s in bare_star_sents:
+                for m in _EMAIL_RE.finditer(s.text or ""):
+                    addr = m.group(1)
+                    owner = by_email.get(addr.lower())
+                    if owner is not None:
+                        if id(owner) not in starred_ids:
+                            return
+                    else:
+                        opaque_emails.append(addr)
+            if not opaque_emails:
+                return
+            if len(starred) == 1 and len(opaque_emails) == 1:
+                self._attach_email(starred[0], opaque_emails[0], set(by_email))
+        elif not has_star_word_cue and standalone_email_sents:
+            # PLOS layout where OCR clipped the tiny leading "*" off the
+            # standalone email line ("Han.Liu@examplehealth.org"): only fire
+            # when the starred byline author(s) are the exact owners of all
+            # harvested emails and at least one of those emails sits on a
+            # standalone line.
+            if len(starred) >= len(authors):
+                return
+            by_email = {a.email.lower(): a for a in authors if a.email}
+            starred_ids = {id(a) for a in starred}
+            all_email_owner_ids = {id(a) for a in authors if a.email}
+            standalone_owner_ids = {
+                id(owner)
+                for s in standalone_email_sents
+                for m in _EMAIL_RE.finditer(s.text or "")
+                if (owner := by_email.get(m.group(1).lower())) is not None
+            }
+            if not standalone_owner_ids or all_email_owner_ids != starred_ids:
+                return
+        self._apply_corresponding_group(authors, starred, "byline stars")
+
+    def _flag_from_back_matter_correspondence(self, authors: list[PaperAuthor]) -> None:
+        """Flag authors named in back-matter correspondence statements.
+
+        Handles journals (e.g. Nature Communications) whose page-1 envelope icon
+        is a vector graphic absent from the text layer, and which state explicitly
+        in the back matter: ``Correspondence and requests for materials should be
+        addressed to <Author(s)>.``
+        """
+        from bibr.paper_contents import CanonicalSection
+
+        raw_sentences = getattr(self._document, "sentences", None)
+        doc_sentences = list(raw_sentences) if isinstance(raw_sentences, (list, tuple)) else []
+        if not authors or not doc_sentences:
+            return
+        raw_sections = getattr(self._document, "sections", None)
+        doc_sections = list(raw_sections) if isinstance(raw_sections, (list, tuple)) else []
+        ref_sids = {
+            s.section_id for s in doc_sections if s.section_type == CanonicalSection.REFERENCES
+        }
+        index = _index_authors_by_family(authors)
+        chosen: list[PaperAuthor] = []
+        chosen_ids: set[int] = set()
+
+        for sent in doc_sentences:
+            if sent.section_id in ref_sids:
+                continue
+            text = sent.text or ""
+            if "correspondence" not in text.lower():
+                continue
+            m = _BACK_MATTER_ADDRESSED_RE.search(text)
+            if not m:
+                continue
+            clause = m.group(1).strip()
+            # Cut at a sentence-ending period (not an initial like "C." or title like "Dr.").
+            end_m = re.search(r"(?<![A-Z])(?<!\bDr)(?<!\bProf)\.(?:\s|$)", clause)
+            if end_m:
+                clause = clause[: end_m.start()]
+            # First split recipient list and try exact _authors_named on each item.
+            matched: list[PaperAuthor] = []
+            for part in _RECIPIENT_SPLIT_RE.split(clause):
+                part = re.sub(r"\([^)]*\)", "", part).strip(" .,:;")
+                if not part:
+                    continue
+                fits = _authors_named(part, index)
+                if len(fits) == 1:
+                    matched.append(fits[0])
+            if not matched:
+                matched = _authors_named_in_text(clause, index)
+            for auth in matched:
+                if id(auth) not in chosen_ids:
+                    chosen_ids.add(id(auth))
+                    chosen.append(auth)
+
+        self._apply_corresponding_group(authors, chosen, "back-matter correspondence")
 
     @staticmethod
     def _attach_email(author: PaperAuthor, email: str, claimed: set[str]) -> bool:

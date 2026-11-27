@@ -1441,3 +1441,282 @@ def test_marker_rules_leave_a_paper_without_authors_alone():
 
     document = _contents_by_section([("title", ["* E-mail: hk.tan@example.org"])])
     AuthorEmailHarvester(document, document=document).harvest([])
+
+
+def test_taylor_and_francis_uppercase_contact_block_flags_and_backfills_opaque_email():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Global Health Action Study",
+            "Jane Doe, Ann Kim and Bo Park",
+            "CONTACT Ann Kim ak991@uni.edu Department of Public Health, Stockholm",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation=""),
+        PaperAuthor(author_id=2, given="Ann", family="Kim", affiliation=""),
+        PaperAuthor(author_id=3, given="Bo", family="Park", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert [a.corresponding for a in authors] == [False, True, False]
+    assert authors[1].email == "ak991@uni.edu"
+
+
+def test_lowercase_prose_contact_does_not_flag_corresponding():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Study of Social Behavior",
+            "Jane Doe, Ann Kim and Bo Park",
+            "Participants had daily contact with Ann Kim during interviews.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation=""),
+        PaperAuthor(author_id=2, given="Ann", family="Kim", affiliation=""),
+        PaperAuthor(author_id=3, given="Bo", family="Park", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert [a.corresponding for a in authors] == [False, False, False]
+
+
+def test_nature_communications_back_matter_correspondence_flags_recipients_and_skips_refs():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    doc = _contents_by_section(
+        [
+            ("title", ["Neural dynamics in perception", "Alice Lee, Hui-Kai Tan, Omar Reyes"]),
+            (
+                "acknowledgment",
+                [
+                    "Correspondence and requests for materials should be addressed to "
+                    "Hui-Kai Tan or Omar Reyes."
+                ],
+            ),
+            (
+                "references",
+                ["Correspondence should be addressed to Alice Lee (2020)."],
+            ),
+        ]
+    )
+    # Simulate scoped front matter containing only page-1 sentences while document has back matter.
+    scoped = _contents_by_section(
+        [("title", ["Neural dynamics in perception", "Alice Lee, Hui-Kai Tan, Omar Reyes"])]
+    )
+    authors = _trio()
+    AuthorEmailHarvester(scoped, document=doc).harvest(authors)
+
+    assert _flags(authors) == [False, True, True]
+
+
+def test_repairs_soft_hyphen_and_newline_wrapped_emails():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Veterinary Behavior Study",
+            "Anna Keller and Yu-Lan Tang",
+            "*Correspondence: anna.keller@vet\ufffeexample.de; yltang@uni.edu.\nmo",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Anna", family="Keller", affiliation=""),
+        PaperAuthor(author_id=2, given="Yu-Lan", family="Tang", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert [a.email for a in authors] == ["anna.keller@vet-example.de", "yltang@uni.edu.mo"]
+    assert [a.corresponding for a in authors] == [True, True]
+
+
+def test_long_distance_correspondence_matches_trailing_initials_and_opaque_plos_star():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    # More than 3 sentences separate the byline from the correspondence line.
+    contents = _make_contents_with_text(
+        [
+            "Long Affiliation List Study",
+            "Quentin Dupont, Jane N. Doe*, Liwei Sun",
+            "1 Dept A, City A",
+            "2 Dept B, City B",
+            "3 Dept C, City C",
+            "4 Dept D, City D",
+            "5 Dept E, City E",
+            "*For correspondence: lab99@example.org (JND)",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Quentin", family="Dupont", affiliation=""),
+        PaperAuthor(author_id=2, given="Jane N.", family="Doe", affiliation=""),
+        PaperAuthor(author_id=3, given="Liwei", family="Sun", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert authors[1].email == "lab99@example.org"
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_byline_star_rescues_bmc_shared_surname_and_ignores_footnote_star_trap():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    # Two authors share surname "Li"; only Yifan Li6* and Fang Jiang1,7* are starred.
+    # Also test that a footnote line "*Correspondence:" immediately after
+    # "Kramer5,6\n" never treats Kramer as starred, nor flags byline authors
+    # appearing before "*Correspondence:" in the same sentence.
+    contents = _make_contents_with_text(
+        [
+            "Population Study",
+            "Xinyi Li1, Yifan Li6*, Fang Jiang1,7*, Dana S. Kramer5,6\n*Correspondence:",
+            "1 Dept A",
+            "2 Dept B",
+            "3 Dept C",
+            "4 Dept D",
+            "*Correspondence: opaque1@med-uni.edu.cn; opaque2@med-uni.edu.cn",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Xinyi", family="Li", affiliation=""),
+        PaperAuthor(author_id=2, given="Yifan", family="Li", affiliation=""),
+        PaperAuthor(author_id=3, given="Fang", family="Jiang", affiliation=""),
+        PaperAuthor(author_id=4, given="Dana S.", family="Kramer", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert [a.corresponding for a in authors] == [False, True, True, False]
+
+
+def test_plos_opaque_bare_star_email_rescued_via_byline_star():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "PLOS Study",
+            "Alice Lee, Liwei Sun*, Omar Reyes",
+            "1 Affiliation A",
+            "2 Affiliation B",
+            "3 Affiliation C",
+            "4 Affiliation D",
+            "* evergreen88@example.com",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Alice", family="Lee", affiliation=""),
+        PaperAuthor(author_id=2, given="Liwei", family="Sun", affiliation=""),
+        PaperAuthor(author_id=3, given="Omar", family="Reyes", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert [a.corresponding for a in authors] == [False, True, False]
+    assert authors[1].email == "evergreen88@example.com"
+
+
+def test_space_wrapped_tld_upgrades_truncated_email_without_assigning_to_neighbor():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Psychiatric Study",
+            "Xia Li, Yu-Lan Tang, Ming Zhao",
+            "Corresponding authors: Ming Zhao and Yu-Lan Tang; Emails: ming.zhao@inst.ac.cn; yltang@uni.edu. mo",
+        ]
+    )
+    # Simulate front_tagger already populating truncated "yltang@uni.edu".
+    authors = [
+        PaperAuthor(author_id=1, given="Xia", family="Li", affiliation=""),
+        PaperAuthor(
+            author_id=2,
+            given="Yu-Lan",
+            family="Tang",
+            affiliation="",
+            email="yltang@uni.edu",
+            corresponding=True,
+        ),
+        PaperAuthor(
+            author_id=3,
+            given="Ming",
+            family="Zhao",
+            affiliation="",
+            email="ming.zhao@inst.ac.cn",
+            corresponding=True,
+        ),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert [a.corresponding for a in authors] == [False, True, True]
+    assert authors[0].email is None
+    assert authors[1].email == "yltang@uni.edu.mo"
+
+
+def test_shared_surname_in_correspondence_sentence_does_not_steal_coauthor_opaque_email():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Clinical Study",
+            "Zhilan Chen, Junhao Chen, Wenbo Chen, Tianyu Yi",
+            "Corresponding authors: Wenbo Chen; Tianyu Yi; Emails: doctorwwenbo@example.com; sunnyriver@example.net",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Zhilan", family="Chen", affiliation=""),
+        PaperAuthor(author_id=2, given="Junhao", family="Chen", affiliation=""),
+        PaperAuthor(author_id=3, given="Wenbo", family="Chen", affiliation=""),
+        PaperAuthor(author_id=4, given="Tianyu", family="Yi", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert [a.corresponding for a in authors] == [False, False, True, True]
+    assert authors[2].email == "doctorwwenbo@example.com"
+    assert authors[3].email == "sunnyriver@example.net"
+
+
+def test_plos_dropped_star_standalone_email_flags_starred_author_unless_equal_contrib():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Clinical Otoscopy Study",
+            "Han Liu 1 *, Carl D. Lindqvist1,2, Amy Zamora2",
+            "1 Dept A",
+            "2 Dept B",
+            "3 Dept C",
+            "4 Dept D",
+            "Han.Liu@examplehealth.org",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Han", family="Liu", affiliation=""),
+        PaperAuthor(author_id=2, given="Carl D.", family="Lindqvist", affiliation=""),
+        PaperAuthor(author_id=3, given="Amy", family="Zamora", affiliation=""),
+    ]
+    # Email is matched upstream or by the harvester; the byline star + standalone line flags Han Liu.
+    authors[0].email = "Han.Liu@examplehealth.org"
+    AuthorEmailHarvester(contents).harvest(authors)
+    assert [a.corresponding for a in authors] == [True, False, False]
+
+    # When "*" is explained as equal contribution, must NOT flag.
+    contents_eq = _make_contents_with_text(
+        [
+            "Clinical Otoscopy Study",
+            "Han Liu 1 *, Carl D. Lindqvist1,2, Amy Zamora2",
+            "* Equal contribution.",
+            "Han.Liu@examplehealth.org",
+        ]
+    )
+    authors_eq = [
+        PaperAuthor(
+            author_id=1,
+            given="Han",
+            family="Liu",
+            affiliation="",
+            email="Han.Liu@examplehealth.org",
+        ),
+        PaperAuthor(author_id=2, given="Carl D.", family="Lindqvist", affiliation=""),
+        PaperAuthor(author_id=3, given="Amy", family="Zamora", affiliation=""),
+    ]
+    AuthorEmailHarvester(contents_eq).harvest(authors_eq)
+    assert [a.corresponding for a in authors_eq] == [False, False, False]

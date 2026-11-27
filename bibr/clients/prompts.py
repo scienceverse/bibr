@@ -299,7 +299,7 @@ Corresponding author & email rules:
 - Email: extract every author's email address if it is printed near their name.
 - Corresponding-author flag (`corresponding: true`) ONLY when an explicit
   anchor identifies that specific author:
-  - "Corresponding author" / "Address correspondence to" / "Send correspondence" line
+  - "Corresponding author" / "Address correspondence to" / "Send correspondence" / "CONTACT" line
   - Envelope icon (✉) next to a specific author
   - A footnote marker (†, ‡, *) the paper labels as "corresponding"
 - Bylined emails alone are NOT evidence — many papers list every author's
@@ -397,7 +397,7 @@ Authors (preserve the original order):
 - Email: extract every author's email address if it is printed near their name.
 - Corresponding-author flag (`corresponding: true`) ONLY when an explicit anchor
   identifies that specific author ("Corresponding author" / "Address correspondence
-  to" line, envelope icon, or a footnote the paper labels as corresponding).
+  to" / "CONTACT" line, envelope icon, or a footnote the paper labels as corresponding).
   Bylined emails alone are NOT evidence.
 - ORCID: assign identifiers (URL or bare ID) printed near author names to the
   correct author.

@@ -25,7 +25,12 @@ from bibr.clients.skipped import is_skipped
 from bibr.config import snapshot_settings
 from bibr.exceptions import ModelOverrideError, ProcessingError, UpstreamServiceError
 from bibr.extract.archive_cover import reground_title_off_archive_cover
-from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
+from bibr.extract.author_email_harvester import (
+    _CORRESPONDING_MARKER_RE,
+    AuthorEmailHarvester,
+    has_correspondence_cue,
+)
+from bibr.extract.author_orcid_harvester import AuthorOrcidHarvester, collect_printed_orcid_lines
 from bibr.extract.field_decisions import (
     Classification,
     FieldCandidate,
@@ -185,6 +190,10 @@ _NON_AFFILIATION_FOOTNOTE_RE = re.compile(
 )
 # Upper bound on the footnote text added to the author LLM's context.
 _FOOTNOTE_AFFILIATION_BUDGET = 2000
+_CORRESPONDENCE_BOILERPLATE_RE = re.compile(
+    r"©|\bcopyright\b|\bcreative commons\b|\bopen access\b|\bfull list of author information\b",
+    re.IGNORECASE,
+)
 
 # Positive evidence that a captured ``<number> <Capital…>`` run really is an
 # institution. Without it the numbered-affiliation reconciler accepted any
@@ -277,6 +286,38 @@ def render_block_context(
     )
 
 
+def _single_record_front_page(resolution: FrontMatterResolution | None) -> int | None:
+    """Return the front-page number when the selected block owns that page alone."""
+    if resolution is None or resolution.selected_block_id is None:
+        return None
+    candidates = _selected_block_candidates(resolution)
+    pages = [candidate.page for candidate in candidates if candidate.page is not None]
+    if not pages:
+        return None
+    front_page = min(pages)
+    by_id = {candidate.candidate_id: candidate for candidate in resolution.candidates}
+    for block in resolution.blocks:
+        if block.block_id == resolution.selected_block_id:
+            continue
+        other_pages = {
+            by_id[candidate_id].page
+            for candidate_id in block.candidate_ids
+            if candidate_id in by_id
+        }
+        if not other_pages or None in other_pages or front_page in other_pages:
+            return None
+    return front_page
+
+
+def _is_author_contact_rescue_text(text: str) -> bool:
+    """Whether an out-of-slice front-matter candidate carries correspondence or ORCID evidence."""
+    if not text:
+        return False
+    if has_correspondence_cue(text) or "@" in text:
+        return True
+    return "orcid.org" in text.lower() or bool(_ORCID_BARE_INLINE_RE.search(text))
+
+
 def render_author_context(
     resolution: FrontMatterResolution,
     *,
@@ -320,11 +361,47 @@ def render_author_context(
         ),
         len(selected),
     )
-    author_zone = "\n".join(
+    author_parts = [
         candidate.raw_text.strip()
         for candidate in selected[start:end]
         if candidate.raw_text.strip()
-    )
+    ]
+    # Keep selected-block correspondence/contact/ORCID rows that sit before the
+    # title (e.g. Frontiers left sidebar) or after the abstract (e.g. Cambridge /
+    # Ubiquity "Corresponding authors:" blocks).
+    outside_indices = [idx for idx in range(len(selected)) if idx < start or idx >= end]
+    non_contact_section_ids = {
+        candidate.section_id
+        for candidate in selected
+        if candidate.section_id is not None
+        and not candidate.roles.isdisjoint({"title", "abstract"})
+    }
+    cue_section_ids = {
+        selected[idx].section_id
+        for idx in outside_indices
+        if selected[idx].section_id is not None
+        and selected[idx].section_id not in non_contact_section_ids
+        and selected[idx].roles.isdisjoint({"title", "abstract"})
+        and has_correspondence_cue(selected[idx].raw_text)
+    }
+    rescue_budget = _FOOTNOTE_AFFILIATION_BUDGET
+    for idx in outside_indices:
+        candidate = selected[idx]
+        if not candidate.roles.isdisjoint({"title", "abstract"}):
+            continue
+        raw = candidate.raw_text.strip()
+        if not raw:
+            continue
+        in_cue_section = (
+            candidate.section_id is not None and candidate.section_id in cue_section_ids
+        )
+        if not in_cue_section and not _is_author_contact_rescue_text(raw):
+            continue
+        if len(raw) > rescue_budget:
+            continue
+        rescue_budget -= len(raw)
+        author_parts.append(raw)
+    author_zone = "\n".join(author_parts)
     return author_zone or full_text
 
 
@@ -334,24 +411,9 @@ def author_table_context(contents: PaperContents, resolution: FrontMatterResolut
     These boxes are excluded from the sentence stream. Page membership alone
     cannot assign one on a multi-record page, so that case stays out of scope.
     """
-    if resolution is None or resolution.selected_block_id is None:
+    front_page = _single_record_front_page(resolution)
+    if front_page is None:
         return ""
-    candidates = _selected_block_candidates(resolution)
-    pages = [candidate.page for candidate in candidates if candidate.page is not None]
-    if not pages:
-        return ""
-    front_page = min(pages)
-    by_id = {candidate.candidate_id: candidate for candidate in resolution.candidates}
-    for block in resolution.blocks:
-        if block.block_id == resolution.selected_block_id:
-            continue
-        other_pages = {
-            by_id[candidate_id].page
-            for candidate_id in block.candidate_ids
-            if candidate_id in by_id
-        }
-        if not other_pages or None in other_pages or front_page in other_pages:
-            return ""
 
     labels = {
         "author information",
@@ -2250,6 +2312,7 @@ class CoreMetadataExtractor:
         self._paper_type_source = "llm"
         self._classifier_prediction: Classification | None = None
         self.locator = locator or RefLocator(contents, settings=self._settings)
+        self._orcid_harvester = AuthorOrcidHarvester(contents)
         if email_harvester is not None:
             self._email_harvester = email_harvester
         elif front_matter_resolution is None:
@@ -2260,16 +2323,68 @@ class CoreMetadataExtractor:
             selected_section_ids = {
                 candidate.section_id for candidate in selected if candidate.section_id is not None
             }
+            single_front_page = _single_record_front_page(front_matter_resolution)
+            extra_footnote_section_ids: set[int] = set()
+            if single_front_page is not None:
+                footnote_section_ids = {
+                    section.section_id
+                    for section in contents.sections
+                    if section.section_type == CanonicalSection.FOOTNOTE
+                }
+                for sentence in contents.sentences:
+                    if sentence.section_id not in footnote_section_ids:
+                        continue
+                    sentence_page = getattr(sentence, "page_number", None)
+                    on_front_page = sentence_page == single_front_page or any(
+                        p.page_no == single_front_page
+                        for p in (getattr(sentence, "provenance", None) or ())
+                    )
+                    if not on_front_page:
+                        continue
+                    sentence_text = getattr(sentence, "text", None) or ""
+                    if has_correspondence_cue(sentence_text) or "@" in sentence_text:
+                        extra_footnote_section_ids.add(sentence.section_id)
+                for section in contents.sections:
+                    if (
+                        section.section_id in footnote_section_ids
+                        and has_correspondence_cue(section.header or "")
+                        and any(
+                            s.section_id == section.section_id
+                            and (
+                                getattr(s, "page_number", None) == single_front_page
+                                or any(
+                                    p.page_no == single_front_page
+                                    for p in (getattr(s, "provenance", None) or ())
+                                )
+                            )
+                            for s in contents.sentences
+                        )
+                    ):
+                        extra_footnote_section_ids.add(section.section_id)
+
+            scoped_sentences = [
+                sentence
+                for sentence in contents.sentences
+                if sentence.text_id in allowed_text_ids
+                or (
+                    single_front_page is not None
+                    and sentence.section_id in extra_footnote_section_ids
+                    and (
+                        getattr(sentence, "page_number", None) == single_front_page
+                        or any(
+                            p.page_no == single_front_page
+                            for p in (getattr(sentence, "provenance", None) or ())
+                        )
+                    )
+                )
+            ]
+            scoped_section_ids = selected_section_ids | extra_footnote_section_ids
             scoped_contents = SimpleNamespace(
-                sentences=[
-                    sentence
-                    for sentence in contents.sentences
-                    if sentence.text_id in allowed_text_ids
-                ],
+                sentences=scoped_sentences,
                 sections=[
                     section
                     for section in contents.sections
-                    if section.section_id in selected_section_ids
+                    if section.section_id in scoped_section_ids
                 ],
             )
             self._email_harvester = AuthorEmailHarvester(scoped_contents, document=contents)
@@ -2361,6 +2476,15 @@ class CoreMetadataExtractor:
                         "\n\n[Affiliation footnotes printed on the first page]\n"
                         + "\n".join(footnote_affiliations)
                     )
+                correspondence_footnotes = self._front_page_correspondence_footnotes(authors_text)
+                if correspondence_footnotes:
+                    authors_text += (
+                        "\n\n[Correspondence footnotes printed on the first page]\n"
+                        + "\n".join(correspondence_footnotes)
+                    )
+                orcid_lines = collect_printed_orcid_lines(self.contents, already=authors_text)
+                if orcid_lines:
+                    authors_text += "\n\n[ORCID identifiers]\n" + "\n".join(orcid_lines)
 
             llm_metadata = await self._call_core_llm(
                 llm_text,
@@ -2583,6 +2707,8 @@ class CoreMetadataExtractor:
             final_authors = author_decision.value
             contacts_before = [(author.email, author.corresponding) for author in final_authors]
             self._email_harvester.harvest(final_authors)
+            orcids_before = [author.orcid for author in final_authors]
+            self._orcid_harvester.harvest(final_authors)
             partition_issues = repair_author_partitions(final_authors, precision_context)
             self.validation_issues.extend(partition_issues)
             author_decision = with_transforms(
@@ -2591,6 +2717,11 @@ class CoreMetadataExtractor:
                     ["emails_harvested"]
                     if [(author.email, author.corresponding) for author in final_authors]
                     != contacts_before
+                    else []
+                ),
+                *(
+                    ["orcids_harvested"]
+                    if [author.orcid for author in final_authors] != orcids_before
                     else []
                 ),
                 *(["partitions_repaired"] if partition_issues else []),
@@ -3756,6 +3887,51 @@ class CoreMetadataExtractor:
             if _NON_AFFILIATION_FOOTNOTE_RE.search(text) and not _AFFILIATION_ORG_RE.search(
                 _NON_AFFILIATION_FOOTNOTE_RE.split(text, maxsplit=1)[0]
             ):
+                continue
+            if len(text) > budget:
+                break
+            budget -= len(text)
+            found.append(text)
+        return found
+
+    def _front_page_correspondence_footnotes(self, already: str) -> list[str]:
+        """Front-page footnote rows carrying correspondence cues or emails not in ``already``."""
+        df = self.sentences_df
+        if df.empty or not {"text", "page_number", "section_type"}.issubset(df.columns):
+            return []
+        resolution = self._front_matter_resolution
+        if resolution is not None:
+            front_page = _single_record_front_page(resolution)
+            if front_page is None:
+                return []
+        else:
+            front_page = _front_page(df)
+        mask = (df["page_number"] == front_page) & (df["section_type"] == CanonicalSection.FOOTNOTE)
+        cols = ["text", "section_id"] if "section_id" in df.columns else ["text"]
+        rows = df.loc[mask, cols]
+        normalized_already = _normalize_affiliation_match_text(already)
+        found: list[str] = []
+        budget = _FOOTNOTE_AFFILIATION_BUDGET
+        prev_cue_section: int | None = None
+        for row in rows.itertuples(index=False):
+            value = row[0]
+            section_id = row[1] if len(row) > 1 else None
+            if pd.isna(value):
+                continue
+            text = _normalize_affiliation_match_text(str(value))
+            if not text:
+                continue
+            has_cue = has_correspondence_cue(text)
+            is_follow_up = prev_cue_section is not None and section_id == prev_cue_section
+            if is_follow_up and _CORRESPONDENCE_BOILERPLATE_RE.search(text):
+                is_follow_up = False
+            if not (has_cue or "@" in text or is_follow_up):
+                prev_cue_section = None
+                continue
+            prev_cue_section = (
+                section_id if (has_cue and "@" not in text and section_id is not None) else None
+            )
+            if text in normalized_already:
                 continue
             if len(text) > budget:
                 break
