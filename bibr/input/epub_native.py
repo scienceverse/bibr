@@ -26,6 +26,7 @@ from bibr.input.zip_limits import (
 )
 from bibr.paper_contents import PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.structure.html_table import HtmlParserName, validate_html_parser
 from bibr.utils.text import normalize_doi
 
 logger = logging.getLogger(__name__)
@@ -327,9 +328,16 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
 class EpubParser:
     """Parse ePub bytes by delegating spine XHTML to :class:`HtmlParser`."""
 
-    def __init__(self, epub_bytes: bytes, *, document: EpubDocument | None = None) -> None:
+    def __init__(
+        self,
+        epub_bytes: bytes,
+        *,
+        document: EpubDocument | None = None,
+        html_parser: HtmlParserName = "html5lib",
+    ) -> None:
         self.epub_bytes = epub_bytes
         self._document = document
+        self._html_parser_name: HtmlParserName = validate_html_parser(html_parser)
         self._html_parser: HtmlParser | None = None
 
     @property
@@ -352,7 +360,7 @@ class EpubParser:
         except Exception as exc:
             raise ProcessingError(f"Failed to parse ePub: {exc}") from exc
 
-        self._html_parser = HtmlParser(document.html_bytes)
+        self._html_parser = HtmlParser(document.html_bytes, parser=self._html_parser_name)
         contents = self._html_parser.parse()
         # A skipped chapter leaves no text in the payload, so record each loss
         # as a coded warning. PaperContents.processing_warnings reaches

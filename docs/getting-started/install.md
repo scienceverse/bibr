@@ -4,7 +4,7 @@
 
 | What | Needed? | Notes |
 |---|---|---|
-| Python 3.11, 3.12, 3.13 or 3.14 | Yes | With uv you don't need to install it yourself: `uv init --python 3.12` fetches Python 3.12 for the project. |
+| Python 3.11, 3.12, 3.13 or 3.14 | Yes | With uv you don't need to install it yourself: `uv tool install --python 3.12 bibr` fetches Python 3.12 automatically. |
 | [uv](https://docs.astral.sh/uv/getting-started/installation/) | Recommended | The commands on this site use it. Without uv, `python -m pip install bibr` in a Python 3.11–3.14 environment installs the same package. |
 | Disk space | Yes | About 0.7 GB for the Python environment, plus about 1.5 GB of models that bibr downloads from Hugging Face on first use. |
 | An NVIDIA GPU or Apple Silicon | Optional | Only for a local LLM or local OCR. Fast mode, the default, runs on the CPU. |
@@ -13,9 +13,22 @@
     onnxruntime, which bibr's models run on, publishes no Python 3.15 wheels. On 3.15
     (or 3.10), `pip install bibr` cannot install a current release: it fails, or picks
     the empty early placeholder 0.0.2, after which `bibr` is not a command. The uv
-    commands below avoid this, because they pin the project to Python 3.12.
+    commands below avoid this, because they pin Python 3.12.
 
 ## Install from PyPI
+
+**Command-line tool (recommended).** Installs `bibr` in an isolated environment and puts
+the `bibr` command on your `PATH`, so you can run `bibr chew` from any folder:
+
+```bash
+uv tool install --python 3.12 bibr
+bibr doctor
+```
+
+If your shell says `bibr: command not found`, run `uv tool update-shell` once and open a
+new terminal.
+
+**Python project / library.** If you want to `import bibr` in a Python project:
 
 ```bash
 uv init --bare --pin-python --python 3.12 paper-extraction
@@ -24,9 +37,9 @@ uv add bibr
 uv run bibr doctor
 ```
 
-For an existing uv project, run `uv add bibr` in that project. In an existing
-Python environment, `python -m pip install bibr` installs the same package; then run
-`bibr` directly instead of `uv run bibr`.
+For an existing uv project, run `uv add bibr` in that project (and run CLI commands with
+`uv run bibr ...`). In an existing Python 3.11–3.14 environment, `python -m pip install
+bibr` installs the same package; then run `bibr` directly.
 
 This installs core bibr: the `bibr` command, the Python library, native DOCX, JATS,
 HTML and ePub parsing, LLM extraction through any OpenAI-compatible endpoint (OpenAI,
@@ -53,8 +66,10 @@ no LLM, no API key). `bibr setup` is optional and adds an LLM or OCR; see the
 
 ## Extras
 
-Extras add optional dependencies. In a uv project, add one with
-`uv add 'bibr[<extra>]'` (several: `uv add 'bibr[demo,mcp]'`); with pip,
+Extras add optional dependencies. Installed as a uv tool, include every extra you want in
+one command: `uv tool install --python 3.12 'bibr[<extra>]'` (several:
+`uv tool install --python 3.12 'bibr[demo,mcp]'`; `bibr setup` merges your existing
+extras automatically). In a uv project, add one with `uv add 'bibr[<extra>]'`; with pip,
 `python -m pip install 'bibr[<extra>]'`; in a source checkout, `uv sync --extra <extra>`.
 
 | Extra | Adds | When you need it |
@@ -130,8 +145,10 @@ which build loads, CPU or GPU, and its version on its ONNX Runtime line.
 ## Check your setup
 
 ```bash
-uv run bibr doctor
+bibr doctor
 ```
+
+(In a uv project, prefix with `uv run`: `uv run bibr doctor`.)
 
 `bibr doctor` lists the `.env` files it read, the run mode, and the LLM and OCR a run
 would use, and checks keys, dependencies and configured endpoints. On a fresh install it
@@ -148,6 +165,18 @@ starts, but it does not start them; `bibr setup`'s one-page test and a real extr
 show that inference works.
 
 ## Updating
+
+Installed as a uv tool:
+
+```bash
+uv tool upgrade bibr
+bibr --version
+bibr doctor
+```
+
+Extras installed via `uv tool install 'bibr[...]'` (or `bibr setup`) stay across
+upgrades. If you use the `gpu` extra, repeat the `onnxruntime-gpu` reinstall from
+[GPU ONNX Runtime](#gpu-onnx-runtime) afterwards.
 
 In a uv project:
 
@@ -177,8 +206,9 @@ including every `--extra` you used (a sync without `--extra gpu` removes
 
 ## Uninstalling
 
-Remove bibr from a uv project with `uv remove bibr`, or delete the project folder; with
-pip, `python -m pip uninstall bibr`. That leaves three things behind, each safe to delete:
+Installed as a uv tool, run `uv tool uninstall bibr`. In a uv project, run `uv remove
+bibr` or delete the project folder; with pip, `python -m pip uninstall bibr`. That
+leaves three things behind, each safe to delete:
 
 | What | Where | Remove with |
 |---|---|---|

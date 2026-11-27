@@ -585,20 +585,20 @@ are scheduled. CUDA sessions are not touched.
 
 ## CPU memory arenas
 
-onnxruntime gives each CPU session a memory arena that keeps the largest
-allocation the session has made for as long as the session lives. Every model
-sees inputs of many sizes in a batch, so with arenas a long batch grew from
-paper to paper: in a fast batch of 60 papers, the memory held between papers
-went from 3.3 GB to 5.3 GB, and the peak reached 7.8 to 9.5 GB (4.2 to 4.8 GB
-without arenas). bibr's CPU sessions therefore run without one:
+onnxruntime gives each CPU session a memory arena that, left unshrunk, keeps the largest
+allocation the session has made for as long as the session lives. Every model sees inputs
+of many sizes in a batch, so unshrunk arenas caused long batches to grow from paper to
+paper. bibr enables the CPU arena together with per-run shrinkage
+(`memory.enable_memory_arena_shrinkage=cpu:0`), so buffers are reused inside a forward
+pass and unused blocks return to the OS after each run:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `ML_ONNX_CPU_ARENA` | `false` | `true` gives the CPU sessions onnxruntime's arena back. Layout and the sentence segmenter run without one either way: their arenas alone held gigabytes. |
+| `ML_ONNX_CPU_ARENA` | `true` | Keep onnxruntime's CPU memory arena on bibr's CPU ONNX sessions. Set to `false` to disable the arena completely. Layout and the sentence segmenter run without one either way: their arenas alone held gigabytes. |
+| `ML_ONNX_CPU_ARENA_SHRINK` | `true` | Shrink the CPU arena after each `session.run()` call. Set to `false` to keep blocks allocated across calls. |
 
-The setting does not change a result, only where tensors are allocated. CUDA
-sessions are not touched; they have their own arena, which bibr shrinks after
-every run.
+Neither setting changes a result, only where tensors are allocated. CUDA sessions are not
+touched; they have their own arena, which bibr shrinks after every run.
 
 ## Layout model generation
 

@@ -26,6 +26,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def effective_render_dpi(ctx: PipelineContext) -> int:
+    """Resolve the page rasterization DPI for *ctx*.
+
+    In ``text-layer`` mode with figure crops disabled and no consensus OCR,
+    rendered pages are consumed only by layout detection (which resizes to
+    800x800), so ``settings.layout.text_layer_dpi`` caps the render DPI.
+    """
+    settings = ctx.settings
+    base_dpi = int(settings.layout.dpi)
+    tl_dpi = getattr(settings.layout, "text_layer_dpi", None)
+    if not isinstance(tl_dpi, int) or isinstance(tl_dpi, bool) or tl_dpi <= 0:
+        return base_dpi
+    if tl_dpi >= base_dpi:
+        return base_dpi
+    from bibr.ocr.text_layer import is_text_layer_mode
+
+    if not is_text_layer_mode(ctx):
+        return base_dpi
+    cfg = ctx.config
+    emit_figures = (
+        cfg.include_figures if cfg.include_figures is not None else bool(settings.FIGURE_IMAGES)
+    )
+    if emit_figures:
+        return base_dpi
+    consensus = getattr(getattr(settings, "ocr", None), "consensus_backend", None)
+    if isinstance(consensus, str) and consensus:
+        return base_dpi
+    scratch = getattr(ctx, "scratch", None)
+    if isinstance(scratch, dict) and scratch.get("scan_recognizers"):
+        return base_dpi
+    return tl_dpi
+
+
 class LayoutStage:
     name = "layout"
     # FileState fields consumed / populated (see validate_stage_contracts).
@@ -95,6 +128,8 @@ class LayoutStage:
             if end_page is None or end_page > max_end:
                 end_page = max_end
 
+        render_dpi = effective_render_dpi(ctx)
+
         async def _prepare(fs) -> list[Image.Image]:
             """Render pages to PIL images (executor-side CPU work)."""
             if fs.pdf_bytes is None:
@@ -109,7 +144,7 @@ class LayoutStage:
                 return list(
                     _iter_pdf_pages(
                         pdf_bytes_local,
-                        settings.layout.dpi,
+                        render_dpi,
                         start_page,
                         end_page,
                         settings.layout.max_render_pixels,
@@ -125,7 +160,7 @@ class LayoutStage:
                     ProcessingWarning(
                         WarningCode.PAGE_DPI_REDUCED,
                         f"page {page_idx + 1} rendered at {dpi} DPI instead of "
-                        f"{settings.layout.dpi} to fit the render budget",
+                        f"{render_dpi} to fit the render budget",
                     )
                     for page_idx, dpi in reduced
                 )

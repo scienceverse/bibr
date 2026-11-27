@@ -596,13 +596,18 @@ def _build_instruction_first(instruction: str) -> Callable[..., list[dict]]:
 
 def _build_references_parse(*, boundary: str, text: str, start_index: int = 1) -> list[dict]:
     # The instruction stays byte-identical across batches (cacheable prefix);
-    # the batch's start index rides a dynamic trailer after the data.
+    # the batch's start index rides a dynamic trailer after the fenced data.
+    # Tagging the trailer as ``document`` keeps NuExtract's projected
+    # ``instructions`` block (which renders *before* the document) identical
+    # across batches so vLLM/MLX prefix caches hit through the entire prompt
+    # prefix, while placing the trailer after the fenced data as stated in
+    # ``_REFERENCES_PARSE_PROMPT``.
     return [
         part(_REFERENCES_PARSE_PROMPT, cache=True, nuextract_role="instructions"),
         part(fence(boundary, text), nuextract_role="document"),
         part(
             f"\n\nThe first numbered entry in the supplied document has index {start_index}.",
-            nuextract_role="instructions",
+            nuextract_role="document",
         ),
     ]
 

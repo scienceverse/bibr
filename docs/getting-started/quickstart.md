@@ -7,18 +7,19 @@ first.
 ## 1. Install
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/), which also
-installs a suitable Python for you. Create a project folder and add bibr to it:
+installs a suitable Python for you:
 
 ```bash
-uv init --bare --pin-python --python 3.12 paper-extraction
-cd paper-extraction
-uv add bibr
+uv tool install --python 3.12 bibr
 ```
 
-`--bare` creates only a `pyproject.toml`, and `--pin-python --python 3.12` pins the
-project to Python 3.12, which bibr supports. In an existing Python 3.11–3.14
-environment, `python -m pip install bibr` works too; then drop the `uv run` prefix from
-the commands below. [Installation](install.md) covers extras, GPUs, updating and
+`--python 3.12` pins Python 3.12, which bibr supports, and puts `bibr` on your `PATH` so
+you can run it from any folder. If your shell cannot find `bibr` afterwards, run
+`uv tool update-shell` once and open a new terminal.
+
+To use bibr as a Python library in a uv project (`uv add bibr`), prefix the commands
+below with `uv run`; in an existing Python 3.11–3.14 environment, `python -m pip install
+bibr` works too. [Installation](install.md) covers extras, GPUs, updating and
 uninstalling.
 
 ## 2. Chew a paper
@@ -27,7 +28,7 @@ bibr ships with a short synthetic sample paper, so you can start without a PDF o
 own:
 
 ```bash
-uv run bibr chew --sample -o sample.json
+bibr chew --sample -o sample.json
 ```
 
 ```text
@@ -54,7 +55,7 @@ is needed.
 Then your own paper:
 
 ```bash
-uv run bibr chew paper.pdf -o paper.json
+bibr chew paper.pdf -o paper.json
 ```
 
 The same command reads Word (`.docx`), JATS XML, HTML and ePub files. These are parsed
@@ -64,7 +65,7 @@ directly and never need OCR.
 once; in our test the whole first run took about a minute and a half. After that, a
 full-length paper took about half a minute on a CPU, and the sample about 10 seconds.
 To see what would download before anything does, run
-`uv run bibr chew paper.pdf --dry-run`.
+`bibr chew paper.pdf --dry-run`.
 
 **A scanned PDF** has no text layer, so fast mode stops with "no usable text layer".
 It needs an OCR backend; see [Troubleshooting](troubleshooting.md#a-scanned-pdf-stops-with-no-usable-text-layer).
@@ -74,7 +75,7 @@ It needs an OCR backend; see [Troubleshooting](troubleshooting.md#a-scanned-pdf-
 `bibr inspect` prints a summary:
 
 ```bash
-uv run bibr inspect sample.json
+bibr inspect sample.json
 ```
 
 ```text
@@ -109,7 +110,7 @@ linked by IDs; [What you get](output.md) walks through it with real rows.
 To put the reference list into a reference manager:
 
 ```bash
-uv run bibr references sample.json -o refs.bib
+bibr references sample.json -o refs.bib
 ```
 
 ```text
@@ -126,17 +127,17 @@ they are, and [Batch runs](../guides/batch.md) covers them for large corpora.
 
 | Goal | Command |
 |---|---|
-| Every paper in a folder (one `results/<name>.json` each) | `uv run bibr chew papers/ -o results/` |
-| Only pages 1 to 3 | `uv run bibr chew paper.pdf --pages 1-3` |
-| Never call an LLM, even if a key is set | `uv run bibr chew paper.pdf --fast` |
-| Skip the reference list | `uv run bibr chew paper.pdf --refs off` |
-| Look references up in Crossref (sends them to Crossref) | `uv run bibr chew paper.pdf --crossref` |
-| See the plan and what would download, process nothing | `uv run bibr chew paper.pdf --dry-run` |
-| See more detail while it runs | `uv run bibr chew paper.pdf -v` |
-| References of a folder of results for a reference manager | `uv run bibr references results/ -o refs.bib` |
-| Results as Parquet tables for pandas, DuckDB or R | `uv run bibr tables results/ --out tables/` |
-| A large corpus, resumable | `uv run bibr batch papers/ --out corpus/` |
-| Check your setup | `uv run bibr doctor` |
+| Every paper in a folder (one `results/<name>.json` each) | `bibr chew papers/ -o results/` |
+| Only pages 1 to 3 | `bibr chew paper.pdf --pages 1-3` |
+| Never call an LLM, even if a key is set | `bibr chew paper.pdf --fast` |
+| Skip the reference list | `bibr chew paper.pdf --refs off` |
+| Look references up in Crossref (sends them to Crossref) | `bibr chew paper.pdf --crossref` |
+| See the plan and what would download, process nothing | `bibr chew paper.pdf --dry-run` |
+| See more detail while it runs | `bibr chew paper.pdf -v` |
+| References of a folder of results for a reference manager | `bibr references results/ -o refs.bib` |
+| Results as Parquet tables for pandas, DuckDB or R | `bibr tables results/ --out tables/` |
+| A large corpus, resumable | `bibr batch papers/ --out corpus/` |
+| Check your setup | `bibr doctor` |
 
 A folder, a glob or several inputs always write one file per paper into the `-o`
 directory; `-o` names a single file only when you give one input file. Every flag is in
@@ -148,7 +149,7 @@ Fast mode reads titles, authors, abstracts and references with bibr's own local 
 An LLM helps with the hard cases. To add one, run:
 
 ```bash
-uv run bibr setup
+bibr setup
 ```
 
 The wizard first detects your hardware and asks whether to run in fast mode; pressing

@@ -27,6 +27,9 @@ class HtmlHandlingStage:
         ctx.progress.stage_start(self.name)
         from bibr.input.epub_native import EpubParser
         from bibr.input.html_native import HtmlParser
+        from bibr.structure.html_table import resolved_html_parser
+
+        html_parser = resolved_html_parser(ctx.settings)
 
         for fs in html_files:
             fs_t0 = time.monotonic()
@@ -38,17 +41,31 @@ class HtmlHandlingStage:
                 artifact = fs.native_validation_artifact
 
                 def _parse(content=content, suffix=suffix, artifact=artifact):
+                    parser: EpubParser | HtmlParser
                     if suffix == ".epub":
-                        parser = (
-                            EpubParser(content, document=artifact)
-                            if artifact
-                            else EpubParser(content)
-                        )
-                    else:
+                        if html_parser == "html5lib":
+                            parser = (
+                                EpubParser(content, document=artifact)
+                                if artifact
+                                else EpubParser(content)
+                            )
+                        else:
+                            parser = (
+                                EpubParser(content, document=artifact, html_parser=html_parser)
+                                if artifact
+                                else EpubParser(content, html_parser=html_parser)
+                            )
+                    elif html_parser == "html5lib":
                         parser = (
                             HtmlParser(content, parsed_soup=artifact)
                             if artifact
                             else HtmlParser(content)
+                        )
+                    else:
+                        parser = (
+                            HtmlParser(content, parsed_soup=artifact, parser=html_parser)
+                            if artifact
+                            else HtmlParser(content, parser=html_parser)
                         )
                     return parser, parser.parse()
 

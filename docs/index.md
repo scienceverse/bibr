@@ -18,11 +18,9 @@ To run it on your machine, install [uv](https://docs.astral.sh/uv/getting-starte
 and run:
 
 ```bash
-uv init --bare --pin-python --python 3.12 paper-extraction
-cd paper-extraction
-uv add bibr
-uv run bibr chew --sample -o sample.json   # the sample paper that ships with bibr
-uv run bibr inspect sample.json
+uv tool install --python 3.12 bibr
+bibr chew --sample -o sample.json   # the sample paper that ships with bibr
+bibr inspect sample.json
 ```
 
 There is nothing to configure: with no settings, bibr runs in fast mode, with local
