@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- The evaluator's reference matching changed, and saved evaluations carry
+  `metrics_version: 7` (there is no 6). Scores with versions 5 and 7 do not
+  compare; re-score stored predictions. `ref_matching_f1` was wrong in two
+  ways that no extraction could do anything about:
+  - **Gold references with nothing to match on.** Publisher XML gives some
+    references as plain text, and an answer key made from it holds an empty
+    entry for each. Such an entry counted as a missed reference, and the
+    extraction of that very reference as a spurious one, so a perfect
+    extraction scored below 1.0. A gold reference with no DOI, no title, no
+    year with a first author or with volume and first page, and no citation
+    string is now set aside: it leaves the recall denominator and the
+    per-field denominators, and one unmatched extracted reference per such
+    entry leaves the precision denominator. `ref_matching_f1` is null when
+    every gold reference is of that kind. The per-paper count is
+    `ref_field_counts.gold_refs_unmatchable`. A gold record may instead carry
+    the printed string as `bib[].unstructured`, which is matched.
+  - **Reference lists printed without titles.** Many chemistry, physics and
+    older biomedical journals print a reference as authors, journal, year,
+    volume and page. Such a pair could only match on first author and year,
+    and that level read the first word of the printed author string. For
+    "J. M. Smith, …" that word is an initial, so a correctly parsed list
+    scored 0.0 against an answer key that holds family names. The first
+    author is now compared by name words ("J. M. Smith", "Smith, J. M." and
+    "John Smith" all match the family name Smith; a later author of the list
+    does not), and a new level between the title and the first author matches
+    the same year, volume and first page (0.8).
+
+  Two rules got stricter. Two author strings that share only a first initial
+  ("R. Example", "R. Sample") no longer count as the same first author. At
+  the citation-string level the first author's name must stand in the string
+  as a whole word; it was a substring test, which an initial passes in almost
+  any text.
+
+  Measured on stored predictions for the 300 papers of the public JATS
+  benchmark, where 89 papers have a gold reference with nothing to match on
+  (2.0% and 3.9% of the references of its two sets). The answer key scored
+  against itself passes 100% of both sets; it passed 96.5% and 93.0%. Papers
+  passing all four floors, version 5 to version 7:
+
+  | | behavioural science (200) | other fields (100) |
+  |---|---|---|
+  | bibr, default path | 94.0% to 97.5% | 88.0% to 96.0% |
+  | bibr, `--fast` | 88.5% to 92.0% | 91.0% to 99.0% |
+  | GROBID 0.9.1 | 61.5% to 64.0% | 62.0% to 71.0% |
+
+  No paper scored lower and no other field moved. Nearly all of the shift is
+  the first change; these papers print titled references. In a uniform
+  sample of 64 PubMed Central papers the first change brought 6 papers over
+  the reference floor and the second 1. Benchmark scores published before
+  this change were made with version 5.
+
 ## [0.9.2] - 2026-11-24
 
 A speed and links release. On a CUDA machine the default local plan gets
