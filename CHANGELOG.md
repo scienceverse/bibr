@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- A typographic hyphen in a PDF's link target no longer ends up in `href`. Some
+  publishers write the target with the hyphen U+2010 where the address has
+  "-", so the DOI printed as "10.13020/1f35-rn20" came out as
+  "https://doi.org/10.13020/1f35%E2%80%90rn20", which does not resolve, with
+  the printed address as `link_text`. A hyphen (U+2010) or non-breaking hyphen
+  (U+2011) in a link target, as the character or percent-encoded, is now read
+  as "-", and a soft hyphen is dropped. `href` is then the address as printed
+  and `link_text` is null, as for any link whose target is what the page
+  prints. A dash in a target is kept: an address can mean one.
+
 ## [0.9.2] - 2026-11-24
 
 A speed and links release. On a CUDA machine the default local plan gets
