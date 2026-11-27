@@ -49,8 +49,7 @@ GROBID cannot read image-only scans at all, because it has no text recognition
 either.
 
 The `--fast` scores were run with `LAYOUT_TEXT_LAYER_DPI=200`. At 0.9.2's
-default of 100 DPI, `--fast` gets 88.5% of the behavioural-science papers fully
-right instead of 90.5%, and still 91.0% in the other fields.
+default of 100 DPI, `--fast` gets the same 90.5% and 91.0%.
 
 ## Field by field
 
