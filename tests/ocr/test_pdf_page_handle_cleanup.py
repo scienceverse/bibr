@@ -26,7 +26,7 @@ class FakePage:
     def get_size(self):
         return 612, 792
 
-    def render(self, scale):
+    def render(self, scale, **_kwargs):
         self.rendered = True
         return self.bitmap
 

@@ -4,7 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.9.2] - 2026-11-24
+
+A speed and links release. On a CUDA machine the default local plan gets
+faster in three ways: on a card of 32 to 64 GB the vLLM LLM server and the
+PaddleOCR-VL server stay up together instead of both restarting every chunk,
+bibr prepares the next file while PaddleOCR-VL reads the current one, and
+`bibr batch` sends 16 papers at a time to a vLLM server it starts, not 4. On an
+RTX 5090 with 120 born-digital papers in chunks of 8, 0.9.1 ran 267 papers an
+hour, keeping both servers up gave 606 and the lookahead 715. As one chunk of
+120, the three together ran 907 papers an hour. Those runs measured speed, not
+accuracy. Output-preserving speed-ups also land across CPU ONNX/GBM inference,
+stage overlap, layout resizing, CRF/PDFium/text-layer parsing, native HTML/JATS/DOCX
+parsing, Crossref prefetch and `bibr serve`. See Changed.
+
+A PDF's `url` list now finds links it used to miss (addresses printed without a
+scheme, DOIs printed without doi.org, and links in captions and footnotes),
+repairs addresses the line breaks damaged from the PDF's own link annotations,
+and splits two addresses printed with no space between them. Links printed in
+table cells join the `url` list, which moves the export to schema 12.5; it only
+adds the key `url[].table_id`, but `text_id` can now be null.
+
+`LLM_PROVIDER=anthropic` works with Claude Sonnet 5.5 and Sonnet 5, where every
+call failed with a 400.
 
 ### Added — export schema 12.5 (additive)
 
@@ -24,6 +46,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   strict schema needs the 12.5 schema.
 
 ### Changed
+
+- Output-preserving speed-ups across the pipeline, inference, PDF/native-input
+  parsing, enrichment and `bibr serve`: concurrent CPU ONNX/GBM inference with
+  batched and length-sorted ONNX classifiers, an O(N log N) OCR repeat
+  check, copy-on-write export sanitising, overlapped parse/post-parse/enrichment
+  stages, cached layout resize plans with page-level parallelism, fast CRF
+  Viterbi and marginals paths, bulk PDFium text reads with less time under
+  `pdfium_lock`, front-page DOI evidence reused from `inspect_pdf`, cached LLM
+  schemas, Redis `MGET`/pipelined Crossref prefetch, `bibr serve` job-store and
+  upload speed-ups, and read-only HTML/JATS/DOCX native-input parsing.
+
+- Wave 4 runtime and parsing speed-ups:
+  - `LAYOUT_TEXT_LAYER_DPI` (default `100`, `null` disables) caps page
+    rasterization DPI in text-layer mode when figure image exports and
+    consensus OCR are disabled, and PDFium renders directly in RGB
+    (`rev_byteorder=True`) without BGR-to-RGB channel swapping.
+  - CPU ONNX sessions now enable the CPU memory arena with per-run shrinkage by
+    default (`ML_ONNX_CPU_ARENA=true`, `ML_ONNX_CPU_ARENA_SHRINK=true`), and
+    `StatementTagger` runs through `create_session()` with automatic CUDA EP,
+    `ML_STATEMENT_TAGGER_DEVICE`, GPU OOM batch splitting and CPU fallback.
+  - NuExtract `references_parse` tags its dynamic `start_index` trailer as
+    `nuextract_role="document"` so the instruction prefix stays byte-identical
+    across batches for prefix caching.
+  - Added opt-in `PIPELINE_HTML_PARSER=lxml` (default remains `"html5lib"`)
+    with a direct `lxml.html` table walker (`no_network=True`).
+
+- `bibr setup` now recognises `uv tool` installs (`uv-receipt.toml`), updating
+  the tool with `uv tool install --python <ver> 'bibr[...]'` while preserving
+  previously installed extras, and prints a concise `PATH` hint when `bibr` is
+  not yet on `PATH` (`uv tool update-shell`, or `uv run` / `uv tool install`
+  in a project install). The README, Quickstart and Installation docs now lead
+  with `uv tool install --python 3.12 bibr` for CLI use.
+
+- `bibr demo` adds an in-page **Extraction mode** toggle (**Fast** vs. **Full**)
+  when an LLM is configured (unless started with `--fast`), switching modes
+  atomically without restarting the demo, and shows an upfront first-paper
+  notice (and progress-bar note / startup banner line when models are uncached)
+  warning that the first paper takes longer due to model downloads and loading.
+
+- Refreshed `uv.lock` across 78 non-major packages to releases at least a week
+  old (as of 2026-11-17): `onnxruntime` 1.32.0, `pandas` 3.1.1, `pyarrow`
+  26.0.1, `pydantic` 2.14.3, `pydantic-settings` 2.16.3, `pypdfium2` 5.15.2,
+  `fastapi` 0.163.1, `starlette` 1.10.0, `mkdocs-material` 9.8.1, `pytest`
+  9.2.0, `mypy` 2.4.1 and the rest of the non-major lock. Held back where
+  something pins or isolates them: `torch` 2.13.0, `torchvision` 0.28.0,
+  `triton` 3.7.1 and `transformers` 5.17.0 (`vllm` 0.32.0 compatibility),
+  `onnxruntime-gpu` 1.26.0 (CUDA 12 build), `ruff` 0.15.22, `mlx-audio` /
+  `mlx-vlm` 0.x bumps, and major upgrades (`huggingface-hub` 2.x, `google-genai`
+  3.x, `openai` 3.x, `python-dateutil` 4.x, `cachetools` 8.x, `multidict` 7.x,
+  `pymdown-extensions` 13.x, `watchdog` 7.x, `websockets` 17.x). Updated
+  `Dockerfile.serve` to `nvidia/cuda:13.5.0-runtime-ubuntu22.04`.
 
 - When the reference tagger's split of a reference list is accepted, the
   `line_stream` entry of `extraction.diagnostics.reference_yield.attempts`
@@ -124,6 +197,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Sonnet 5.5 ran 390 papers with this change and no failed call. Sonnet 5 has
   not been run on papers since, and the other models were added from
   Anthropic's documentation without a run.
+
+### Security
+
+- Added transitive floors in `pyproject.toml` and refreshed `uv.lock` for
+  `dnspython>=2.9.2` (`CVE-2026-128089` / `GHSA-vvf4-9x63-8xvv`, excessive
+  memory and CPU use) and `virtualenv>=21.14.13` (`CVE-2026-115586` /
+  `GHSA-cx6f-vjhg-g3cc`, unescaped `--prompt` in the Bash activator).
+- Renewed the Linux `setuptools` audit exceptions (`PYSEC-2026-3447`,
+  `GHSA-xmj3-9gf7-h52w`) in `ci/vulnerability-exceptions.toml` through
+  2026-12-08 after confirming `vllm 0.34.0` still pins `setuptools<81.0.0`.
 
 ## [0.9.1] - 2026-11-17
 

@@ -14,9 +14,9 @@ or to show bibr to someone. For many papers, use `bibr chew` on a folder or
 The demo needs Gradio, which comes with the `demo` extra:
 
 ```bash
-uv add 'bibr[demo]'                 # in a uv project
-uv tool install 'bibr[demo]'        # bibr installed as a tool
-python -m pip install 'bibr[demo]'  # in a pip environment
+uv tool install --python 3.12 'bibr[demo]'  # bibr installed as a tool
+uv add 'bibr[demo]'                         # in a uv project
+python -m pip install 'bibr[demo]'          # in a pip environment
 ```
 
 Without the extra, `bibr demo` stops with a message that names the first two commands.
@@ -25,10 +25,10 @@ See [Installation](../getting-started/install.md#extras) for the other extras.
 ## Start it
 
 ```bash
-uv run bibr demo
+bibr demo
 ```
 
-(Run `bibr demo` without `uv run` if bibr is installed as a tool or with pip.) The demo
+(In a uv project, prefix with `uv run`: `uv run bibr demo`.) The demo
 prints where it runs and opens that page in your browser:
 
 ```text
@@ -45,15 +45,20 @@ The terminal shows warnings only. `--log-level info` shows bibr's log as well, a
 `--log-level debug` everything.
 
 With nothing configured, the demo runs in **fast mode**: local models only, no LLM
-(large language model), no API key, and PDFs read from their text layer. The models
-download from Hugging Face the first time a run needs them, so the first paper takes
-longer, and its progress bar says that models are loading.
+(large language model), no API key, and PDFs read from their text layer. On a fresh
+machine, the demo shows a notice under the status line (and in the terminal banner)
+telling you how much will download from Hugging Face on the first paper and why the first
+paper takes longer; once the first paper finishes, the notice disappears and later papers
+reuse the cached, loaded models.
 
 ## What you see
 
-1. A line under the title says how the demo reads papers. **Settings in use** opens
-   the details: the mode, how PDF text is read, the LLM, and the reference parser.
-   They are set when the demo starts (`bibr demo --help` lists the options).
+1. A line under the title says how the demo reads papers, followed by the first-paper
+   notice until the first run warms the models and an **Extraction mode** toggle
+   (**Fast** vs. **Full**). When an LLM is configured (and `--fast` was not passed), you
+   can switch between Fast and Full right on the page without restarting the demo.
+   **Settings in use** opens the details: the mode, how PDF text is read, the LLM, and
+   the reference parser (`bibr demo --help` lists the startup options).
 2. Choose a paper: a PDF, Word (.docx), JATS XML, HTML or ePub file, up to 10 MB by default. Then
    click **Extract**. **Try a sample paper** runs the short, made-up paper that ships
    with bibr, the one `bibr chew --sample` reads, so you can try the demo without a

@@ -209,3 +209,14 @@ def test_httpx_request_logs_are_quiet_unless_debugging(monkeypatch):
     monkeypatch.setattr(logging.getLogger("httpx"), "level", logging.NOTSET)
     _run_main(monkeypatch, _Demo(), ["--log-level", "info"])
     assert logging.getLogger("httpx").level == logging.WARNING
+
+
+def test_demo_banner_prints_first_run_download_notice_when_cold(monkeypatch, capsys):
+    demo = _Demo()
+    demo.first_run_notice = (
+        "**First paper takes longer:** the first run downloads 2 models (about 580 MB)."
+    )
+    _run_main(monkeypatch, demo, ["--port", "7999"])
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert "First paper takes longer: the first run downloads 2 models (about 580 MB)." in out

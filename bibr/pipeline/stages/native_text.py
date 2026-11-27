@@ -103,8 +103,12 @@ class NativeTextStage:
         layer_kwargs: dict[str, Any] = {}
         if settings.pipeline.document_layer is True:
             from bibr.document.rebuild import render_budget
+            from bibr.pipeline.stages.layout import effective_render_dpi
 
-            layer_kwargs = {"include_doc_layer": True, "render_budget": render_budget(settings)}
+            layer_kwargs = {
+                "include_doc_layer": True,
+                "render_budget": render_budget(settings, dpi=effective_render_dpi(ctx)),
+            }
         native_skip_total = 0
         invisible_layer_pages = 0
         from bibr.ocr.text_layer import (

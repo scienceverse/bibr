@@ -44,7 +44,13 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
-from bibr.structure.html_table import TableBudget, html_table_frame, is_hidden_table
+from bibr.structure.html_table import (
+    HtmlParserName,
+    TableBudget,
+    html_table_frame,
+    is_hidden_table,
+    validate_html_parser,
+)
 from bibr.structure.xref_utils import detect_xrefs
 from bibr.utils.text import YEARISH_RE, clean_extracted_url, collapse_ws, find_text_links
 
@@ -594,10 +600,12 @@ class HtmlParser:
         *,
         metadata_overrides: dict[str, Any] | None = None,
         parsed_soup: BeautifulSoup | None = None,
+        parser: HtmlParserName = "html5lib",
     ):
         self.html_bytes = html_bytes
         self.metadata_overrides = metadata_overrides or {}
         self._parsed_soup = parsed_soup
+        self._html_parser: HtmlParserName = validate_html_parser(parser)
         self.assembler = DocumentAssembler()
 
         self.sections: list[PaperSection] = []
@@ -659,7 +667,9 @@ class HtmlParser:
 
         try:
             soup = (
-                self._parsed_soup if self._parsed_soup is not None else _parse_soup(self.html_bytes)
+                self._parsed_soup
+                if self._parsed_soup is not None
+                else _parse_soup(self.html_bytes, parser=self._html_parser)
             )
         except Exception as exc:
             raise ProcessingError(f"Failed to parse HTML: {exc}") from exc
@@ -1302,16 +1312,17 @@ class HtmlParser:
             )
 
 
-def _parse_soup(html_bytes: bytes) -> BeautifulSoup:
-    """Parse *html_bytes* with html5lib, reading undeclared UTF-8 as UTF-8.
+def _parse_soup(html_bytes: bytes, *, parser: HtmlParserName = "html5lib") -> BeautifulSoup:
+    """Parse *html_bytes* with *parser* (``"html5lib"`` or ``"lxml"``), reading undeclared UTF-8 as UTF-8.
 
     Without a byte-order mark or a ``<meta charset>`` in the first 1024 bytes
     (where html5lib looks for one) html5lib decodes as windows-1252, so a
     UTF-8 page saved without a declaration (pandoc's fragments, an XHTML file
     declaring its encoding only in the XML declaration, which HTML parsing
     ignores) read "Café" as "CafÃ©". Bytes that decode as UTF-8 are
-    UTF-8 text in practice; anything else keeps html5lib's detection.
+    UTF-8 text in practice; anything else keeps the parser's detection.
     """
+    chosen = validate_html_parser(parser)
     from_encoding = None
     if (
         not html_bytes.startswith(_BOMS)
@@ -1323,7 +1334,7 @@ def _parse_soup(html_bytes: bytes) -> BeautifulSoup:
             pass
         else:
             from_encoding = "utf-8"
-    return BeautifulSoup(html_bytes, "html5lib", from_encoding=from_encoding)
+    return BeautifulSoup(html_bytes, chosen, from_encoding=from_encoding)
 
 
 def _reads_as_markup(html_bytes: bytes) -> bool:
@@ -1342,13 +1353,16 @@ def _reads_as_markup(html_bytes: bytes) -> bool:
     return match is not None and "\x00" not in text[: match.start()]
 
 
-def inspect_html(html_bytes: bytes) -> tuple[bool, BeautifulSoup | None]:
+def inspect_html(
+    html_bytes: bytes, *, parser: HtmlParserName = "html5lib"
+) -> tuple[bool, BeautifulSoup | None]:
     """Return whether HTML has article text plus its reusable parsed DOM.
 
     Raises :class:`~bibr.exceptions.InputValidationError` for input over
-    ``_MAX_HTML_BYTES`` before html5lib parses it: the pipeline hands the DOM
-    returned here to :class:`HtmlParser`, so this is where the cap applies.
+    ``_MAX_HTML_BYTES`` before parsing: the pipeline hands the DOM returned
+    here to :class:`HtmlParser`, so this is where the cap applies.
     """
+    chosen = validate_html_parser(parser)
     if len(html_bytes) > _MAX_HTML_BYTES:
         from bibr.exceptions import InputValidationError
 
@@ -1358,7 +1372,7 @@ def inspect_html(html_bytes: bytes) -> tuple[bool, BeautifulSoup | None]:
     if not _reads_as_markup(html_bytes):
         return False, None
     try:
-        soup = _parse_soup(html_bytes)
+        soup = _parse_soup(html_bytes, parser=chosen)
     except Exception:
         return False, None
     HtmlParser._remove_noise(soup)

@@ -428,7 +428,7 @@ def _printed_heading_type(section: PaperSection, classify_header) -> CanonicalSe
 
 _LOCK = threading.Lock()
 _TAGGER: StatementTagger | None = None
-_KEY: tuple[str, str | None] | None = None
+_KEY: tuple[str, str | None, str | None] | None = None
 
 
 def get_statement_tagger(settings: Any) -> StatementTagger | None:
@@ -449,12 +449,19 @@ def get_statement_tagger(settings: Any) -> StatementTagger | None:
         return None
     revision = getattr(ml, "statement_tagger_revision", None)
     revision = revision if isinstance(revision, str) and revision else None
-    key = (value, revision)
+    device = getattr(ml, "statement_tagger_device", None)
+    device = device if isinstance(device, str) and device else None
+    key = (value, revision, device)
     with _LOCK:
         if _TAGGER is None or key != _KEY:
             try:
                 # A candidate's graph is probed at load; the shipped default is not.
-                _TAGGER = _load(value, revision, probe=is_model_override(settings, SETTING))
+                _TAGGER = _load(
+                    value,
+                    revision,
+                    device=device,
+                    probe=is_model_override(settings, SETTING),
+                )
                 _KEY = key
             except Exception as exc:
                 strict = override_load_error(settings, SETTING, exc)
@@ -492,19 +499,70 @@ def _bundle_path(value: str, revision: str | None) -> Path:
     return directory
 
 
-def _load(value: str, revision: str | None, *, probe: bool = True) -> StatementTagger:
-    from bibr.statement_tagger.runtime import StatementTagger
-    from bibr.utils.onnx_providers import apply_cpu_memory, apply_cpu_threading
+def _load(
+    value: str,
+    revision: str | None,
+    *,
+    device: str | None = None,
+    probe: bool = True,
+) -> StatementTagger:
+    from bibr.statement_tagger.runtime import (
+        StatementTagger,
+        StatementTaggerError,
+        bundle_files,
+    )
+    from bibr.utils.device import report_device
+    from bibr.utils.gpu_oom import split_on_gpu_oom
+    from bibr.utils.onnx_providers import create_session
 
     bundle = _bundle_path(value, revision)
-    import onnxruntime as ort
+    _, model_path, tokenizer_path = bundle_files(bundle)
+    missing = [p.name for p in (model_path, tokenizer_path) if not p.is_file()]
+    if missing:
+        raise StatementTaggerError(f"statement tagger bundle {bundle} lacks {missing}")
+    try:
+        session, resolved_device = create_session(
+            model_path,
+            device=device,
+            model_name="statement tagger (ONNX)",
+        )
+    except Exception as exc:
+        raise StatementTaggerError(f"{model_path} does not open as an ONNX graph: {exc}") from exc
 
-    options = ort.SessionOptions()
-    apply_cpu_threading(options)
-    apply_cpu_memory(options)
-    options.inter_op_num_threads = 1
-    logger.info("loading statement tagger: %s", value)
-    return StatementTagger(bundle, session_options=options, probe=probe)
+    run_batch = None
+    if resolved_device == "cuda":
+        cpu_session: list[Any] = [None]
+        cpu_lock = threading.Lock()
+
+        def _cpu_session():
+            with cpu_lock:
+                if cpu_session[0] is None:
+                    cpu_session[0], _ = create_session(
+                        model_path,
+                        device="cpu",
+                        model_name="statement tagger (ONNX, CPU)",
+                        disable_cpu_arena=True,
+                    )
+                return cpu_session[0]
+
+        def _cuda_run_batch(batch_pairs, forward):
+            rows = split_on_gpu_oom(
+                list(batch_pairs),
+                lambda part: list(forward(part)),
+                label="Statement tagger",
+                run_on_cpu=lambda one: list(forward(one, session=_cpu_session())),
+                on_gpu=True,
+            )
+            import numpy as np
+
+            return np.asarray(rows, dtype=np.float32)
+
+        run_batch = _cuda_run_batch
+
+    logger.info("loading statement tagger: %s (device=%s)", value, resolved_device)
+    tagger = StatementTagger(bundle, session=session, run_batch=run_batch, probe=probe)
+    report_device("StatementTagger (onnx)", resolved_device, gpu_capable=True)
+    return tagger
 
 
 def reset_statement_tagger() -> None:
@@ -546,7 +604,14 @@ def predict_statement_tags(
     if not blocks:
         return None
     try:
-        statements = tagger.tag([block.text for block in blocks])
+        from bibr.utils.locks import inference_lock_for
+
+        session = getattr(tagger, "_session", None)
+        if session is None:
+            statements = tagger.tag([block.text for block in blocks])
+        else:
+            with inference_lock_for(session):
+                statements = tagger.tag([block.text for block in blocks])
     except Exception as exc:
         return StatementTagRun(blocks=blocks, statements=None, error=exc)
     return StatementTagRun(blocks=blocks, statements=statements)

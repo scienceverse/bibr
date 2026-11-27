@@ -162,18 +162,21 @@ download rate limits and silences the notice.
 
 **Why.** The web demo is an optional extra.
 
-**Fix.** In a uv project, run `uv add 'bibr[demo]'`, then `uv run bibr demo`. With pip:
-`python -m pip install 'bibr[demo]'`. See [Web demo](../guides/demo.md).
+**Fix.** Installed as a uv tool, run `uv tool install --python 3.12 'bibr[demo]'`, then
+`bibr demo`. In a uv project, run `uv add 'bibr[demo]'`, then `uv run bibr demo`. With
+pip: `python -m pip install 'bibr[demo]'`. See [Web demo](../guides/demo.md).
 
 ## `uv` or `bibr`: command not found
 
-**Why.** uv is not installed, or `bibr` is installed inside a project environment that
-your shell does not see.
+**Why.** uv is not installed, `uv`'s tool bin directory is not on your `PATH` yet, or
+`bibr` is installed inside a project environment that your shell does not see.
 
 **Fix.** Install uv ([instructions](https://docs.astral.sh/uv/getting-started/installation/)).
-In a uv project, run bibr as `uv run bibr ...` from the project folder. If `bibr` is
-missing after a `pip install`, check the Python version: on Python 3.15 or 3.10, pip
-installs an empty placeholder release (see [Installation](install.md#requirements)).
+If you installed with `uv tool install --python 3.12 bibr`, run `uv tool update-shell`
+and open a new terminal. In a uv project, run bibr as `uv run bibr ...` from the project
+folder. If `bibr` is missing after a `pip install`, check the Python version: on Python
+3.15 or 3.10, pip installs an empty placeholder release (see
+[Installation](install.md#requirements)).
 
 ## Where do my settings come from?
 

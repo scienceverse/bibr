@@ -58,8 +58,8 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import Any, Literal
 
 import pandas as pd
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
@@ -67,6 +67,28 @@ from pandas.errors import EmptyDataError
 from pandas.io.parsers import TextParser  # type: ignore[attr-defined]  # no stub
 
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+
+HtmlParserName = Literal["html5lib", "lxml"]
+_VALID_HTML_PARSERS = frozenset({"html5lib", "lxml"})
+
+
+def validate_html_parser(parser: str) -> HtmlParserName:
+    """Validate an HTML parser backend name (``"html5lib"`` or ``"lxml"``)."""
+    if parser not in _VALID_HTML_PARSERS:
+        raise ValueError(
+            f"Unsupported html_parser {parser!r}; expected one of {sorted(_VALID_HTML_PARSERS)}"
+        )
+    return parser  # type: ignore[return-value]
+
+
+def resolved_html_parser(settings: Any) -> HtmlParserName:
+    """Read ``settings.pipeline.html_parser``, defaulting safely to ``"html5lib"``."""
+    pipeline = getattr(settings, "pipeline", None)
+    value = getattr(pipeline, "html_parser", "html5lib")
+    if isinstance(value, str) and value in _VALID_HTML_PARSERS:
+        return value  # type: ignore[return-value]
+    return "html5lib"
+
 
 logger = logging.getLogger(__name__)
 
@@ -249,14 +271,22 @@ def _cell_text(td: Tag) -> str:
     return _WHITESPACE_RE.sub(" ", raw)
 
 
-def html_table_frame(source: str | Tag, budget: TableBudget | None = None) -> pd.DataFrame | None:
+def html_table_frame(
+    source: str | Tag,
+    budget: TableBudget | None = None,
+    *,
+    parser: HtmlParserName = "html5lib",
+) -> pd.DataFrame | None:
     """Parse the first table in *source* into a DataFrame of cell strings.
 
-    *source* is HTML markup, or a ``<table>`` element already parsed with
-    html5lib (read-only: never modified or copied). Returns ``None``
-    when there is no table with text and at least one row, or when that table
-    is out of proportion to its markup even with its colspans ended, or over
-    the text and slots *budget* has left (by default, a budget of its own).
+    *source* is HTML markup, or a ``<table>`` element already parsed into a
+    BeautifulSoup ``Tag`` (read-only: never modified or copied). When *source*
+    is raw markup, *parser* selects ``"html5lib"`` (default, spec-compliant
+    HTML5) or ``"lxml"`` (direct C-level ``lxml.html`` walker without
+    BeautifulSoup wrapper objects). Returns ``None`` when there is no table
+    with text and at least one row, or when that table is out of proportion to
+    its markup even with its colspans ended, or over the text and slots
+    *budget* has left (by default, a budget of its own).
     """
     if budget is None:
         budget = TableBudget()
@@ -264,6 +294,9 @@ def html_table_frame(source: str | Tag, budget: TableBudget | None = None) -> pd
         root: Tag = source
         tables = ([root] if root.name == "table" else []) + root.find_all("table")
     else:
+        chosen = validate_html_parser(parser)
+        if chosen == "lxml":
+            return _lxml_html_table_frame(source, budget)
         root = BeautifulSoup(source, "html5lib")
         tables = root.find_all("table")
     for table in tables:
@@ -272,6 +305,188 @@ def html_table_frame(source: str | Tag, budget: TableBudget | None = None) -> pd
         try:
             return _frame(*_sections(table, budget))
         except EmptyDataError:  # no rows: ``read_html`` moves on to the next table
+            continue
+        except _TooManyCells as exc:
+            budget.refused += 1
+            logger.warning("HTML table %s; its contents are not read", exc)
+            return None
+    return None
+
+
+def _lxml_is_hidden_table(table: Any) -> bool:
+    return "display:none" in str(table.attrib.get("style") or "").replace(" ", "")
+
+
+def _lxml_is_hidden_el(el: Any) -> bool:
+    if el.tag == "style":
+        return True
+    style = el.attrib.get("style")
+    return style is not None and _HIDDEN_STYLE_RE.search(str(style)) is not None
+
+
+def _lxml_table_has_text(table: Any) -> bool:
+    """True when *table* has any visible non-newline string (matches ``_table_has_text``)."""
+    if table.text and _ANY_TEXT_RE.search(table.text) is not None:
+        return True
+    stack: list[Iterator[Any]] = [iter(table)]
+    while stack:
+        child = next(stack[-1], None)
+        if child is None:
+            stack.pop()
+            continue
+        if child.tail and _ANY_TEXT_RE.search(child.tail) is not None:
+            return True
+        tag = child.tag
+        if not isinstance(tag, str):
+            if child.text and _ANY_TEXT_RE.search(child.text) is not None:
+                return True
+            continue
+        if tag == "br" or _lxml_is_hidden_el(child):
+            continue
+        if child.text and _ANY_TEXT_RE.search(child.text) is not None:
+            return True
+        if len(child):
+            stack.append(iter(child))
+    return False
+
+
+def _lxml_cell_text(td: Any) -> str:
+    """Read-only cell text extraction for an lxml element (mirrors :func:`_cell_text`)."""
+    parts: list[str] = []
+    if td.text:
+        parts.append(td.text)
+    if len(td):
+        stack: list[tuple[Iterator[Any], str | None]] = [(iter(td), None)]
+        while stack:
+            children, tail = stack[-1]
+            child = next(children, None)
+            if child is None:
+                stack.pop()
+                if tail:
+                    parts.append(tail)
+                continue
+            tag = child.tag
+            if not isinstance(tag, str):
+                if child.tail:
+                    parts.append(child.tail)
+                continue
+            if tag == "br":
+                parts.append("\n")
+                if child.tail:
+                    parts.append(child.tail)
+                continue
+            if _lxml_is_hidden_el(child):
+                if child.tail:
+                    parts.append(child.tail)
+                continue
+            if child.text:
+                parts.append(child.text)
+            if len(child):
+                stack.append((iter(child), child.tail))
+            elif child.tail:
+                parts.append(child.tail)
+    if not parts:
+        return ""
+    raw = "".join(parts).strip()
+    if not raw:
+        return ""
+    return _WHITESPACE_RE.sub(" ", raw)
+
+
+def _lxml_row_cells(row: Any) -> list[Any]:
+    return [
+        child
+        for child in row
+        if isinstance(child.tag, str)
+        and child.tag in ("td", "th")
+        and not _lxml_is_hidden_el(child)
+    ]
+
+
+def _lxml_sections(
+    table: Any, budget: TableBudget
+) -> tuple[list[list[str]], list[list[str]], list[list[str]]]:
+    """Header, body and footer rows of an lxml ``<table>``, spans expanded."""
+    head_rows: list[list[Any]] = []
+    tbody_rows: list[list[Any]] = []
+    direct_tr_rows: list[list[Any]] = []
+    foot_rows: list[list[Any]] = []
+
+    def _append_row(cells: list[Any], section: str | None, is_direct: bool) -> None:
+        if section == "thead":
+            head_rows.append(cells)
+        elif section == "tbody":
+            tbody_rows.append(cells)
+        elif section == "tfoot":
+            foot_rows.append(cells)
+        elif is_direct:
+            direct_tr_rows.append(cells)
+
+    # Frame: (children_iter, section, is_direct, pending_bare_cells).
+    # Grouping bare <th>/<td> children into an implicit row matches HTML5's
+    # table tree builder when OCR/malformed markup omits <tr>.
+    stack: list[tuple[Iterator[Any], str | None, bool, list[Any]]] = [(iter(table), None, True, [])]
+    while stack:
+        children, section, is_direct, bare_cells = stack[-1]
+        child = next(children, None)
+        if child is None:
+            stack.pop()
+            if bare_cells:
+                _append_row(bare_cells, section, is_direct)
+            continue
+        tag = child.tag
+        if not isinstance(tag, str) or _lxml_is_hidden_el(child):
+            continue
+        if tag in ("td", "th") and (section in ("thead", "tbody", "tfoot") or is_direct):
+            bare_cells.append(child)
+            continue
+        if bare_cells:
+            _append_row(list(bare_cells), section, is_direct)
+            bare_cells.clear()
+        if tag == "table":
+            continue
+        if tag == "tr":
+            _append_row(_lxml_row_cells(child), section, is_direct)
+            continue
+        if tag in ("thead", "tbody", "tfoot"):
+            stack.append((iter(child), tag, False, []))
+        elif len(child):
+            stack.append((iter(child), section, False, []))
+
+    body_rows = tbody_rows + direct_tr_rows
+    if not head_rows:
+        lead = 0
+        while lead < len(body_rows) and all(cell.tag == "th" for cell in body_rows[lead]):
+            lead += 1
+        head_rows, body_rows = body_rows[:lead], body_rows[lead:]
+    grid = _expand_spans_cells(
+        head_rows + body_rows + foot_rows,
+        _lxml_cell_text,
+        lambda td, attr: td.attrib.get(attr),
+        budget,
+    )
+    body_end = len(head_rows) + len(body_rows)
+    return grid[: len(head_rows)], grid[len(head_rows) : body_end], grid[body_end:]
+
+
+def _lxml_html_table_frame(source: str, budget: TableBudget) -> pd.DataFrame | None:
+    if not source or not source.strip():
+        return None
+    from lxml import etree
+    from lxml import html as lxml_html
+
+    try:
+        doc = lxml_html.document_fromstring(
+            source, parser=lxml_html.HTMLParser(recover=True, no_network=True)
+        )
+    except etree.ParserError:
+        return None
+    for table in doc.iter("table"):
+        if _lxml_is_hidden_table(table) or not _lxml_table_has_text(table):
+            continue
+        try:
+            return _frame(*_lxml_sections(table, budget))
+        except EmptyDataError:
             continue
         except _TooManyCells as exc:
             budget.refused += 1
@@ -371,7 +586,22 @@ def _span(value: Any, limit: int) -> int:
 
 
 def _expand_spans(rows: list[Tag], budget: TableBudget) -> list[list[str]]:
-    """Rows of cell text, each spanned cell copied into every slot it covers.
+    """Rows of cell text, each spanned cell copied into every slot it covers."""
+    return _expand_spans_cells(
+        [_cells(tr) for tr in rows],
+        _cell_text,
+        lambda td, attr: td.get(attr),
+        budget,
+    )
+
+
+def _expand_spans_cells(
+    row_cells: list[list[Any]],
+    cell_text: Callable[[Any], str],
+    cell_attr: Callable[[Any, str], Any],
+    budget: TableBudget,
+) -> list[list[str]]:
+    """Expand spans over pre-extracted rows of cell elements.
 
     A rowspan still open after the last row ends there, and a colspan where
     its row would grow wider than the table may be. Raises
@@ -380,9 +610,8 @@ def _expand_spans(rows: list[Tag], budget: TableBudget) -> list[list[str]]:
     padded slots pass what *budget* has left, so the frame is never built past
     its bounds. The table is charged to *budget* otherwise.
     """
-    row_cells = [_cells(tr) for tr in rows]
     max_width = max_table_width(
-        len(rows), sum(map(len, row_cells)), max(map(len, row_cells), default=0)
+        len(row_cells), sum(map(len, row_cells)), max(map(len, row_cells), default=0)
     )
     size = budget.size()
     grid: list[list[str]] = []
@@ -404,14 +633,14 @@ def _expand_spans(rows: list[Tag], budget: TableBudget) -> list[list[str]]:
                 if prev_rows > 1:
                     still_open.append((prev_index, prev_text, prev_rows - 1))
                 index += 1
-            text = _cell_text(td)
-            rowspan = _span(td.get("rowspan"), _MAX_ROWSPAN)
+            text = cell_text(td)
+            rowspan = _span(cell_attr(td, "rowspan"), _MAX_ROWSPAN)
             # A colspan past the table's width ("span every column" over a
             # narrow table) ends there, leaving a slot for each cell and
             # rowspan still to come in the row; the check above keeps that
             # room at least 1.
             room = max_width - len(texts) - (len(cells) - k - 1) - (len(pending) - placed)
-            for _ in range(min(_span(td.get("colspan"), _MAX_COLSPAN), room)):
+            for _ in range(min(_span(cell_attr(td, "colspan"), _MAX_COLSPAN), room)):
                 texts.append(text)
                 if rowspan > 1:
                     still_open.append((index, text, rowspan - 1))

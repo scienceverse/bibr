@@ -144,7 +144,7 @@ def iter_pdf_pages(
             logger.info(f"Rendering {end - start + 1} pages from PDF ({start + 1} to {end + 1})")
             for page_num in range(start, end + 1):
                 page = pdf[page_num]
-                bitmap = page.render(scale=scale)
+                bitmap = page.render(scale=scale, rev_byteorder=True)
                 pil_image = bitmap.to_pil()
                 try:
                     bitmap.close()

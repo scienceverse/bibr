@@ -388,8 +388,8 @@ class _ArenaShrinkingSession:
         return getattr(self._session, name)
 
 
-def shrink_arena_after_runs(session):
-    """Make each run of a CUDA ``session`` give the memory it no longer uses back to CUDA.
+def shrink_arena_after_runs(session, *, shrink_cpu_arena: bool = False):
+    """Make each run of a CUDA or arena-enabled CPU ``session`` give unused memory back.
 
     ORT's CUDA arena keeps every block it allocates, and bibr grows it by
     exactly the size a run asks for (``kSameAsRequested``). Input shapes change
@@ -399,17 +399,30 @@ def shrink_arena_after_runs(session):
     that into an earlier allocation failure. With
     ``memory.enable_memory_arena_shrinkage`` each run ends by freeing the
     arena regions nothing uses any more, so the arena holds the weights and
-    what the runs in flight need. A session that is not on CUDA comes back
+    what the runs in flight need.
+
+    For CPU sessions, pass ``shrink_cpu_arena=True`` only when the session was
+    opened with ``enable_cpu_mem_arena=True`` (ORT rejects shrinkage on a
+    device that has no arena). Otherwise a non-CUDA session comes back
     unchanged.
     """
-    if selected_device(session.get_providers()) != "cuda":
-        return session
-    import onnxruntime as ort
+    device = selected_device(session.get_providers())
+    if device == "cuda":
+        import onnxruntime as ort
 
-    cuda_options = session.get_provider_options().get("CUDAExecutionProvider", {})
-    run_options = ort.RunOptions()
-    run_options.add_run_config_entry(_ARENA_SHRINKAGE, f"gpu:{cuda_options.get('device_id', '0')}")
-    return _ArenaShrinkingSession(session, run_options)
+        cuda_options = session.get_provider_options().get("CUDAExecutionProvider", {})
+        run_options = ort.RunOptions()
+        run_options.add_run_config_entry(
+            _ARENA_SHRINKAGE, f"gpu:{cuda_options.get('device_id', '0')}"
+        )
+        return _ArenaShrinkingSession(session, run_options)
+    if shrink_cpu_arena:
+        import onnxruntime as ort
+
+        run_options = ort.RunOptions()
+        run_options.add_run_config_entry(_ARENA_SHRINKAGE, "cpu:0")
+        return _ArenaShrinkingSession(session, run_options)
+    return session
 
 
 def enable_cuda_for(device: str | None) -> bool:
@@ -565,19 +578,33 @@ def _onnx_cpu_arena_setting() -> bool:
         return False
 
 
-def apply_cpu_memory(options, *, disable_arena: bool = False) -> None:
+def _onnx_cpu_arena_shrink_setting() -> bool:
+    """``ML_ONNX_CPU_ARENA_SHRINK``: the environment, then ``.env``; ``True`` when unreadable."""
+    try:
+        from bibr.config import MlOptions
+
+        return bool(MlOptions().onnx_cpu_arena_shrink)  # type: ignore[call-arg]
+    except Exception:  # noqa: BLE001 — never stop a session on a bad .env
+        return True
+
+
+def apply_cpu_memory(options, *, disable_arena: bool = False) -> bool:
     """Choose a CPU session's memory arena on ``options`` (an ``ort.SessionOptions``).
 
-    onnxruntime's CPU arena keeps the largest allocation a session has made
-    for the rest of the session. Every model sees inputs of many sizes in a
-    batch, so a long batch kept growing from paper to paper (about 3 GB more
-    after 55 papers with the 0.9.0 defaults). So bibr's CPU sessions run
-    without it, unless ``ML_ONNX_CPU_ARENA=true`` asks for it back.
-    ``disable_arena`` keeps it off even then, for the models whose arena alone
-    costs gigabytes (layout, the sentence segmenter).
+    Returns ``True`` when ORT's CPU memory arena stays enabled on *options* and
+    ``False`` when it was turned off.
+
+    By default (``ML_ONNX_CPU_ARENA=true`` + ``ML_ONNX_CPU_ARENA_SHRINK=true``),
+    non-excluded CPU sessions keep the CPU arena for intra-run buffer reuse and
+    return unused blocks after every run via :func:`shrink_arena_after_runs`.
+    ``ML_ONNX_CPU_ARENA=false`` disables the arena completely, and
+    ``disable_arena=True`` keeps it off unconditionally (for layout, the
+    sentence segmenter, and single-input GPU-OOM CPU fallbacks).
     """
     if disable_arena or not _onnx_cpu_arena_setting():
         options.enable_cpu_mem_arena = False
+        return False
+    return True
 
 
 def cpu_ort_session_options():
@@ -648,9 +675,10 @@ def create_session(
     )
     options = ort.SessionOptions()
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
+    cpu_arena_enabled = False
     if selected_device(providers) != "cuda":
         apply_cpu_threading(options)
-        apply_cpu_memory(options, disable_arena=disable_cpu_arena)
+        cpu_arena_enabled = apply_cpu_memory(options, disable_arena=disable_cpu_arena)
     session = None
     try:
         session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
@@ -666,10 +694,11 @@ def create_session(
         options = ort.SessionOptions()
         options.log_severity_level = 3
         apply_cpu_threading(options)
-        apply_cpu_memory(options, disable_arena=disable_cpu_arena)
+        cpu_arena_enabled = apply_cpu_memory(options, disable_arena=disable_cpu_arena)
         session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
     device = session_device(session, providers, model_name=model_name)
-    return shrink_arena_after_runs(session), device
+    shrink_cpu = device == "cpu" and cpu_arena_enabled and _onnx_cpu_arena_shrink_setting()
+    return shrink_arena_after_runs(session, shrink_cpu_arena=shrink_cpu), device
 
 
 def is_session_gpu_oom(exc: BaseException, providers: list[str | tuple[str, dict]]) -> bool:
