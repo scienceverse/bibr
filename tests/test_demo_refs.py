@@ -580,3 +580,155 @@ async def test_restoring_the_demo_goes_back_to_an_unchosen_ocr_route():
 
     assert captured["ocr_backend"] is None
     assert "the PDF text layer (`text-layer`), no OCR" in status
+
+
+async def test_mode_toggle_switches_between_full_and_fast_atomically():
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.GOOGLE_API_KEY = "test-key"
+    settings.REF_PARSE_STRATEGY = "llm"
+
+    old_pipeline = SimpleNamespace(aclose=AsyncMock(), mode="full", llm_backend="cloud")
+    state = {
+        "pipeline": old_pipeline,
+        "ocr_backend": "paddle",
+        "base_ocr_backend": None,
+        "memory_mode": "balanced",
+        "llm_backend": None,
+        "locked_fast": False,
+        "warm": True,
+    }
+    captured = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            aclose=AsyncMock(),
+            mode=kwargs["mode"],
+            ocr_backend="text-layer" if kwargs["mode"] == "fast" else "paddle",
+            llm_backend="cloud",
+        )
+
+    status = await local_app._switch_demo_mode(
+        "fast",
+        settings=settings,
+        pipeline_state=state,
+        pipeline_factory=factory,
+        refs="llm",
+    )
+
+    assert captured == {
+        "memory_mode": "balanced",
+        "ocr_backend": None,
+        "llm_backend": None,
+        "ref_parse_strategy": None,
+        "mode": "fast",
+    }
+    assert state["pipeline"] is not old_pipeline
+    assert state["ocr_backend"] == "text-layer"
+    assert state["warm"] is False
+    old_pipeline.aclose.assert_awaited_once()
+    assert "**Mode:** fast" in status
+    assert "the local model (`ner`)" in status
+
+    # Switching back to full restores refs and full mode.
+    prev_fast = state["pipeline"]
+    status_full = await local_app._switch_demo_mode(
+        "full",
+        settings=settings,
+        pipeline_state=state,
+        pipeline_factory=factory,
+        refs="llm",
+    )
+    assert captured["mode"] == "full"
+    assert captured["ref_parse_strategy"] == "llm"
+    assert state["ocr_backend"] == "paddle"
+    prev_fast.aclose.assert_awaited_once()
+    assert "**Mode:** full" in status_full
+
+
+async def test_mode_toggle_noop_when_already_in_target_mode():
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.GOOGLE_API_KEY = "test-key"
+    existing = SimpleNamespace(aclose=AsyncMock(), mode="fast", llm_backend="cloud")
+    state = {
+        "pipeline": existing,
+        "ocr_backend": "text-layer",
+        "base_ocr_backend": None,
+        "memory_mode": None,
+        "llm_backend": None,
+        "locked_fast": False,
+        "warm": True,
+    }
+
+    def must_not_build(**_kwargs):
+        raise AssertionError("same mode should not rebuild pipeline")
+
+    status = await local_app._switch_demo_mode(
+        "fast",
+        settings=settings,
+        pipeline_state=state,
+        pipeline_factory=must_not_build,
+        refs=None,
+    )
+    assert state["pipeline"] is existing
+    assert state["warm"] is True
+    existing.aclose.assert_not_awaited()
+    assert "**Mode:** fast" in status
+
+
+async def test_mode_toggle_refuses_full_when_locked_fast_or_no_llm(_no_llm):
+    state = {
+        "pipeline": SimpleNamespace(aclose=AsyncMock(), mode="fast", llm_backend="cloud"),
+        "ocr_backend": "text-layer",
+        "base_ocr_backend": None,
+        "memory_mode": None,
+        "llm_backend": None,
+        "locked_fast": True,
+    }
+    with pytest.raises(ValueError, match="started with --fast"):
+        await local_app._switch_demo_mode(
+            "full",
+            settings=_no_llm,
+            pipeline_state=state,
+            pipeline_factory=lambda **_k: None,
+            refs=None,
+        )
+
+    state["locked_fast"] = False
+    with pytest.raises(ValueError, match="needs an LLM"):
+        await local_app._switch_demo_mode(
+            "full",
+            settings=_no_llm,
+            pipeline_state=state,
+            pipeline_factory=lambda **_k: None,
+            refs=None,
+        )
+
+
+def test_demo_ui_mode_toggle_interactivity(monkeypatch, _no_llm):
+    _capture_pipeline_kwargs(monkeypatch)
+
+    # No LLM configured -> Fast selected, toggle non-interactive with setup hint.
+    demo_no_llm = local_app.create_local_demo(ocr_backend="text-layer")
+    radio = next(b for b in demo_no_llm.blocks.values() if isinstance(b, gr.Radio))
+    assert radio.value == "fast"
+    assert radio.interactive is False
+    assert "bibr setup" in (radio.info or "")
+
+    # LLM configured -> Full selected, toggle interactive.
+    _no_llm.GOOGLE_API_KEY = "test-key"
+    demo_llm = local_app.create_local_demo(ocr_backend="text-layer")
+    radio_llm = next(b for b in demo_llm.blocks.values() if isinstance(b, gr.Radio))
+    assert radio_llm.value == "full"
+    assert radio_llm.interactive is True
+
+    # Explicit --fast with LLM configured -> Fast selected, toggle locked.
+    demo_locked = local_app.create_local_demo(ocr_backend="text-layer", mode="fast")
+    radio_locked = next(b for b in demo_locked.blocks.values() if isinstance(b, gr.Radio))
+    assert radio_locked.value == "fast"
+    assert radio_locked.interactive is False
+    assert "--fast" in (radio_locked.info or "")

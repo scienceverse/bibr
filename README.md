@@ -30,16 +30,17 @@ To run bibr on your machine you need [uv](https://docs.astral.sh/uv/getting-star
 (it installs Python for you). Then:
 
 ```bash
-uv init --bare --pin-python --python 3.12 paper-extraction
-cd paper-extraction
-uv add bibr
-uv run bibr chew --sample -o sample.json   # the sample paper that ships with bibr
-uv run bibr inspect sample.json            # a summary of the result
+uv tool install --python 3.12 bibr
+bibr chew --sample -o sample.json   # the sample paper that ships with bibr
+bibr inspect sample.json            # a summary of the result
 ```
 
-Your own paper works the same way: `uv run bibr chew paper.pdf -o paper.json`.
-In an existing Python 3.11–3.14 environment, `python -m pip install bibr` installs the same
-package; then run `bibr chew` directly.
+If your shell cannot find `bibr` right after installing, run `uv tool update-shell` and
+open a new terminal. Your own paper works the same way from any folder:
+`bibr chew paper.pdf -o paper.json`.
+
+To use bibr as a Python library in a project, run `uv add bibr` in a uv project (or
+`python -m pip install bibr` in an existing Python 3.11–3.14 environment).
 
 There is nothing to configure. With no settings, bibr runs in **fast mode**: local models
 only, no LLM and no API key.
@@ -59,7 +60,7 @@ only, no LLM and no API key.
 `bibr inspect` summarizes a result:
 
 ```text
-$ uv run bibr inspect sample.json
+$ bibr inspect sample.json
 Title: The Coefficient of Rodential Efficiency: A Synthetic Benchmark
 Authors: 2 (Ada Vole, Boris Capybarov)
 DOI: —
@@ -111,10 +112,10 @@ validation block and the files written next to the result.
 **Folders and corpora.**
 
 ```bash
-uv run bibr chew papers/ -o results/          # every paper in a folder, one JSON each
-uv run bibr batch papers/ --out corpus/       # large corpus: resumable, plus Parquet tables
-uv run bibr tables results/ --out tables/     # JSON results → one Parquet file per table
-uv run bibr references results/ -o refs.bib   # reference lists → BibTeX (.ris, CSL-JSON .json)
+bibr chew papers/ -o results/          # every paper in a folder, one JSON each
+bibr batch papers/ --out corpus/       # large corpus: resumable, plus Parquet tables
+bibr tables results/ --out tables/     # JSON results → one Parquet file per table
+bibr references results/ -o refs.bib   # reference lists → BibTeX (.ris, CSL-JSON .json)
 ```
 
 See [Batch runs](https://bibr.org/guides/batch/).
@@ -140,19 +141,20 @@ In Jupyter, or anywhere an event loop is already running, use
 **R.** Read the JSON with jsonlite, the Parquet tables with arrow, or hand the JSON to
 Metacheck: [R and Metacheck](https://bibr.org/guides/r/).
 
-**Agents and services.** With `uv add 'bibr[mcp]'`, `bibr mcp` exposes extraction as
-[MCP tools](https://bibr.org/guides/mcp/) for agents such as Claude Code. With
-`uv add 'bibr[serve]'`, `uv run bibr serve` runs an [HTTP API](https://bibr.org/guides/deployment/).
+**Agents and services.** With `uv tool install --python 3.12 'bibr[mcp]'`, `bibr mcp`
+exposes extraction as [MCP tools](https://bibr.org/guides/mcp/) for agents such as
+Claude Code. With `uv tool install --python 3.12 'bibr[serve]'`, `bibr serve` runs an
+[HTTP API](https://bibr.org/guides/deployment/).
 
-**Web demo.** `uv add 'bibr[demo]'`, then `uv run bibr demo` opens the web demo on your
-machine ([Web demo](https://bibr.org/guides/demo/)).
+**Web demo.** `uv tool install --python 3.12 'bibr[demo]'`, then `bibr demo` opens the
+web demo on your machine ([Web demo](https://bibr.org/guides/demo/)).
 
 ![The bibr web demo showing an extracted paper](https://raw.githubusercontent.com/scienceverse/bibr/main/docs/assets/demo.png)
 
 ## More accuracy with an LLM (optional)
 
 Fast mode reads titles, authors, abstracts and references with bibr's own local models.
-An LLM helps with the hard cases. Run `uv run bibr setup`. Its first question offers fast
+An LLM helps with the hard cases. Run `bibr setup`. Its first question offers fast
 mode; press Enter to keep it. Answer no, and it proposes what fits your machine:
 
 - bibr's fine-tuned local model, on an NVIDIA GPU with 5 GB of memory or more, or on
@@ -171,7 +173,7 @@ key already in your environment counts as a configured LLM. With `GOOGLE_API_KEY
 (or `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL` or `LLM_BASE_URL`) and no
 `PIPELINE_MODE` in a `.env` from `bibr setup`, a run switches to full mode and calls
 that LLM; a Google key alone means Google Gemini, which needs the `google` extra
-(`uv add 'bibr[google]'`). `--fast` keeps a run local whatever is
+(`uv tool install --python 3.12 'bibr[google]'`). `--fast` keeps a run local whatever is
 set, and `bibr chew paper.pdf --dry-run` shows the mode and where each stage runs.
 Details: [What leaves your machine](https://bibr.org/guides/privacy/).
 

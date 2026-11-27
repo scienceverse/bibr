@@ -49,7 +49,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -211,11 +211,15 @@ def join_runs(
 
 
 class StatementTagger:
-    """A loaded statement tagger bundle; safe to share across threads.
+    """A loaded statement tagger bundle; safe to share across threads on CPU.
 
     ``session_options`` is an ``onnxruntime.SessionOptions`` to open the graph
     with (a caller's thread policy); without it ``threads`` sets the intra-op
-    thread count (``None``: onnxruntime's default). CPU only.
+    thread count (``None``: onnxruntime's default). ``providers`` selects the
+    ORT execution providers (defaults to ``["CPUExecutionProvider"]``); a
+    caller may also supply a pre-opened ``session`` (e.g. from bibr's shared
+    provider helper) and an optional ``run_batch`` wrapper (e.g. for GPU OOM
+    batch splitting).
     """
 
     def __init__(
@@ -224,6 +228,13 @@ class StatementTagger:
         *,
         threads: int | None = None,
         session_options: Any = None,
+        providers: Sequence[str | tuple[str, dict[str, Any]]] | None = None,
+        session: Any = None,
+        run_batch: Callable[
+            [Sequence[tuple[str, str]], Callable[[Sequence[tuple[str, str]]], np.ndarray]],
+            np.ndarray,
+        ]
+        | None = None,
         batch_size: int = DEFAULT_BATCH,
         probe: bool = True,
     ) -> None:
@@ -244,7 +255,9 @@ class StatementTagger:
         missing = [p.name for p in (model_path, tokenizer_path) if not p.is_file()]
         if missing:
             raise StatementTaggerError(f"statement tagger bundle {self.directory} lacks {missing}")
+        self.model_path = model_path
         self.files: tuple[Path, ...] = (self.directory / MANIFEST, model_path, tokenizer_path)
+        self._run_batch = run_batch
 
         from tokenizers import Tokenizer
 
@@ -257,21 +270,25 @@ class StatementTagger:
         tokenizer.enable_padding(pad_id=pad_id, pad_token=str(manifest.get("pad_token", "[PAD]")))
         self._tokenizer = tokenizer
 
-        import onnxruntime as ort
+        if session is not None:
+            self._session = session
+        else:
+            import onnxruntime as ort
 
-        if session_options is None:
-            session_options = ort.SessionOptions()
-            if threads is not None:
-                session_options.intra_op_num_threads = max(1, int(threads))
-                session_options.inter_op_num_threads = 1
-        try:
-            self._session = ort.InferenceSession(
-                str(model_path), session_options, providers=["CPUExecutionProvider"]
-            )
-        except Exception as exc:
-            raise StatementTaggerError(
-                f"{model_path} does not open as an ONNX graph: {exc}"
-            ) from exc
+            if session_options is None:
+                session_options = ort.SessionOptions()
+                if threads is not None:
+                    session_options.intra_op_num_threads = max(1, int(threads))
+                    session_options.inter_op_num_threads = 1
+            ep_list = list(providers) if providers is not None else ["CPUExecutionProvider"]
+            try:
+                self._session = ort.InferenceSession(
+                    str(model_path), session_options, providers=ep_list
+                )
+            except Exception as exc:
+                raise StatementTaggerError(
+                    f"{model_path} does not open as an ONNX graph: {exc}"
+                ) from exc
         inputs = [i.name for i in self._session.get_inputs()]
         outputs = [o.name for o in self._session.get_outputs()]
         if set(inputs) != set(INPUT_NAMES) or OUTPUT_NAME not in outputs:
@@ -279,6 +296,8 @@ class StatementTagger:
                 f"{model_path}: graph inputs {inputs} / outputs {outputs}; want inputs "
                 f"{list(INPUT_NAMES)} and output {OUTPUT_NAME!r}"
             )
+        active_providers = self._session.get_providers()
+        self.device = "cuda" if "CUDAExecutionProvider" in active_providers else "cpu"
         # CPU ORT InferenceSession.run and immutable Rust tokenizers are thread-safe.
         if probe:
             self._check_graph()
@@ -337,6 +356,15 @@ class StatementTagger:
             (clean[i - 1][: self.context_chars] if i else "", text) for i, text in enumerate(clean)
         ]
 
+    def _forward(self, pairs: Sequence[tuple[str, str]], *, session: Any = None) -> np.ndarray:
+        """Tokenize *pairs* and run one forward pass, returning float32 probabilities."""
+        encoded = self._tokenizer.encode_batch(list(pairs))
+        ids = np.asarray([e.ids for e in encoded], dtype=np.int64)
+        mask = np.asarray([e.attention_mask for e in encoded], dtype=np.int64)
+        active = self._session if session is None else session
+        probs = active.run([OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask})[0]
+        return np.asarray(probs, dtype=np.float32)
+
     def probabilities(self, texts: Sequence[str]) -> np.ndarray:
         """Per block, the probability of each type in :attr:`labels` order (blocks x types)."""
         pairs = self.pairs(texts)
@@ -347,10 +375,11 @@ class StatementTagger:
         order = np.argsort([len(c) + len(t) for c, t in pairs], kind="stable")
         for begin in range(0, len(order), self.batch_size):
             idx = order[begin : begin + self.batch_size]
-            encoded = self._tokenizer.encode_batch([pairs[j] for j in idx])
-            ids = np.asarray([e.ids for e in encoded], dtype=np.int64)
-            mask = np.asarray([e.attention_mask for e in encoded], dtype=np.int64)
-            probs = self._session.run([OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask})[0]
+            batch_pairs = [pairs[j] for j in idx]
+            if self._run_batch is not None:
+                probs = self._run_batch(batch_pairs, self._forward)
+            else:
+                probs = self._forward(batch_pairs)
             out[idx] = np.asarray(probs, dtype=np.float32)
         return out
 

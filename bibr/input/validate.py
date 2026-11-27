@@ -166,14 +166,16 @@ _DOCX_MAX_ENTRIES = 10_000
 _DOCX_MAX_COMPRESSION_RATIO = 100
 
 
-def _check_html_corruption(file_content: bytes) -> tuple[bool, object | None]:
+def _check_html_corruption(
+    file_content: bytes, *, html_parser: str = "html5lib"
+) -> tuple[bool, object | None]:
     """Check HTML content and return a reusable parsed DOM when valid."""
     try:
         from bibr.input.html_native import inspect_html
     except Exception:  # noqa: BLE001
         logger.warning("HTML validation helper unavailable", exc_info=True)
         return True, None
-    has_content, soup = inspect_html(file_content)
+    has_content, soup = inspect_html(file_content, parser=html_parser)  # type: ignore[arg-type]
     return not has_content, soup
 
 
@@ -387,6 +389,8 @@ def validate_input_file(
     file_path: Path | str,
     file_content: bytes,
     file_hash: str | None = None,
+    *,
+    html_parser: str = "html5lib",
 ) -> InputFile:
     """Validate an input file and return a fully populated InputFile.
 
@@ -494,7 +498,9 @@ def validate_input_file(
         if not corrupted and is_article and parsed_root is not None:
             input_file.native_artifact = parsed_root
     elif extension in (".html", ".htm"):
-        input_file.is_corrupted, input_file.native_artifact = _check_html_corruption(file_content)
+        input_file.is_corrupted, input_file.native_artifact = _check_html_corruption(
+            file_content, html_parser=html_parser
+        )
     elif extension == ".epub":
         input_file.is_corrupted, input_file.native_artifact = _check_epub_corruption(file_content)
 

@@ -275,6 +275,9 @@ def _print_banner(demo, args, username: str | None) -> None:
     summary = getattr(demo, "status_summary", "")
     if summary:
         console.print(f"  {escape(summary.replace('**', ''))}")
+    first_run_notice = getattr(demo, "first_run_notice", "")
+    if first_run_notice and "downloads" in first_run_notice:
+        console.print(f"  [dim]{escape(first_run_notice.replace('**', ''))}[/dim]")
     share_url = getattr(demo, "share_url", None)
     if share_url:
         console.print(f"  Public link: [cyan]{escape(share_url)}[/cyan]")

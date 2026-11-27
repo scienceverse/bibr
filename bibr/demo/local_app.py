@@ -52,6 +52,11 @@ DEMO_CSS = """\
 .bibr-header h1 { margin-bottom: 0.2em; }
 .bibr-header p { margin: 0.2em 0; }
 .bibr-status p { margin: 0; }
+.bibr-notice { padding: 0.65em 0.9em; border-radius: var(--radius-md);
+    border: 1px solid var(--border-color-primary);
+    background: var(--background-fill-secondary); margin: 0.25em 0; }
+.bibr-notice p { margin: 0; font-size: var(--text-sm); color: var(--body-text-color); }
+.bibr-mode { margin: 0.2em 0; }
 .bibr-hint p { margin: 0.4em 0 0; font-size: var(--text-sm);
     color: var(--bibr-muted); }
 .bibr-placeholder { padding: 1.2em 1em; border: 1px dashed var(--border-color-primary);
@@ -1141,20 +1146,35 @@ _STAGE_PROGRESS: dict[str, tuple[float, str]] = {
 }
 
 _FIRST_RUN_NOTE = " (first paper: loading models, so this one takes longer)"
+_FIRST_RUN_DOWNLOAD_NOTE = (
+    " (first paper: downloading and loading models, so this one takes longer)"
+)
 
 
 class _GradioProgress:
     """Bridges bibr's ProgressTracker protocol to the Gradio progress bar.
 
     *text_layer_only*: the run reads the PDF text layer, so the OCR stage is
-    labelled as reading the PDF text. *first_run*: the models load during this
-    run, so every label says so.
+    labelled as reading the PDF text. *first_run*: the models load (and, when
+    *downloading* is true, download) during this run, so every label says so.
     """
 
-    def __init__(self, progress: gr.Progress, *, text_layer_only: bool = False, first_run=False):
+    def __init__(
+        self,
+        progress: gr.Progress,
+        *,
+        text_layer_only: bool = False,
+        first_run: bool = False,
+        downloading: bool = False,
+    ):
         self._progress = progress
         self._text_layer_only = text_layer_only
-        self._suffix = _FIRST_RUN_NOTE if first_run else ""
+        if not first_run:
+            self._suffix = ""
+        elif downloading:
+            self._suffix = _FIRST_RUN_DOWNLOAD_NOTE
+        else:
+            self._suffix = _FIRST_RUN_NOTE
 
     def stage_start(self, name: str, detail: str = "") -> None:  # noqa: ARG002
         if name not in _STAGE_PROGRESS:
@@ -1239,6 +1259,174 @@ def _build_status_md(
             f"- **Language model (LLM):** {llm}",
             f"- **Reference parsing:** {refs} (`{refs_strategy}`)",
         ]
+    )
+
+
+def _pending_demo_downloads(
+    settings,
+    *,
+    ocr_backend: str | None,
+    llm_backend: str | None,
+    refs: str | None,
+    mode: str,
+) -> list[tuple[str, str, str]]:
+    """Models not yet in the local Hugging Face cache for the demo's current mode.
+
+    Offline cache inspection only (never fetches anything); errors degrade to
+    an empty list because the notice is advisory.
+    """
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from bibr.local.cli.dry_run import pending_downloads
+
+    resolved_llm = "cloud" if mode == "fast" else (llm_backend or settings.llm.backend)
+    config = SimpleNamespace(
+        ref_seg=None,
+        refs=refs,
+        mode=mode,
+        no_llm=False,
+        uses_llm=mode != "fast",
+        llm_backend=resolved_llm,
+        ocr_backend=ocr_backend or "text-layer",
+        ocr_model=None,
+        ocr_profile=None,
+    )
+    try:
+        return pending_downloads(config, [Path("paper.pdf")])  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — advisory notice must never break the demo
+        return []
+
+
+def _build_first_run_notice(pending: list[tuple[str, str, str]], *, warm: bool = False) -> str:
+    """Upfront notice explaining why the first paper takes longer, or empty once warm."""
+    if warm:
+        return ""
+    if pending:
+        from bibr.local.cli.dry_run import _download_total
+        from bibr.utils.hf_cache import hub_offline
+
+        if hub_offline():
+            count = len(pending)
+            noun = "model is" if count == 1 else "models are"
+            return (
+                f"**First paper notice:** {count} {noun} not in the local cache and "
+                "`HF_HUB_OFFLINE` is set, so nothing can be downloaded. Run once online to fetch."
+            )
+        total = _download_total([status for *_, status in pending])
+        return (
+            f"**First paper takes longer:** the first run downloads {total} from "
+            "Hugging Face and loads them into memory. They are cached locally, so "
+            "later papers run much faster."
+        )
+    return (
+        "**First paper takes longer:** models load into memory on the first run; "
+        "later papers reuse them."
+    )
+
+
+def _mode_toggle_state(
+    settings,
+    *,
+    llm_backend: str | None,
+    current_mode: str,
+    locked_fast: bool,
+) -> tuple[bool, str]:
+    """Return ``(interactive, info_text)`` for the demo's Fast/Full mode toggle."""
+    from bibr.run_mode import llm_configured
+
+    if locked_fast:
+        return (
+            False,
+            "Started with --fast (no LLM calls). Restart without --fast to switch modes.",
+        )
+    if not llm_configured(settings, llm_backend) and current_mode == "fast":
+        return (
+            False,
+            "Full mode needs an LLM — run `bibr setup` or set an API key to enable it.",
+        )
+    return (
+        True,
+        "Fast uses local models only; Full also asks the configured LLM for uncertain fields.",
+    )
+
+
+async def _switch_demo_mode(
+    target_mode: str,
+    *,
+    settings,
+    pipeline_state: dict[str, Any],
+    pipeline_factory,
+    refs: str | None,
+) -> str:
+    """Switch the demo between ``fast`` and ``full`` mode, atomically replacing the pipeline."""
+    from bibr.run_mode import LLM_PARSE_STRATEGIES, llm_configured
+
+    if target_mode not in ("fast", "full"):
+        raise ValueError(f"Unknown run mode {target_mode!r}. Expected 'fast' or 'full'.")
+    if target_mode == "full" and pipeline_state.get("locked_fast"):
+        raise ValueError("This demo was started with --fast, so Full mode is disabled.")
+    if (
+        target_mode == "full"
+        and not llm_configured(settings, pipeline_state.get("llm_backend"))
+        and pipeline_state.get("explicit_mode") != "full"
+    ):
+        raise ValueError(
+            "Full mode needs an LLM — run `bibr setup` or set an API key to enable it."
+        )
+
+    current_mode = getattr(pipeline_state["pipeline"], "mode", None)
+    if current_mode == target_mode:
+        effective_ocr = pipeline_state["ocr_backend"]
+        effective_backend = getattr(
+            pipeline_state["pipeline"],
+            "llm_backend",
+            pipeline_state.get("llm_backend") or settings.llm.backend,
+        )
+        return _build_status_md(
+            effective_ocr,
+            settings.llm.provider,
+            settings.llm.model,
+            _effective_refs(refs, settings, target_mode),
+            effective_backend,
+            target_mode,
+        )
+
+    base_ocr = pipeline_state.get("base_ocr_backend", pipeline_state["ocr_backend"])
+    new_llm = (
+        None
+        if target_mode == "fast"
+        else (pipeline_state.get("llm_backend") or settings.llm.backend)
+    )
+    effective_ref_arg = None if target_mode == "fast" and refs in LLM_PARSE_STRATEGIES else refs
+    replacement = pipeline_factory(
+        memory_mode=pipeline_state["memory_mode"],
+        ocr_backend=base_ocr,
+        llm_backend=new_llm,
+        ref_parse_strategy=effective_ref_arg,
+        mode=target_mode,
+    )
+
+    old_pipeline = pipeline_state["pipeline"]
+    effective_ocr = getattr(replacement, "ocr_backend", None) or base_ocr
+    pipeline_state["pipeline"] = replacement
+    pipeline_state["ocr_backend"] = effective_ocr
+    pipeline_state["warm"] = False
+
+    try:
+        await old_pipeline.aclose()
+    except Exception:  # noqa: BLE001 — replacement is live; cleanup stays best-effort
+        logger.warning("Previous demo pipeline cleanup failed", exc_info=True)
+
+    new_mode = getattr(replacement, "mode", target_mode)
+    effective_backend = getattr(replacement, "llm_backend", new_llm)
+    return _build_status_md(
+        effective_ocr,
+        settings.llm.provider,
+        settings.llm.model,
+        _effective_refs(refs, settings, new_mode),
+        effective_backend,
+        new_mode,
     )
 
 
@@ -1424,14 +1612,18 @@ def create_local_demo(
     )
     # What the pipeline resolved, for the log and the status line.
     effective_ocr = getattr(pipeline, "ocr_backend", None) or ocr_backend
+    locked_fast = mode == "fast"
     pipeline_state: dict[str, Any] = {
         "pipeline": pipeline,
         "ocr_backend": effective_ocr,
+        "base_ocr_backend": ocr_backend,
         "memory_mode": memory_mode,
         "llm_backend": llm_backend,
         # What the user asked for, not what it resolved to: a preset that
         # configures an LLM turns an automatic demo into a full one.
         "mode": None if mode == "auto" else mode,
+        "explicit_mode": None if mode == "auto" else mode,
+        "locked_fast": locked_fast,
     }
     pipeline_lock = asyncio.Lock()
     logger.info(
@@ -1458,9 +1650,76 @@ def create_local_demo(
     pipeline_state["warm"] = False  # models load during the first run
     limit_mb = _max_file_size_mb()
 
+    def _current_mode() -> str:
+        return getattr(pipeline_state["pipeline"], "mode", run_mode)
+
+    def _current_pending() -> list[tuple[str, str, str]]:
+        current = pipeline_state["pipeline"]
+        cur_mode = getattr(current, "mode", run_mode)
+        cur_llm = getattr(current, "llm_backend", llm_backend or Settings.llm.backend)
+        return _pending_demo_downloads(
+            Settings,
+            ocr_backend=pipeline_state["ocr_backend"],
+            llm_backend=cur_llm,
+            refs=refs,
+            mode=cur_mode,
+        )
+
+    def _notice_text() -> str:
+        if pipeline_state["warm"]:
+            return ""
+        return _build_first_run_notice(_current_pending(), warm=False)
+
+    def _notice_update():
+        text = _notice_text()
+        return gr.Markdown(value=text, visible=bool(text))
+
+    initial_notice = _notice_text()
+    can_toggle, mode_info = _mode_toggle_state(
+        Settings,
+        llm_backend=llm_backend,
+        current_mode=run_mode,
+        locked_fast=locked_fast,
+    )
+
     with gr.Blocks(title="bibr demo", delete_cache=cache_lifetime) as demo:
         gr.Markdown(_HEADER_MD, elem_classes="bibr-header")
         status_line = gr.Markdown(status_summary, elem_classes="bibr-status")
+        first_run_notice = gr.Markdown(
+            initial_notice,
+            visible=bool(initial_notice),
+            elem_classes="bibr-notice",
+        )
+        mode_toggle = gr.Radio(
+            choices=[
+                ("Fast (local models only)", "fast"),
+                ("Full (with LLM)", "full"),
+            ],
+            value=run_mode,
+            label="Extraction mode",
+            info=mode_info,
+            interactive=can_toggle,
+            elem_classes="bibr-mode",
+        )
+
+        def _summary_now() -> str:
+            current = pipeline_state["pipeline"]
+            return _build_status_summary(
+                pipeline_state["ocr_backend"],
+                getattr(current, "mode", run_mode),
+                getattr(current, "llm_backend", None),
+            )
+
+        def _mode_toggle_update():
+            cur_mode = _current_mode()
+            interactive, info = _mode_toggle_state(
+                Settings,
+                llm_backend=pipeline_state["llm_backend"],
+                current_mode=cur_mode,
+                locked_fast=pipeline_state["locked_fast"],
+            )
+            return gr.Radio(value=cur_mode, interactive=interactive, info=info)
+
         with gr.Accordion("Settings in use", open=False):
             status_display = gr.Markdown(status_md)
             gr.Markdown(
@@ -1496,14 +1755,6 @@ def create_local_demo(
                         interactive=True,
                     )
 
-                    def _summary_now() -> str:
-                        current = pipeline_state["pipeline"]
-                        return _build_status_summary(
-                            pipeline_state["ocr_backend"],
-                            getattr(current, "mode", run_mode),
-                            getattr(current, "llm_backend", None),
-                        )
-
                     async def _switch_preset(name):
                         try:
                             async with pipeline_lock:
@@ -1518,6 +1769,7 @@ def create_local_demo(
                                         refs=refs,
                                     )
                                     pipeline_state["preset"] = None
+                                    pipeline_state["base_ocr_backend"] = initial["ocr_backend"]
                                     pipeline_state["warm"] = False
                                     return status
                                 status = await _replace_demo_pipeline_with_preset(
@@ -1530,17 +1782,50 @@ def create_local_demo(
                                     refs=refs,
                                 )
                                 pipeline_state["preset"] = name
+                                from bibr.ocr.registry import ocr_route_chosen
+
+                                pipeline_state["base_ocr_backend"] = (
+                                    normalize_ocr_backend(Settings.ocr.backend)
+                                    if ocr_route_chosen(Settings)
+                                    else None
+                                )
                                 pipeline_state["warm"] = False
                                 return status
                         except Exception as e:
                             raise gr.Error(f"Failed to apply preset: {e}") from e
 
-                    # The details, then the one-line summary under the header.
+                    # The details, then the summary, mode toggle, and cold-start notice.
                     preset_dropdown.change(
                         fn=_switch_preset,
                         inputs=[preset_dropdown],
                         outputs=[status_display],
-                    ).then(fn=_summary_now, outputs=[status_line], show_progress="hidden")
+                    ).then(
+                        fn=lambda: (_summary_now(), _mode_toggle_update(), _notice_update()),
+                        outputs=[status_line, mode_toggle, first_run_notice],
+                        show_progress="hidden",
+                    )
+
+        async def _on_mode_change(selected_mode):
+            try:
+                async with pipeline_lock:
+                    status = await _switch_demo_mode(
+                        selected_mode,
+                        settings=Settings,
+                        pipeline_state=pipeline_state,
+                        pipeline_factory=LocalPipeline,
+                        refs=refs,
+                    )
+            except Exception as e:
+                raise gr.Error(f"Failed to switch mode: {e}") from e
+            return _summary_now(), status, _notice_update(), _mode_toggle_update()
+
+        mode_toggle.input(
+            fn=_on_mode_change,
+            inputs=[mode_toggle],
+            outputs=[status_line, status_display, first_run_notice, mode_toggle],
+            show_progress="hidden",
+            api_name=False,
+        )
 
         with gr.Row():
             with gr.Column(scale=2, min_width=280):
@@ -1696,6 +1981,7 @@ def create_local_demo(
         }
         download_buttons = [b for b in downloads.values() if b is not None]
         result_outputs = [
+            first_run_notice,
             result_card,
             downloads_row,
             *download_buttons,
@@ -1725,6 +2011,7 @@ def create_local_demo(
         def _cleared(card_html: str) -> dict:
             """Hide the last paper's results: they must not sit beside another file."""
             return {
+                first_run_notice: _notice_update(),
                 result_card: card_html,
                 downloads_row: gr.Row(visible=False),
                 notes_box: gr.Accordion(visible=False),
@@ -1746,6 +2033,7 @@ def create_local_demo(
             notes = _build_notes_md(paper_json)
             matches = _build_bib_matches_data(result)
             updates = {
+                first_run_notice: _notice_update(),
                 result_card: _build_paper_card_html(result),
                 downloads_row: gr.Row(visible=True),
                 notes_box: gr.Accordion(visible=bool(notes), open=True),
@@ -1790,10 +2078,13 @@ def create_local_demo(
             try:
                 _check_file_size(file_path)
                 progress(0.0, desc="Starting…")
+                first_run = not pipeline_state["warm"]
+                downloading = bool(_current_pending()) if first_run else False
                 tracker = _GradioProgress(
                     progress,
                     text_layer_only=pipeline_state["ocr_backend"] == "text-layer",
-                    first_run=not pipeline_state["warm"],
+                    first_run=first_run,
+                    downloading=downloading,
                 )
                 async with pipeline_lock:
                     try:
@@ -1856,6 +2147,7 @@ def create_local_demo(
         demo.close_pipeline = _close_pipeline
         # What ``bibr demo`` prints when it starts.
         demo.status_summary = status_summary
+        demo.first_run_notice = initial_notice
 
         run_btn.click(
             fn=_process_file,

@@ -1414,6 +1414,13 @@ class LayoutOptions(_BibrSettings):
         "Pinned to the export whose regions match the torch model exactly; 'main' tracks the head.",
     )
     dpi: int = Field(200, gt=0, description="Page rasterization DPI for layout detection.")
+    text_layer_dpi: int | None = Field(
+        100,
+        gt=0,
+        description="Page rasterization DPI cap used in text-layer mode when figure image "
+        "exports and consensus OCR are disabled (pages are only consumed by layout detection, "
+        "which resizes to 800x800). Capped at LAYOUT_DPI; null disables the override.",
+    )
     max_render_pixels: int = Field(
         25_000_000,
         ge=1,
@@ -2018,11 +2025,18 @@ class MlOptions(_BibrSettings):
         "stage or a second batch process could use.",
     )
     onnx_cpu_arena: bool = Field(
-        False,
+        True,
         description="Keep onnxruntime's CPU memory arena on bibr's CPU ONNX sessions "
-        "(onnxruntime's own default). Off by default: an arena keeps the largest allocation "
-        "its session has made, so a long batch grew from paper to paper. Layout and the "
-        "sentence segmenter run without one either way.",
+        "(onnxruntime's own default). On by default together with ML_ONNX_CPU_ARENA_SHRINK "
+        "(reuses buffers inside a forward pass, then returns unused blocks to the OS after each "
+        "run). Set to false to disable the arena completely; layout and the sentence segmenter run "
+        "without one either way.",
+    )
+    onnx_cpu_arena_shrink: bool = Field(
+        True,
+        description="Shrink onnxruntime's CPU memory arena after each inference call "
+        "(memory.enable_memory_arena_shrinkage=cpu:0) when ML_ONNX_CPU_ARENA is enabled. "
+        "Keeps intra-call buffer reuse while preventing peak-allocation retention across papers.",
     )
 
     # Trained section classifier (MiniLM two-head, document-context input
@@ -2228,6 +2242,10 @@ class MlOptions(_BibrSettings):
         description="Hub revision (commit, branch or tag) of ML_STATEMENT_TAGGER_MODEL_ID when it "
         "is a Hub repo id; unset reads main. Ignored for a local directory.",
     )
+    statement_tagger_device: str | None = Field(
+        None,
+        description="Device the statement tagger runs on. Null = auto (CUDA -> CPU).",
+    )
     front_tagger_min_confidence: float = Field(
         0.9,
         ge=0.0,
@@ -2398,6 +2416,12 @@ class PipelineOptions(_BibrSettings):
         False,
         description="Prefer the printed title row directly above the byline over a disagreeing "
         "model title (multilingual front matter). Experimental; validate on representative inputs.",
+    )
+    html_parser: Literal["html5lib", "lxml"] = Field(
+        "html5lib",
+        description="HTML parser backend for native HTML/ePub documents and OCR HTML tables: "
+        '"html5lib" (default, spec-compliant HTML5 parser) or "lxml" (faster C libxml2 parser; '
+        "~2x faster on HTML articles and ~20x faster on OCR HTML tables).",
     )
     # There is deliberately no workers-per-device setting: bibr serve pins one
     # inference worker (see bibr/serve/app.py). Concurrency comes from the

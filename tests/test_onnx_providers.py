@@ -255,9 +255,30 @@ def test_cuda_session_wrapper_passes_everything_else_through():
     assert session.get_providers()[0] == "CUDAExecutionProvider"
 
 
-def test_cpu_session_is_returned_as_opened():
-    """Shrinkage is only asked for a CUDA arena; ORT rejects it for a device the
-    session has no arena on."""
+def test_cpu_session_runs_free_unused_arena_memory_by_default(monkeypatch):
+    """By default CPU sessions keep ORT's CPU arena and shrink unused blocks after each run."""
+    monkeypatch.delenv("ML_ONNX_CPU_ARENA", raising=False)
+    monkeypatch.delenv("ML_ONNX_CPU_ARENA_SHRINK", raising=False)
+    mock_ort = _cuda_build_ort()
+    opened = mock_ort.InferenceSession.return_value
+    opened.get_providers.return_value = ["CPUExecutionProvider"]
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        session, device = onnx_providers.create_session("model.onnx", device="cpu")
+
+    session.run(["emissions"], {"input_ids": 1})
+
+    assert device == "cpu"
+    mock_ort.RunOptions.return_value.add_run_config_entry.assert_called_once_with(
+        "memory.enable_memory_arena_shrinkage", "cpu:0"
+    )
+    opened.run.assert_called_once_with(
+        ["emissions"], {"input_ids": 1}, mock_ort.RunOptions.return_value
+    )
+
+
+def test_cpu_session_without_arena_is_returned_as_opened(monkeypatch):
+    """Shrinkage is never asked for a CPU session whose arena is disabled."""
+    monkeypatch.setenv("ML_ONNX_CPU_ARENA", "false")
     mock_ort = _cuda_build_ort()
     opened = mock_ort.InferenceSession.return_value
     opened.get_providers.return_value = ["CPUExecutionProvider"]
@@ -317,33 +338,52 @@ def test_create_session_disables_cpu_arena_for_cpu_only_when_asked():
     assert recorded.get("enable_cpu_mem_arena") is False
 
 
-def test_create_session_turns_the_cpu_arena_off_by_default(monkeypatch):
-    """CPU sessions run without ORT's CPU arena unless ML_ONNX_CPU_ARENA asks for it:
-    an arena keeps its largest allocation, so a long batch grew from paper to paper."""
+def test_create_session_enables_shrunk_cpu_arena_by_default(monkeypatch):
+    """CPU sessions keep ORT's CPU arena with per-run shrinkage by default;
+    ML_ONNX_CPU_ARENA=false turns it off completely."""
     monkeypatch.delenv("ML_ONNX_CPU_ARENA", raising=False)
+    monkeypatch.delenv("ML_ONNX_CPU_ARENA_SHRINK", raising=False)
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        _, device = onnx_providers.create_session("model.onnx", device="cpu", model_name="parser")
+
+    assert device == "cpu"
+    assert "enable_cpu_mem_arena" not in recorded
+    mock_ort.RunOptions.return_value.add_run_config_entry.assert_called_once_with(
+        "memory.enable_memory_arena_shrinkage", "cpu:0"
+    )
+
+    monkeypatch.setenv("ML_ONNX_CPU_ARENA", "false")
     mock_ort, recorded = _cpu_only_ort_with_recording_options()
     with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
         _, device = onnx_providers.create_session("model.onnx", device="cpu", model_name="parser")
 
     assert device == "cpu"
     assert recorded.get("enable_cpu_mem_arena") is False
+    mock_ort.RunOptions.assert_not_called()
 
 
-def test_create_session_keeps_the_cpu_arena_when_the_setting_asks(monkeypatch):
-    """ML_ONNX_CPU_ARENA=true restores ORT's default arena, except where the caller
-    keeps it off (layout, the sentence segmenter, single-input CPU fallbacks)."""
+def test_create_session_respects_cpu_arena_shrink_and_disable_flags(monkeypatch):
+    """ML_ONNX_CPU_ARENA_SHRINK=false keeps the unshrunk arena, while callers
+    that pass disable_cpu_arena=True always run without an arena."""
     monkeypatch.setenv("ML_ONNX_CPU_ARENA", "true")
+    monkeypatch.setenv("ML_ONNX_CPU_ARENA_SHRINK", "false")
     mock_ort, recorded = _cpu_only_ort_with_recording_options()
     with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
-        onnx_providers.create_session("model.onnx", device="cpu", model_name="parser")
+        session, _ = onnx_providers.create_session("model.onnx", device="cpu", model_name="parser")
     assert "enable_cpu_mem_arena" not in recorded
+    assert session is mock_ort.InferenceSession.return_value
+    mock_ort.RunOptions.assert_not_called()
 
+    monkeypatch.setenv("ML_ONNX_CPU_ARENA_SHRINK", "true")
     mock_ort, recorded = _cpu_only_ort_with_recording_options()
     with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
-        onnx_providers.create_session(
+        session, _ = onnx_providers.create_session(
             "model.onnx", device="cpu", model_name="layout", disable_cpu_arena=True
         )
     assert recorded.get("enable_cpu_mem_arena") is False
+    assert session is mock_ort.InferenceSession.return_value
+    mock_ort.RunOptions.assert_not_called()
 
 
 def test_apply_cpu_memory_falls_back_to_no_arena_when_settings_fail(monkeypatch):
@@ -455,19 +495,21 @@ def test_create_session_opens_on_cpu_when_the_cuda_session_is_out_of_memory(
         )
 
     assert device == "cpu"
-    assert session is cpu_session
+    if disable_cpu_arena:
+        assert session is cpu_session
+    else:
+        assert session._session is cpu_session
     assert [o["providers"] for o in opened] == [
         ["CUDAExecutionProvider", "CPUExecutionProvider"],
         ["CPUExecutionProvider"],
     ]
-    # The CPU session runs without the arena either way: by default (ML_ONNX_CPU_ARENA
-    # unset), and when the caller keeps it off.
     expected = {
         "log_severity_level": 3,
         "intra_op_num_threads": onnx_providers.available_cpu_count(),
         "config:session.intra_op.allow_spinning": "0",
-        "enable_cpu_mem_arena": False,
     }
+    if disable_cpu_arena:
+        expected["enable_cpu_mem_arena"] = False
     assert opened[1]["options"] == expected
     # The CUDA attempt is not sized: only CPU sessions take the thread settings.
     assert "intra_op_num_threads" not in opened[0]["options"]
