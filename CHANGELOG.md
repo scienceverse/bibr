@@ -55,9 +55,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
   No paper scored lower and no other field moved. Nearly all of the shift is
   the first change; these papers print titled references. In a uniform
-  sample of 64 PubMed Central papers the first change brought 6 papers over
-  the reference floor and the second 1. Benchmark scores published before
-  this change were made with version 5.
+  sample of 168 PubMed Central papers, 13 more papers clear the reference
+  floor: 8 have gold references with nothing to match on, and the other 5
+  can only have gained from the second change. None scores lower, and papers
+  passing all four floors go from 143 to 155. Benchmark scores published
+  before this change were made with version 5.
 
 ### Fixed
 
@@ -87,7 +89,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   papers with a DOI had none extracted. Applied to the stored DOI candidates
   of that run, the two rules give 4 of the 7 their DOI (3 and 1) and change no
   other paper; on the 300 papers of the public JATS benchmark neither rule
-  applies, and the DOI stays right in all 300 on both paths.
+  applies, and the DOI stays right in all 300 on both paths. A rerun of the
+  four papers confirms it: each has its DOI, and the last reference of the
+  three BioMed Central papers no longer carries it. In a second sample of 320
+  papers that was not used to write the rules, 6 papers that had no DOI now
+  have the DOI of their publisher XML, and no other paper's DOI changed. A
+  run of the benchmark with `--fast` before and after changed no DOI.
 
 ## [0.9.2] - 2026-11-24
 
