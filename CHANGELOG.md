@@ -2079,6 +2079,13 @@ every 12.2 export is still valid input for the 12.x reader.
   Ollama's `/api/ps` reports one slot's context or all slots' has not been
   checked.
 
+### Added
+
+- A Zotero 7–9 plugin prototype in `integrations/zotero/`: right-click an item to fill
+  its empty fields from what bibr reads on the paper and import its reference list
+  (values as printed) into a new collection, through a bibr server's jobs API. It is
+  not part of the Python package.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
