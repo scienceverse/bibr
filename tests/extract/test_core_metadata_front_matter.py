@@ -2280,3 +2280,66 @@ async def test_only_the_title_and_keywords_call_reads_the_keyword_footnote(monke
     )
     assert "Memory consolidation" not in call.kwargs["authors_text"]
     assert "Memory consolidation" not in call.kwargs["classification_text"]
+
+
+def test_author_context_keeps_a_title_row_that_ran_on_into_the_byline():
+    """A title without a stop joins the name line under it; the names must stay in
+    the author context even though the rows after the title hold none."""
+    from bibr.extract.core_metadata import render_author_context, render_block_context
+
+    title = _candidate(
+        "c1",
+        "Inclusion Bayes Factors for Conditional Independence in Latent Network Modeling Fatih Ozkan",
+        roles=frozenset({"title"}),
+        text_ids=(1,),
+    )
+    affiliation = _candidate("c2", "Baylor University", roles=frozenset({"byline"}), text_ids=(2,))
+    note = _candidate("c3", "Author Note", roles=frozenset({"byline"}), text_ids=(3,))
+    abstract = _candidate(
+        "c4", "The latent network model ...", roles=frozenset({"abstract"}), text_ids=(4,)
+    )
+    resolution = _resolution(title, affiliation, note, abstract)
+
+    context = render_author_context(resolution, full_text=render_block_context(resolution))
+
+    assert "Fatih Ozkan" in context
+    assert context == (
+        "Inclusion Bayes Factors for Conditional Independence in Latent Network Modeling Fatih Ozkan\n"
+        "Baylor University\nAuthor Note"
+    )
+
+
+def test_author_context_starts_below_the_title_when_a_row_below_names_someone():
+    from bibr.extract.core_metadata import render_author_context, render_block_context
+
+    title = _candidate(
+        "c1", "Shared Gardens in the City", roles=frozenset({"title"}), text_ids=(1,)
+    )
+    names = _candidate(
+        "c2", "Marie Dubois and Luc Martin", roles=frozenset({"byline"}), text_ids=(2,)
+    )
+    affiliation = _candidate("c3", "Baylor University", roles=frozenset({"byline"}), text_ids=(3,))
+    abstract = _candidate("c4", "Gardens ...", roles=frozenset({"abstract"}), text_ids=(4,))
+    resolution = _resolution(title, names, affiliation, abstract)
+
+    context = render_author_context(resolution, full_text=render_block_context(resolution))
+
+    assert context == "Marie Dubois and Luc Martin\nBaylor University"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Fatih Ozkan", True),
+        ("Marie Dubois, Pieter Janssens et Luc Van Damme", True),
+        ("Jane A. Smith1, Bob Lee2", True),
+        ("Author Note", False),
+        ("Baylor University", False),
+        ("Edited by Jane Smith", False),
+        ("Department of Psychology, University of Toronto", False),
+    ],
+)
+def test_names_a_person(text, expected):
+    from bibr.extract.front_matter import names_a_person
+
+    assert names_a_person(text) is expected
