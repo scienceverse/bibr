@@ -25,6 +25,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   restores the old grouping on a CPU. See
   [Sentence splitter calls](docs/guides/model-runtime.md#sentence-splitter-calls).
 
+- A run that cannot use the machine's NVIDIA card no longer starts
+  `nvidia-smi` to choose its memory mode. That is a run on an install with no
+  CUDA build of onnxruntime and no torch, with no local LLM server of bibr's
+  and a text-layer, cloud or URL OCR route; a default `bibr chew --fast` is
+  one. bibr already planned such a run as if the card were absent, but asked
+  for the card's size first. On a laptop whose NVIDIA card was asleep the
+  question woke the card, which took 1.9 s at the start of every run. The
+  memory mode chosen is the same as before.
+
 ## [0.9.2] - 2026-11-24
 
 A speed and links release. On a CUDA machine the default local plan gets

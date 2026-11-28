@@ -264,6 +264,11 @@ def _default_memory_mode(
     onto (see ``_cuda_card_stays_empty``) is planned for as if it were absent,
     so a small card beside a CPU-only install does not put a text-layer run in
     the aggressive mode (3 papers a chunk, the layout model reloaded for each).
+
+    Such a run is not asked for its card at all. ``detect_hardware`` runs
+    ``nvidia-smi``, and on a laptop whose NVIDIA card is asleep that wakes the
+    card, which took 1.9 s at the start of every run; ``_run_memory_mode``
+    gives the same mode for a card that stays empty whatever its size.
     """
     from bibr.config import snapshot_settings
 
@@ -271,13 +276,16 @@ def _default_memory_mode(
     configured = effective.pipeline.memory_mode
     if configured:
         return cast("MemoryMode", configured)
+    system_ram_gb = _get_system_memory_gb()
+    if _cuda_card_stays_empty(ocr_backend, ocr_url, llm_backend):
+        return _auto_memory_mode(None, None, system_ram_gb)
     from bibr.local.llm_models import detect_hardware
 
     platform_key, memory_gb = detect_hardware()
     return _run_memory_mode(
         platform_key,
         memory_gb,
-        _get_system_memory_gb(),
+        system_ram_gb,
         llm_backend=llm_backend,
         ocr_backend=ocr_backend,
         ocr_url=ocr_url,
