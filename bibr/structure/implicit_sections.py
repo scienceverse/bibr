@@ -149,6 +149,12 @@ def _is_correspondence_heading(text: str) -> bool:
     return first_alpha.isupper()
 
 
+def _reads_as_unstyled_heading(text: str) -> bool:
+    """A short row that does not end like a sentence: a heading typed as body text."""
+    stripped = text.strip()
+    return bool(stripped) and len(stripped.split()) <= 12 and stripped[-1] not in ".?!;,)]"
+
+
 def _first_processed_page(contents: PaperContents) -> int | None:
     """Return the first page this parse saw, or None when the input has no pages.
 
@@ -217,6 +223,18 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
             and candidate.roles.isdisjoint(unsafe_roles)
         )
 
+    def _is_abstract_label(candidate) -> bool:
+        # A Word manuscript's "Abstract" is often a bold Normal paragraph, not
+        # a Heading style, so the native parse keeps it as a body row. The
+        # bare label opens the span like a heading; it is not abstract text.
+        # Page-less (native) input only: a PDF's layout finds its headings.
+        return bool(
+            front_page is None
+            and candidate.source_kind == "paragraph"
+            and normalize_text(candidate.raw_text).rstrip(":").strip() == "abstract"
+            and candidate.roles.isdisjoint(unsafe_roles)
+        )
+
     def _has_explicit_abstract_boundary(candidate) -> bool:
         current_sections = [
             sections_by_id.get(current_section_ids.get(text_id)) for text_id in candidate.text_ids
@@ -237,6 +255,7 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
                 (candidate.region_label or "").casefold() == "abstract"
                 or section_types.get(candidate.section_id) == CanonicalSection.ABSTRACT
                 or _is_abstract_heading(candidate)
+                or _is_abstract_label(candidate)
                 or generated_abstract
             )
         )
@@ -265,8 +284,10 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
     previous_order: int | None = None
     previous_page: int | None = None
     continuation = False
+    label_opened = False
     for candidate in candidates:
         is_abstract_heading = _is_abstract_heading(candidate)
+        is_abstract_label = _is_abstract_label(candidate)
         explicit = _has_explicit_abstract_boundary(candidate)
         unsafe = bool(
             not candidate.roles.isdisjoint(unsafe_roles)
@@ -292,7 +313,8 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
             if front_page is not None and candidate.page != front_page:
                 state = "stopped"
                 break
-            if is_abstract_heading and not candidate_ids:
+            if (is_abstract_heading and not candidate_ids) or is_abstract_label:
+                label_opened = is_abstract_label
                 state = "heading_open"
                 previous_order = candidate.reading_order
                 previous_page = candidate.page
@@ -324,6 +346,11 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
                 state = "stopped"
                 break
             if state == "heading_open" and candidate.source_kind == "heading":
+                state = "stopped"
+                break
+            # Past a bare label the document's unstyled headings ("Introduction",
+            # "Significance Statement", the title again) are paragraphs too.
+            if label_opened and _reads_as_unstyled_heading(candidate.raw_text):
                 state = "stopped"
                 break
             state = "open"
