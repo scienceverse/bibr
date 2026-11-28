@@ -3141,7 +3141,19 @@ class GlobalSettings(_BibrSettings):
         description="OCR server base URL (Docker Compose overrides this with its private bibr-ocr host).",
     )
     SEGMENTER_SUB_BATCH_SIZE: int = Field(
-        32, description="Sub-batch size for sentence segmentation."
+        32,
+        description="Texts per sentence-splitter call on a CUDA session, and the most texts "
+        "bibr serve gathers into one splitter batch.",
+    )
+    # wtpsplit pads every text of a call to the longest one in it. On a CPU the
+    # padded positions cost more than batching saves, so each text is split on
+    # its own (see BaseSentenceSegmenter._split_many).
+    SEGMENTER_CPU_SUB_BATCH_SIZE: int = Field(
+        1,
+        ge=1,
+        description="Texts per sentence-splitter call on a CPU session. With 1, each text is "
+        "split on its own: nothing is padded, and its sentences do not depend on the other "
+        "texts of the batch. 32 restores the grouping of 0.9.2 and earlier.",
     )
     SEGMENTER_GPU_MEM_LIMIT_MB: int = Field(
         0, description="GPU memory limit in MB for the sentence segmenter (0 = unlimited)."

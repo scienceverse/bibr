@@ -600,6 +600,33 @@ pass and unused blocks return to the OS after each run:
 Neither setting changes a result, only where tensors are allocated. CUDA sessions are not
 touched; they have their own arena, which bibr shrinks after every run.
 
+## Sentence splitter calls
+
+The sentence splitter (wtpsplit) pads every text of a call to the longest text in it. How bibr
+groups a paper's paragraphs into calls therefore decides how much of the model's work is padding:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SEGMENTER_CPU_SUB_BATCH_SIZE` | `1` | Texts per call on a CPU session. With `1` each text is split on its own. |
+| `SEGMENTER_SUB_BATCH_SIZE` | `32` | Texts per call on a CUDA session, shortest first so a call holds texts of similar length. Also the most texts `bibr serve` gathers into one splitter batch. |
+
+On a CPU the padding costs more than batching saves. On 20 born-digital papers (1,080
+paragraphs) the splitter took 41 s on four cores with one text per call, 52 s in groups of 8
+and 91 s in groups of 32, which is what bibr used up to 0.9.2; on two cores it took 63, 82 and
+143 s. End to end, a cold `bibr chew --fast` of one paper on four cores went from 14.6 to
+12.6 s for a 6-page paper, from 20.0 to 16.2 s for a 10-page one and from 25.0 to 22.9 s for a
+19-page one. Only a run of very short texts on many threads is a little slower one at a time:
+212 texts under 120 characters took 1.7 s on 20 threads, against 1.5 s in groups of 32.
+
+A text split on its own also gets sentences that depend on that text alone. In a group, a
+break's score moves a little with the texts beside it (about 0.002), so a break whose score sits
+at the threshold can come out differently when the texts around a paragraph change: after a
+change elsewhere in the paper, or beside another request's texts on `bibr serve`. That still
+holds on CUDA, where the texts stay grouped. For the same reason `SEGMENTER_CPU_SUB_BATCH_SIZE` is not a pure
+speed setting: a value above `1` can move such a break. On the 20 papers one text per call
+returned the same sentences as groups of 32 for every paragraph, and groups of 8 moved two
+breaks.
+
 ## Layout model generation
 
 bibr ships with PP-DocLayoutV3 and can also run PP-DocLayoutV4, which keeps

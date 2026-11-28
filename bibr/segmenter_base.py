@@ -382,6 +382,17 @@ def _coerce_split_text(text: Any) -> str:
     return str(text)
 
 
+def _runs_on_cpu_provider(session: Any) -> bool:
+    """True when ``session`` runs on onnxruntime's CPU provider.
+
+    Read from the session's own provider list, whose head is the provider that
+    runs the graph: a session on CUDA, or on any other accelerator, lists that
+    provider first and the CPU one after it.
+    """
+    providers = session.get_providers()
+    return bool(providers) and providers[0] == "CPUExecutionProvider"
+
+
 def _is_tokenizer_textencode_error(exc: Exception) -> bool:
     return "TextEncodeInput" in str(exc)
 
@@ -524,6 +535,9 @@ class BaseSentenceSegmenter:
         # What a CPU copy needs, opened only when one text does not fit on a
         # nearly full GPU (see ``_split_batch_with_retry``).
         self._device = device
+        # How texts are grouped into calls depends on the provider the session
+        # really runs on (see ``_sub_batch_size``).
+        self._cpu_session = _runs_on_cpu_provider(session)
         self._sat_target = sat_target
         self._sat_tokenizer = model_kwargs["tokenizer_name_or_path"]
         self._cpu_model: SaT | None = None
@@ -558,24 +572,36 @@ class BaseSentenceSegmenter:
         except Exception as e:
             logger.warning("SentenceSegmenter warmup failed: %s", e)
 
+    def _sub_batch_size(self) -> int:
+        """Texts per wtpsplit call on the session this segmenter runs on."""
+        if getattr(self, "_cpu_session", False):
+            return self._settings.SEGMENTER_CPU_SUB_BATCH_SIZE
+        return self._settings.SEGMENTER_SUB_BATCH_SIZE
+
     def _split_many(self, texts: list[str]) -> list[list[str]]:
-        """Split each text into sentences using batch inference.
+        """Split each text into sentences.
 
-        Processes texts in sub-batches of SEGMENTER_SUB_BATCH_SIZE to prevent
-        GPU OOM when many texts are batched together (large papers or
-        concurrent requests sharing the same GPU).
+        wtpsplit pads every text of a call to the longest one in it, so how
+        the texts are grouped into calls decides how much of the model's work
+        is padding.
 
-        The texts are batched shortest first and the results put back in input
-        order. wtpsplit pads every text of a call to the longest one in it, so
-        in document order a single long paragraph made its 31 neighbours run at
-        its length; sorted, a sub-batch holds texts of similar length. A break's
-        score moves a little with the batch (about 0.002), so a break right at
-        the threshold can flip; almost every text keeps its sentences.
+        On a CPU session each text gets its own call
+        (SEGMENTER_CPU_SUB_BATCH_SIZE, 1 by default). Nothing is padded, and on
+        a CPU that is worth more than the calls it adds. A text's sentences
+        then also depend on that text alone, not on the texts it arrived with.
+
+        On CUDA the texts go in groups of SEGMENTER_SUB_BATCH_SIZE, which also
+        bounds the memory of one call (large papers, or concurrent requests
+        sharing the GPU). They are batched shortest first and the results put
+        back in input order, so a group holds texts of similar length; in
+        document order a single long paragraph made its 31 neighbours run at
+        its length. In a group a break's score moves a little with the batch
+        (about 0.002), so a break right at the threshold can flip.
         """
         if not texts:
             return []
 
-        sub_batch = self._settings.SEGMENTER_SUB_BATCH_SIZE
+        sub_batch = self._sub_batch_size()
         if len(texts) > sub_batch:
             logger.debug("Sub-batching %d texts into groups of %d", len(texts), sub_batch)
 
