@@ -1,6 +1,6 @@
 # Known limitations
 
-Last updated: 2026-11-16
+Last updated: 2026-11-18
 
 bibr is alpha software. It already exports rich paper structure, metadata,
 references, cross-references, tables, figures, equations, and provenance fields,
@@ -44,9 +44,9 @@ because bibr changes every week.
 
 The results on this page were measured in **full mode**, with a language model
 reading the front matter. bibr runs in **fast mode** (local models only, no
-language model and no API key) when none is configured, and this page does not
-yet report a fast-mode score on these answer keys; what it knows about fast
-mode is under [Choosing an extraction model](#choosing-an-extraction-model).
+language model and no API key) when none is configured. The whole-paper row
+below also gives fast mode's score on the sealed test; the rest of what we know
+about fast mode is under [Choosing an extraction model](#choosing-an-extraction-model).
 
 Most of these results use Qwen3.8-27B, a large open model, to read the front
 matter (title, authors, abstract and so on). The sealed whole-paper test used
@@ -56,7 +56,7 @@ development papers the smaller models score lower than the 27B; see
 
 | Part | What it does | Rating | How we know | Latest result |
 |---|---|---|---|---|
-| Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Sealed test, now public | 91.0% of 200 recent behavioural-science papers and 91.0% of 100 from 8 other fields, published July to October 2026 and kept out of development (GROBID 0.9.0: 61.5% and 63.0%). With bibr extract 4B, against the publishers' JATS XML checked against the PDF. Papers, answer key and per-paper scores: [bibr JATS benchmark](https://github.com/scienceverse/bibr-jats-eval). bibr's lead is in the front matter; references were roughly a tie, with GROBID slightly ahead on journal, volume and pages. The papers are English, open-access articles from selected journals, not a random sample, and GROBID failed every Frontiers paper because it lists the handling editor and reviewers as authors. On 200 social-science papers from our development sets, the 15 October build with the 4B passed 91.0% (GROBID 0.9.1: 52.5%). On 6 October, an earlier build with the 27B passed 96.0% of them, and 89.1% of 192 papers across fields (46.4%). Oct 2026 |
+| Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Sealed test, now public | 91.0% of 200 recent behavioural-science papers and 91.0% of 100 from 8 other fields, published July to October 2026 and kept out of development (GROBID 0.9.0: 61.5% and 63.0%). With bibr extract 4B, against the publishers' JATS XML checked against the PDF. Papers, answer key and per-paper scores: [bibr JATS benchmark](https://github.com/scienceverse/bibr-jats-eval). bibr's lead is in the front matter; references were roughly a tie, with GROBID slightly ahead on journal, volume and pages. The papers are English, open-access articles from selected journals, not a random sample, and GROBID failed every Frontiers paper because it lists the handling editor and reviewers as authors. On 200 social-science papers from our development sets, the 15 October build with the 4B passed 91.0% (GROBID 0.9.1: 52.5%). On 6 October, an earlier build with the 27B passed 96.0% of them, and 89.1% of 192 papers across fields (46.4%). In the 0.9.1 release evaluation on the same 300 sealed-test papers, the default path with the 4B passed 94.0% and 89.0%, and fast mode reading the text layer on a CPU, with no language model, passed 90.5% and 91.0%. Counting the 90 simulated scans as well, 0.9.1 passed 2.1 points fewer papers than the 15 October build (95% CI 0.8 to 3.6 points), mostly on author names, and Qwen3.8-27B in place of the 4B made no measurable difference (+0.3 points, 95% CI −1.0 to +1.5). Nov 2026 |
 | Title and DOI | The paper's own title and DOI | 🟢 Strong | Answer key | Title exactly right 98.4%, DOI 100%, on 192 papers. Oct 2026 |
 | Author names | Every author's full name, in order | 🟢 Strong | Answer key | 0.99 F1 on 192 papers. Oct 2026 |
 | Abstract | The abstract text | 🟢 Strong | Answer key | 0.94 text overlap (ROUGE-L) on 178 papers. Oct 2026 |
@@ -65,7 +65,7 @@ development papers the smaller models score lower than the 27B; see
 | Reference list | Finds and splits every printed reference | 🟢 Strong | Answer key | 0.96 F1 on 188 papers, 0.98 on 200. Oct 2026 |
 | Reference details | Authors, title, year, DOI, journal and pages of each reference | 🟢 Strong for authors, titles and years · 🟡 Good for DOIs · 🟠 Fair for journal names and pages | Answer key; sealed test for footnote styles | Authors 0.98, titles 0.96, years 0.98, DOIs 0.93, journals 0.73 on 192 papers (Oct 2026); pages 0.65 (Sep 2026). Footnote styles and other languages are harder: every field right on 42% of 9,728 German, Italian and English footnote references (sealed test) and 56% of 10,000 RenoBench references |
 | Reference reviewer (opt-in, experimental) | A small fine-tuned model (0.8B) double-checks the parsed references. Needs a GPU server | 🟡 Good, for the model on its own | Sealed test | Every field right on 82.6% of the sealed footnote references above (built-in parser: 42.4%), and on 68.0% of RenoBench references it never saw (55.7%). Not yet measured inside bibr. Oct 2026 |
-| Scanned papers | Scans and image-only PDFs, read with bibr's own OCR | 🟡 Good | Answer key; sealed test for simulated scans, now public | 80.0% of 80 real scans from before 2000 pass with the 15 October build and the 4B (GROBID: 23.8%). On 6 October, an earlier build with the 27B passed 82.5%, including all 8 scans with no text layer at all, where GROBID passed none. When 90 of the sealed-test papers were turned into image-only scans, bibr passed 94.4%, about the same as on the originals; GROBID can't read image-only PDFs. Slower than born-digital PDFs. Oct 2026 |
+| Scanned papers | Scans and image-only PDFs, read with bibr's own OCR | 🟡 Good | Answer key; sealed test for simulated scans, now public | 80.0% of 80 real scans from before 2000 pass with the 15 October build and the 4B (GROBID: 23.8%). On 6 October, an earlier build with the 27B passed 82.5%, including all 8 scans with no text layer at all, where GROBID passed none. When 90 of the sealed-test papers were turned into image-only scans, bibr passed 94.4%, about the same as on the originals; GROBID can't read image-only PDFs. In the 0.9.1 release evaluation, the default path passed 92.2% of those 90 scans (90.0% of 60 behavioural-science and 96.7% of 30 other papers). Slower than born-digital PDFs. Nov 2026 |
 | Body text and headings | The running text, its headings and how they nest | 🟡 Good | Answer key | Sections recovered 0.81, headings found 0.85, nesting right 0.89. Oct 2026 |
 | Section types | Labels sections as introduction, methods, results and so on | 🟡 Good in English · 🔴 Weak in other languages | Answer key | 88% of sections typed right on 119 papers (Oct 2026). The classifier retrained for 0.7.1 mostly helps unusual English headings; other languages still lag |
 | Tables | Finds each table and its caption | 🟡 Good · 🟠 Fair for captions | Answer key, not yet checked by people | Tables found: 0.92 F1. Captions 0.56 similarity. Cell structure not measured. Oct 2026 |
@@ -121,8 +121,14 @@ how to use another model.
 **Fast mode** (the default when no language model is configured) uses none of
 these models. It needs no GPU: it reads born-digital PDFs from their text layer
 (see [the text-layer route](#the-text-layer-route-reads-born-digital-pdfs-only)),
-and a scanned PDF needs an OCR route. This page has no fast-mode score on the
-252 papers above. What it does report: on 70 scanned papers of a development
+and a scanned PDF needs an OCR route. On the 300 born-digital papers of the
+sealed whole-paper test, fast mode in 0.9.1 reading the text layer passed 90.7%,
+1.7 points below the default path with the 4B (95% CI −4.7 to +1.0, so not a
+measurable difference), against 62.0% for GROBID. On 120 born-digital papers
+(1,890 pages) it read 458 papers an hour on an 8-core CPU with no GPU, about 90%
+of the default path's speed on an RTX 5090 (509 papers an hour). With
+PaddleOCR-VL on that GPU, fast mode read 941 papers an hour and passed 91.5% of
+the 390 papers including the scans. Earlier results: on 70 scanned papers of a development
 set, reading the scans' own OCR text layer let a fast run read 64 instead of 5,
 and 38 of the 59 it added met the pass floors (title, authors, reference
 matching), against 41 when the same build read them with an OCR model and 47
