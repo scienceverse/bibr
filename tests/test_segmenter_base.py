@@ -643,6 +643,33 @@ def test_segmenter_cuda_session_keeps_default_session_options(monkeypatch):
     assert "ort_kwargs" not in init["kwargs"]
 
 
+@pytest.mark.parametrize(
+    ("requested", "session_providers", "texts_per_call"),
+    [
+        (None, ["CPUExecutionProvider"], 1),
+        (_CUDA_CHAIN, ["CUDAExecutionProvider", "CPUExecutionProvider"], 32),
+        # onnxruntime dropped the CUDA provider it was asked for: a CPU session.
+        (_CUDA_CHAIN, ["CPUExecutionProvider"], 1),
+    ],
+)
+def test_segmenter_sizes_its_calls_for_the_provider_its_session_runs_on(
+    monkeypatch, requested, session_providers, texts_per_call
+):
+    """A CPU session splits each text on its own; a CUDA session keeps groups of
+    SEGMENTER_SUB_BATCH_SIZE. The session's own provider list decides, not the request."""
+    monkeypatch.setattr(Settings, "SEGMENTER_SUB_BATCH_SIZE", 32)
+    monkeypatch.setattr(Settings, "SEGMENTER_CPU_SUB_BATCH_SIZE", 1)
+
+    segmenter, _, _ = _build_segmenter(
+        monkeypatch,
+        model_name="sat-6l-sm",
+        requested_providers=requested,
+        session_providers=session_providers,
+    )
+
+    assert segmenter._sub_batch_size() == texts_per_call
+
+
 # ORT's constructor failure when the segmenter's CUDA session could not be
 # created on a nearly full 8 GB card (an emulated card with a desktop, 15:32:12).
 _SESSION_ARENA_OOM = (
@@ -702,6 +729,7 @@ def test_segmenter_opens_on_the_cpu_when_its_cuda_session_cannot_be_created(monk
         ["CPUExecutionProvider"],
     ]
     assert segmenter._device == "cpu"
+    assert segmenter._cpu_session is True
     assert init["reported_device"] == "cpu"
     assert (
         "SentenceSegmenter (wtpsplit-sat) could not open its CUDA session: GPU out of memory "
@@ -747,3 +775,69 @@ def test_split_many_batches_shortest_first_and_keeps_input_order():
     assert out == [[f"s:{t}"] for t in texts]
     assert seen == [["a", "dd"], ["ee", "bbb"], ["cccc", "fffffff"]]
     assert seg._split_many([]) == []
+
+
+def _split_many_calls(texts: list[str], *, cpu_session: bool, **settings: int):
+    """Run ``_split_many`` on a stub model; return its result and the batch of every call."""
+    seg = object.__new__(BaseSentenceSegmenter)
+    model = _EchoSplitModel()
+    seen: list[list[str]] = []
+
+    def split(batch, **kwargs):
+        seen.append(list(batch))
+        return [[f"s:{item}"] for item in batch]
+
+    model.split = split  # type: ignore[method-assign]
+    seg.model = model
+    seg._threshold = None
+    seg._cpu_session = cpu_session
+    seg._settings = SimpleNamespace(**settings)
+    return seg._split_many(texts), seen
+
+
+def test_split_many_on_a_cpu_session_splits_each_text_on_its_own():
+    """wtpsplit pads a call to its longest text. On a CPU each text gets its own call: nothing is
+    padded, and a text's sentences do not depend on the texts it arrived with."""
+    texts = ["cccc", "a", "bbb", "dd"]
+
+    out, seen = _split_many_calls(
+        texts, cpu_session=True, SEGMENTER_SUB_BATCH_SIZE=32, SEGMENTER_CPU_SUB_BATCH_SIZE=1
+    )
+
+    assert out == [[f"s:{t}"] for t in texts]
+    assert seen == [["a"], ["dd"], ["bbb"], ["cccc"]]
+
+
+def test_split_many_cpu_sub_batch_size_brings_back_sorted_groups():
+    """SEGMENTER_CPU_SUB_BATCH_SIZE above 1 groups a CPU session's texts as before, shortest
+    first; SEGMENTER_SUB_BATCH_SIZE plays no part there."""
+    texts = ["cccc", "a", "bbb", "dd", "ee", "fffffff"]
+
+    out, seen = _split_many_calls(
+        texts, cpu_session=True, SEGMENTER_SUB_BATCH_SIZE=32, SEGMENTER_CPU_SUB_BATCH_SIZE=2
+    )
+
+    assert out == [[f"s:{t}"] for t in texts]
+    assert seen == [["a", "dd"], ["ee", "bbb"], ["cccc", "fffffff"]]
+
+
+def test_split_many_on_a_cuda_session_ignores_the_cpu_sub_batch_size():
+    texts = ["cccc", "a", "bbb", "dd", "ee"]
+
+    out, seen = _split_many_calls(
+        texts, cpu_session=False, SEGMENTER_SUB_BATCH_SIZE=4, SEGMENTER_CPU_SUB_BATCH_SIZE=1
+    )
+
+    assert out == [[f"s:{t}"] for t in texts]
+    assert seen == [["a", "dd", "ee", "bbb"], ["cccc"]]
+
+
+def test_cpu_sub_batch_size_is_one_text_by_default_and_at_least_one():
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings
+
+    assert GlobalSettings().SEGMENTER_CPU_SUB_BATCH_SIZE == 1
+    assert GlobalSettings(SEGMENTER_CPU_SUB_BATCH_SIZE=32).SEGMENTER_CPU_SUB_BATCH_SIZE == 32
+    with pytest.raises(ValidationError):
+        GlobalSettings(SEGMENTER_CPU_SUB_BATCH_SIZE=0)

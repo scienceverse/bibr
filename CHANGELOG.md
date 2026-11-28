@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- On a CPU the sentence splitter now splits each text in a call of its own
+  (new setting `SEGMENTER_CPU_SUB_BATCH_SIZE`, default 1). wtpsplit pads every
+  text of a call to the longest text in it, and on a CPU the padding costs more
+  than batching saves. On 20 born-digital papers (1,080 paragraphs) the
+  splitter took 41 s on four cores, against 91 s in the groups of 32 that bibr
+  used up to 0.9.2, and 63 s against 143 s on two cores. A cold
+  `bibr chew --fast` of one paper on four cores went from 14.6 to 12.6 s for a
+  6-page paper, from 20.0 to 16.2 s for a 10-page one and from 25.0 to 22.9 s
+  for a 19-page one, and a 20-paper `bibr batch` used about 12% fewer
+  CPU-seconds. Every export of those runs was the same as before. A text's
+  sentences now depend on that text alone; in a group, a break whose score sits
+  at the threshold can come out differently when the texts beside it change, so
+  on other papers such a break can move. CUDA sessions keep groups of
+  `SEGMENTER_SUB_BATCH_SIZE` (32), and `SEGMENTER_CPU_SUB_BATCH_SIZE=32`
+  restores the old grouping on a CPU. See
+  [Sentence splitter calls](docs/guides/model-runtime.md#sentence-splitter-calls).
+
 ## [0.9.2] - 2026-11-24
 
 A speed and links release. On a CUDA machine the default local plan gets
